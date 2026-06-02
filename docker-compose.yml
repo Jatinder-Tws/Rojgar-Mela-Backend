@@ -1,0 +1,80 @@
+services:
+  postgres:
+    image: ankane/pgvector:latest
+    environment:
+      POSTGRES_USER: jobmatch
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: jobmatch_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jobmatch -d jobmatch_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  pgadmin:
+    image: dpage/pgadmin4
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@jobmatch.ai
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://jobmatch:secret@postgres:5432/jobmatch_db
+      - REDIS_URL=redis://redis:6379/0
+      - FRONTEND_URL=http://localhost:5173
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - .:/app
+      - uploads_data:/app/uploads
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+  celery-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://jobmatch:secret@postgres:5432/jobmatch_db
+      - REDIS_URL=redis://redis:6379/0
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - .:/app
+      - uploads_data:/app/uploads
+    command: celery -A services.celery_app worker --loglevel=info --pool=solo
+
+volumes:
+  pg_data:
+  redis_data:
+  uploads_data:
