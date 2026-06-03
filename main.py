@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 import logging
+import os
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,6 +11,7 @@ from pathlib import Path
 from config import settings, get_cors_allow_origins, get_cors_origin_regex
 from database import init_db, AsyncSessionLocal, engine
 from seed_master import seed_master_data
+from seed_state import is_master_seed_completed, mark_master_seed_completed
 
 logger = logging.getLogger(__name__)
 
@@ -41,9 +43,15 @@ async def lifespan(app: FastAPI):
             text("ALTER TABLE users ADD COLUMN IF NOT EXISTS welcome_email_error TEXT")
         )
 
-    # Run seeder
-    async with AsyncSessionLocal() as session:
-        await seed_master_data(session)
+    # Run seeder once (db-init does this in production; guard avoids repeat on restart)
+    force_seed = os.getenv("FORCE_MASTER_SEED", "").lower() in ("1", "true", "yes")
+    if force_seed or not await is_master_seed_completed():
+        async with AsyncSessionLocal() as session:
+            await seed_master_data(session)
+        await mark_master_seed_completed()
+        logger.info("Master data seed applied")
+    else:
+        logger.info("Master data seed already applied — skipping")
 
     await ensure_super_admin_user()
 
@@ -107,7 +115,7 @@ app.add_middleware(
 from routers import auth, users, jobs, resumes, matches, applications, notifications, interviews, assessment, portfolio, analytics, resume_builder, onboarding, master, ai_interview, roadmap, external_candidate, master_data, ai_coach ,interview_scheduling, import_users, superadmin, super_admin, attendance # noqa
 
 
-API_PREFIX = "/api"
+API_PREFIX = ""
 
 routers = [
     jobs.router,
