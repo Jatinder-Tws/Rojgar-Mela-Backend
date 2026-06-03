@@ -203,9 +203,9 @@ async def get_all_external_applications(
         app_out = ApplicationOut(
             id=str(candidate.id),
             job_id=str(candidate.job_id) if candidate.job_id else "",
-            status=candidate.status,
+            status=str(candidate.status or "pending"),
             applied_at=candidate.applied_at,
-            updated_at=candidate.updated_at,
+            updated_at=candidate.updated_at or candidate.applied_at,
             job_title=job.title if job else "General Interest",
             job_type=job.job_type if job else "N/A",
             company_name=job.posted_by_name if job else "N/A",

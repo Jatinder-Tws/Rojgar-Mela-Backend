@@ -1,19 +1,20 @@
 import os
 import uuid
 from pathlib import Path
+from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
-from sqlalchemy import select, or_, and_, cast, String, func
+from sqlalchemy import select, or_, cast, String
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
 from database import get_db
-from models.user import User
+from models.user import User, UserRole
 from models.portfolio import Portfolio
 from schemas.portfolio import PortfolioUpdate, PortfolioOut, PortfolioCompletionOut
 from services.auth_service import require_verified, require_seeker, require_provider
-from services.portfolio_service import calculate_completion
+from services.portfolio_service import calculate_completion, portfolio_json_fields
 
 router = APIRouter(prefix="/portfolio", tags=["portfolio"])
 
@@ -28,9 +29,10 @@ def _calculate_completion(portfolio: Portfolio, user: User) -> tuple[int, list[s
 
 def _portfolio_to_out(portfolio: Portfolio, user: User) -> dict:
     pct, filled, missing = _calculate_completion(portfolio, user)
+    json_fields = portfolio_json_fields(portfolio)
     data = {
-        "id": portfolio.id,
-        "user_id": portfolio.user_id,
+        "id": str(portfolio.id),
+        "user_id": str(portfolio.user_id),
         "first_name": user.first_name,
         "last_name": user.last_name,
         "email": user.email,
@@ -38,7 +40,7 @@ def _portfolio_to_out(portfolio: Portfolio, user: User) -> dict:
         "headline": portfolio.headline,
         "bio": portfolio.bio,
         "date_of_birth": portfolio.date_of_birth,
-        "gender": portfolio.gender,
+        "gender": portfolio.gender or getattr(user, "gender", None),
         "city": portfolio.city,
         "state": portfolio.state,
         "linkedin_url": portfolio.linkedin_url,
@@ -47,12 +49,7 @@ def _portfolio_to_out(portfolio: Portfolio, user: User) -> dict:
         "total_experience_years": portfolio.total_experience_years,
         "current_company": portfolio.current_company,
         "current_role": portfolio.current_role,
-        "skills": portfolio.skills or [],
-        "work_experiences": portfolio.work_experiences or [],
-        "education": portfolio.education or [],
-        "certifications": portfolio.certifications or [],
-        "languages": portfolio.languages or [],
-        "projects": portfolio.projects or [],
+        **json_fields,
         "intro_video_filename": portfolio.intro_video_filename,
         "intro_audio_filename": portfolio.intro_audio_filename,
         "has_intro_video": bool(portfolio.intro_video_path),
@@ -124,50 +121,62 @@ async def get_completion(
 
 @router.get("/search", response_model=list[PortfolioOut])
 async def search_candidates(
-    q: str = None,
-    title: str = None,
-    skills: str = None,
+    q: Optional[str] = None,
+    title: Optional[str] = None,
+    skills: Optional[str] = None,
     provider: User = Depends(require_provider),
     db: AsyncSession = Depends(get_db),
 ):
     """Search candidates (seekers only)."""
-    stmt = select(Portfolio, User).join(User, Portfolio.user_id == User.id).where(User.role == "seeker", User.onboarding_complete == True)
+    q = (q or "").strip() or None
+    title = (title or "").strip() or None
+    skills = (skills or "").strip() or None
 
+    stmt = (
+        select(Portfolio, User)
+        .join(User, Portfolio.user_id == User.id)
+        .where(User.role == UserRole.seeker, User.onboarding_complete.is_(True))
+    )
+
+    text_filters = []
     if q:
         search_term = f"%{q}%"
-        stmt = stmt.where(
+        text_filters.append(
             or_(
                 User.first_name.ilike(search_term),
                 User.last_name.ilike(search_term),
+                User.email.ilike(search_term),
                 Portfolio.headline.ilike(search_term),
-                Portfolio.bio.ilike(search_term)
+                Portfolio.bio.ilike(search_term),
+                Portfolio.current_role.ilike(search_term),
+                Portfolio.city.ilike(search_term),
             )
         )
-    
+
     if title:
         title_term = f"%{title}%"
-        stmt = stmt.where(
+        text_filters.append(
             or_(
                 Portfolio.headline.ilike(title_term),
-                Portfolio.current_role.ilike(title_term)
+                Portfolio.current_role.ilike(title_term),
             )
         )
-        
+
+    if text_filters:
+        stmt = stmt.where(or_(*text_filters))
+
     if skills:
         skill_list = [s.strip() for s in skills.split(",") if s.strip()]
         if skill_list:
-            # Simple text match against the JSON column
-            skill_conditions = [cast(Portfolio.skills, String).ilike(f"%{s}%") for s in skill_list]
-            stmt = stmt.where(and_(*skill_conditions))
-            
+            skill_conditions = [
+                cast(Portfolio.skills, String).ilike(f"%{s}%") for s in skill_list
+            ]
+            stmt = stmt.where(or_(*skill_conditions))
+
     result = await db.execute(stmt)
     rows = result.all()
-    
-    out = []
-    for port, usr in rows:
-        out.append(_portfolio_to_out(port, usr))
-        
-    return out
+
+    return [_portfolio_to_out(port, usr) for port, usr in rows]
 
 
 def _media_upload_dir(user_id: str) -> Path:
