@@ -23,4 +23,4 @@ class ImportedUserPassword(Base):
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
-    user = relationship("User", backref="imported_password")
+    user = relationship("User", back_populates="imported_password")

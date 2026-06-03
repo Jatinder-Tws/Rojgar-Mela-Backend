@@ -89,6 +89,10 @@ class User(Base):
     # Seeker preferred locations (list of up to 5 cities/states)
     preferred_locations = Column(JSON, nullable=True)
 
+    # Bulk import welcome email tracking (seekers)
+    welcome_email_status = Column(String(20), nullable=True)  # pending | sent | failed
+    welcome_email_error = Column(Text, nullable=True)
+
     # Profile embedding for similarity (1536 dims = text-embedding-3-small)
     if VECTOR_AVAILABLE:
         profile_embedding = Column(Vector(3072), nullable=True)
@@ -116,4 +120,16 @@ class User(Base):
     )
     roadmaps = relationship(
         "Roadmap", back_populates="user", cascade="all, delete-orphan"
+    )
+    portfolio = relationship(
+        "Portfolio",
+        back_populates="user",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+    imported_password = relationship(
+        "ImportedUserPassword",
+        back_populates="user",
+        uselist=False,
+        cascade="all, delete-orphan",
     )

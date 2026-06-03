@@ -12,7 +12,7 @@ class TOTPService:
 
     @staticmethod
     def get_provisioning_uri(
-        email: str, secret: str, issuer_name: str = "JobMatch AI"
+        email: str, secret: str, issuer_name: str = "Rojgar Mela"
     ) -> str:
         """Generate the provisioning URI for QR codes."""
         return pyotp.totp.TOTP(secret).provisioning_uri(

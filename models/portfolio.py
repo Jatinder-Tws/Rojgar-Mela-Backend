@@ -50,4 +50,4 @@ class Portfolio(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
-    user = relationship("User", backref="portfolio", uselist=False)
+    user = relationship("User", back_populates="portfolio", uselist=False)

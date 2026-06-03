@@ -10,6 +10,8 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS highest_qualification VARCHAR(200);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS stream_specialization VARCHAR(200);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS college_institute_name VARCHAR(255);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS preferred_job_sector VARCHAR(200);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS welcome_email_status VARCHAR(20);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS welcome_email_error TEXT;
 
 -- 2. Add new columns for Providers to the 'users' table
 ALTER TABLE users ADD COLUMN IF NOT EXISTS job_roles_offering TEXT;

@@ -93,6 +93,16 @@ class ResumeOut(BaseModel):
         from_attributes = True
 
 
+class ResumeProcessingStatusOut(BaseModel):
+    has_resume: bool
+    resume_id: Optional[str] = None
+    filename: Optional[str] = None
+    processing_status: str = "idle"
+    processing_message: Optional[str] = None
+    ocr_used: bool = False
+    profile_mapped: bool = False
+
+
 class MatchedCandidateOut(BaseModel):
     match_id: str
     user_id: str
