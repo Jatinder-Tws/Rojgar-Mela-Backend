@@ -17,6 +17,7 @@ from models.roadmap import Roadmap, Milestone, Resource, MilestoneStatus, Resour
 from models.external_candidate import ExternalCandidate
 from models.external_candidate_match import ExternalCandidateMatch
 from models.master_data import Department, DepartmentJob
+from models.attendance import Attendance
 
 __all__ = [
     "User", "UserRole", "JobType", "CompanyType", "ExternalCandidate", "ExternalCandidateMatch",
@@ -35,4 +36,5 @@ __all__ = [
     "AICoachSession",
     "Roadmap", "Milestone", "Resource", 
     "MilestoneStatus", "ResourceType", "DifficultyLevel",
+    "Attendance",
 ]

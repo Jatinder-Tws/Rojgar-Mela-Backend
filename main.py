@@ -21,12 +21,8 @@ async def lifespan(app: FastAPI):
     Path(settings.UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
     # Initialize DB tables
     await init_db()
-    
-    # Run seeder
-    async with AsyncSessionLocal() as session:
-        await seed_master_data(session)
 
-    # Super admin column + default account
+    # Super admin column + default account and new email columns
     from sqlalchemy import text
     from routers.super_admin import ensure_super_admin_user
 
@@ -44,6 +40,11 @@ async def lifespan(app: FastAPI):
         await conn.execute(
             text("ALTER TABLE users ADD COLUMN IF NOT EXISTS welcome_email_error TEXT")
         )
+
+    # Run seeder
+    async with AsyncSessionLocal() as session:
+        await seed_master_data(session)
+
     await ensure_super_admin_user()
 
     # OCR readiness status (for scanned resume parsing)
@@ -103,32 +104,46 @@ app.add_middleware(
 )
 
 # ── Routers ─────────────────────────────────────────────────────────────────
-from routers import auth, users, jobs, resumes, matches, applications, notifications, interviews, assessment, portfolio, analytics, resume_builder, onboarding, master, ai_interview, roadmap, external_candidate, master_data, ai_coach ,interview_scheduling, import_users, superadmin, super_admin # noqa
+from routers import auth, users, jobs, resumes, matches, applications, notifications, interviews, assessment, portfolio, analytics, resume_builder, onboarding, master, ai_interview, roadmap, external_candidate, master_data, ai_coach ,interview_scheduling, import_users, superadmin, super_admin, attendance # noqa
 
-app.include_router(auth.router, prefix="/api")
-app.include_router(users.router, prefix="/api")
-app.include_router(jobs.router, prefix="/api")
-app.include_router(resumes.router, prefix="/api")
-app.include_router(matches.router, prefix="/api")
-app.include_router(applications.router, prefix="/api")
-app.include_router(notifications.router, prefix="/api")
-app.include_router(interviews.router, prefix="/api")
-app.include_router(assessment.router, prefix="/api")
-app.include_router(portfolio.router, prefix="/api")
-app.include_router(analytics.router, prefix="/api")
-app.include_router(resume_builder.router, prefix="/api")
-app.include_router(onboarding.router, prefix="/api")
-app.include_router(master.router, prefix="/api")
-app.include_router(ai_interview.router, prefix="/api")
-app.include_router(roadmap.router, prefix="/api")
-app.include_router(ai_coach.router, prefix="/api")
+
+API_PREFIX = "/api"
+
+routers = [
+    jobs.router,
+    resumes.router,
+    attendance.router,
+    matches.router,
+    applications.router,
+    notifications.router,
+    interviews.router,
+    assessment.router,
+    portfolio.router,
+    analytics.router,
+    resume_builder.router,
+    onboarding.router,
+    master.router,
+    ai_interview.router,
+    roadmap.router,
+    ai_coach.router,
+    interview_scheduling.router,
+    import_users.router,
+    super_admin.router,
+]
+
+app.include_router(auth.router)
+app.include_router(users.router)
 app.include_router(external_candidate.router)
 app.include_router(master_data.router)
-app.include_router(interview_scheduling.router,prefix="/api")
-app.include_router(import_users.router, prefix="/api")
-app.include_router(super_admin.router, prefix="/api")
-# ── Static Files (Uploads) ──────────────────────────────────────────────────
-app.mount("/api/uploads", StaticFiles(directory=settings.UPLOAD_DIR), name="uploads")
+
+for router in routers:
+    app.include_router(router, prefix=API_PREFIX)
+
+app.mount(
+    f"{API_PREFIX}/uploads",
+    StaticFiles(directory=settings.UPLOAD_DIR),
+    name="uploads",
+)
 
 
 # ── WebSockets ──────────────────────────────────────────────────────────────
