@@ -89,6 +89,7 @@ class AdminUserOut(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     email: Optional[str] = None
+    profile_pic_url: Optional[str] = None
     phone: str
     role: str
     has_password: bool = False
@@ -104,6 +105,8 @@ class AdminUserOut(BaseModel):
     company_location: Optional[str] = None
     company_size: Optional[str] = None
     profile_completion_percentage: Optional[int] = None
+    welcome_email_status: Optional[str] = None
+    welcome_email_error: Optional[str] = None
     created_at: datetime
 
     class Config:

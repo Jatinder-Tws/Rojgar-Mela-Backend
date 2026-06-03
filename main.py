@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import logging
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +10,8 @@ from pathlib import Path
 from config import settings, get_cors_allow_origins, get_cors_origin_regex
 from database import init_db, AsyncSessionLocal, engine
 from seed_master import seed_master_data
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -33,7 +36,24 @@ async def lifespan(app: FastAPI):
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_super_admin BOOLEAN NOT NULL DEFAULT FALSE"
             )
         )
+        await conn.execute(
+            text(
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS welcome_email_status VARCHAR(20)"
+            )
+        )
+        await conn.execute(
+            text("ALTER TABLE users ADD COLUMN IF NOT EXISTS welcome_email_error TEXT")
+        )
     await ensure_super_admin_user()
+
+    # OCR readiness status (for scanned resume parsing)
+    from services.resume_parser import get_ocr_readiness
+
+    ocr_status = get_ocr_readiness()
+    if ocr_status.get("ready"):
+        logger.info("[OCR] Ready: %s", ocr_status.get("details", "available"))
+    else:
+        logger.warning("[OCR] Not ready: %s", ocr_status.get("details", "missing configuration"))
 
     yield
 
@@ -131,3 +151,14 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "JobMatch AI"}
+
+
+@app.get("/health/ocr")
+async def health_ocr():
+    from services.resume_parser import get_ocr_readiness
+
+    status = get_ocr_readiness()
+    return {
+        "status": "ok" if status.get("ready") else "degraded",
+        "ocr": status,
+    }

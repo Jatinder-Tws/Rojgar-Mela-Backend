@@ -32,22 +32,19 @@ class Settings(BaseSettings):
     # AI_MODE: "openai" | "gemini" | "mock"
     AI_MODE: str = "openai"
 
-    # SMTP
-    SMTP_HOST: str = "smtp.gmail.com"
-    SMTP_PORT: int = 587
+    # SMTP (defaults: Mailtrap sandbox for dev)
+    SMTP_HOST: str = "sandbox.smtp.mailtrap.io"
+    SMTP_PORT: int = 2525
     SMTP_USER: str = ""
     SMTP_PASSWORD: str = ""
-    SMTP_FROM: str = "JobMatch AI <emr@tekkiwebsolutions.com>"
+    SMTP_FROM: str = "Rojgar Mela <noreply@rojgarmela.ai>"
     SMTP_TLS: bool = True
 
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
 
     # CORS — set FRONTEND_URL and/or CORS_ORIGINS on the server to match where the SPA is served
-    # FRONTEND_URL: str = "http://localhost:5173"
-    FRONTEND_URL: str = "http://192.168.0.211:9014/login"
-
-
+    FRONTEND_URL: str = "http://localhost:5173"
     CORS_ORIGINS: str = ""  # comma-separated extra origins, e.g. http://10.0.0.5:8080,https://app.example.com
     # Empty = allow typical LAN/dev hosts (192.168.x.x, 10.x, 172.16–31.x) + any port via regex.
     # Set to "none" to disable regex (only explicit origins). Or set a custom regex string.
@@ -56,15 +53,15 @@ class Settings(BaseSettings):
     # Files
     UPLOAD_DIR: str = "uploads"
     MAX_UPLOAD_MB: int = 10
+    TESSERACT_CMD: str = ""
 
     # Matching thresholds
     AUTO_MATCH_THRESHOLD: float = 0.70
     PROVIDER_MATCH_THRESHOLD: float = 0.75
 
     # Super admin (seeded on startup if missing)
-    SUPER_ADMIN_EMAIL: str = "superadmin@hirely.com"
-    SUPER_ADMIN_PASSWORD: str = ""
-    SUPERADMIN_SECRET_KEY: str = ""
+    SUPER_ADMIN_EMAIL: str = "superadmin@rojgarmela.ai"
+    SUPER_ADMIN_PASSWORD: str = "SuperAdmin@123"
 
 
 @lru_cache()

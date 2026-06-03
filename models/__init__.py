@@ -6,6 +6,7 @@ from models.application import Application, ApplicationStatus
 from models.notification import Notification, NotificationType
 from models.otp import OTPRecord
 from models.portfolio import Portfolio
+from models.imported_user_password import ImportedUserPassword
 from models.assessment import AssessmentSession, AssessmentResult
 from models.interview import Interview, InterviewSource
 from models.provider_interview_settings import ProviderInterviewSettings
@@ -26,6 +27,7 @@ __all__ = [
     "Notification", "NotificationType",
     "OTPRecord",
     "Portfolio",
+    "ImportedUserPassword",
     "AssessmentSession", "AssessmentResult",
     "Interview", "InterviewSource",
     "ProviderInterviewSettings", "ProviderAvailabilityWindow",

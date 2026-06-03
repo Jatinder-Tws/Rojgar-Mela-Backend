@@ -6,6 +6,7 @@ import re
 import aiosmtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.image import MIMEImage
 from jinja2 import Environment, FileSystemLoader
 
 from config import settings
@@ -13,6 +14,22 @@ from config import settings
 # Template engine
 _template_dir = Path(__file__).parent.parent / "templates"
 _env = Environment(loader=FileSystemLoader(str(_template_dir)), autoescape=True)
+
+_UPLOADS_DIR = Path(__file__).parent.parent / "uploads"
+
+
+def _attach_inline_image(msg: MIMEMultipart, file_path: Path, content_id: str) -> None:
+    """Attach a local image for use as cid: in HTML email bodies."""
+    if not file_path.is_file():
+        return
+    suffix = file_path.suffix.lower()
+    subtype = "jpeg" if suffix in {".jpg", ".jpeg"} else "png"
+    with open(file_path, "rb") as f:
+        data = f.read()
+    image = MIMEImage(data, _subtype=subtype)
+    image.add_header("Content-ID", f"<{content_id}>")
+    image.add_header("Content-Disposition", "inline", filename=file_path.name)
+    msg.attach(image)
 
 
 async def _send_email(to_email: str, subject: str, html_body: str) -> None:
@@ -56,7 +73,7 @@ async def send_otp_email(to_email: str, otp: str, first_name: str) -> None:
         year=datetime.utcnow().year,
         expires_minutes=10,
     )
-    await _send_email(to_email, "Verify Your JobMatch AI Account", html)
+    await _send_email(to_email, "Verify Your Rojgar Mela Account", html)
 
 
 async def send_welcome_email(to_email: str, first_name: str, role: str) -> None:
@@ -68,7 +85,7 @@ async def send_welcome_email(to_email: str, first_name: str, role: str) -> None:
         role_label=role_label,
         year=datetime.utcnow().year,
     )
-    await _send_email(to_email, f"Welcome to JobMatch AI, {first_name}!", html)
+    await _send_email(to_email, f"Welcome to Rojgar Mela, {first_name}!", html)
 
 
 async def send_notification_email(to_email: str, first_name: str, title: str, message: str) -> None:
@@ -100,7 +117,7 @@ async def send_password_email(to_email: str, first_name: str, password: str, rol
     </style></head>
     <body>
         <div class="container">
-            <div class="header"><h1>Welcome to JobMatch AI!</h1></div>
+            <div class="header"><h1>Welcome to Rojgar Mela!</h1></div>
             <div class="content">
                 <p>Hi <strong>{first_name}</strong>,</p>
                 <p>Your account has been created as a <strong>{role_label}</strong>.</p>
@@ -116,12 +133,12 @@ async def send_password_email(to_email: str, first_name: str, password: str, rol
                 </div>
                 <p>After logging in, you'll be prompted to set up Two-Factor Authentication (TOTP) for added security.</p>
             </div>
-            <div class="footer">© {datetime.utcnow().year} JobMatch AI. All rights reserved.</div>
+            <div class="footer">© {datetime.utcnow().year} Rojgar Mela. All rights reserved.</div>
         </div>
     </body>
     </html>
     """
-    await _send_email(to_email, "Your JobMatch AI Account Credentials", html)
+    await _send_email(to_email, "Your Rojgar Mela Account Credentials", html)
 
 
 async def send_job_fair_welcome_email(
@@ -144,7 +161,7 @@ async def send_job_fair_welcome_email(
     # Build the email with inline image
     # Structure: mixed -> related -> alternative (text + html) + image
     msg = MIMEMultipart("related")
-    msg["Subject"] = "Welcome to Job Fair 2026 - Complete Your Profile"
+    msg["Subject"] = "11th Mega Job Fair 2026 (4 June) – Login & Complete Your Profile"
     msg["From"] = settings.SMTP_FROM
     msg["To"] = to_email
     msg["Message-ID"] = f"<{datetime.utcnow().timestamp()}@jobmatch.ai>"
@@ -157,15 +174,8 @@ async def send_job_fair_welcome_email(
     msg_alternative.attach(MIMEText(html, "html"))
     msg.attach(msg_alternative)
 
-    # Attach the CICU logo as inline image
-    logo_path = Path(__file__).parent.parent / "uploads" / "cicu_logo.jpg"
-    if logo_path.exists():
-        with open(logo_path, "rb") as f:
-            logo_data = f.read()
-        logo_image = MIMEImage(logo_data, _subtype="jpeg")
-        logo_image.add_header("Content-ID", "<cicu_logo>")
-        logo_image.add_header("Content-Disposition", "inline", filename="cicu_logo.jpg")
-        msg.attach(logo_image)
+    _attach_inline_image(msg, _UPLOADS_DIR / "cicu_logo.jpg", "cicu_logo")
+    _attach_inline_image(msg, _UPLOADS_DIR / "rojgar_logo.png", "rojgar_logo")
 
     # Send the email
     try:

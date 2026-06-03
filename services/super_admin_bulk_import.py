@@ -187,6 +187,10 @@ async def _run_bulk_import_job_inner(job_id: str, content: bytes, role: UserRole
                     user.company_location = _pick_first_value(row, "company_location") or None
                     user.company_size = _pick_first_value(row, "company_size") or None
 
+                if role == UserRole.seeker:
+                    user.welcome_email_status = "pending"
+                    user.welcome_email_error = None
+
                 db.add(user)
                 await db.commit()
                 created += 1
@@ -202,15 +206,20 @@ async def _run_bulk_import_job_inner(job_id: str, content: bytes, role: UserRole
                             password=effective_password,
                             profile_link=profile_link,
                         )
+                        user.welcome_email_status = "sent"
+                        user.welcome_email_error = None
                         email_sent += 1
                         if len(email_logs) < 500:
                             email_logs.append(f"Row {row_num} ({email}): sent")
                     except Exception as email_exc:
+                        user.welcome_email_status = "failed"
+                        user.welcome_email_error = str(email_exc)[:500]
                         email_failed += 1
                         reason = str(email_exc)
                         if len(email_logs) < 500:
                             email_logs.append(f"Row {row_num} ({email}): failed - {reason}")
                         print(f"[EMAIL ERROR] Row {row_num}: Failed to send email to {email}: {email_exc}")
+                    await db.commit()
             except Exception as exc:
                 await db.rollback()
                 failed += 1

@@ -46,6 +46,25 @@ from services.super_admin_utils import normalize_phone as _normalize_phone, temp
 router = APIRouter(prefix="/super-admin", tags=["super-admin"])
 
 
+def _build_user_search_filter(search: str, include_company: bool = False):
+    term = f"%{search.strip()}%"
+    full_name_expr = func.concat(
+        func.coalesce(User.first_name, ""),
+        " ",
+        func.coalesce(User.last_name, ""),
+    )
+    predicates = [
+        User.first_name.ilike(term),
+        User.last_name.ilike(term),
+        full_name_expr.ilike(term),
+        User.email.ilike(term),
+        User.phone.ilike(term),
+    ]
+    if include_company:
+        predicates.append(User.company_name.ilike(term))
+    return or_(*predicates)
+
+
 def _user_to_admin_out(
     user: User, role_label: str, profile_completion_percentage: Optional[int] = None
 ) -> AdminUserOut:
@@ -60,6 +79,7 @@ def _user_to_admin_out(
         first_name=user.first_name,
         last_name=user.last_name,
         email=user.email,
+        profile_pic_url=user.profile_pic_url,
         phone=user.phone,
         role=role_label,
         has_password=bool(user.hashed_password),
@@ -75,6 +95,8 @@ def _user_to_admin_out(
         company_location=user.company_location,
         company_size=user.company_size,
         profile_completion_percentage=profile_completion_percentage,
+        welcome_email_status=user.welcome_email_status,
+        welcome_email_error=user.welcome_email_error,
         created_at=user.created_at,
     )
 
@@ -225,27 +247,39 @@ async def list_seekers(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     search: Optional[str] = None,
+    welcome_email: Optional[str] = Query(
+        None,
+        description="Filter by welcome email status: sent, failed, pending, none",
+    ),
 ):
     del admin
     term = None
     seeker_filters = [User.role == UserRole.seeker, User.is_super_admin.is_(False)]
-    if search:
-        term = f"%{search.strip()}%"
-        seeker_filters.append(
-            or_(
-                User.first_name.ilike(term),
-                User.last_name.ilike(term),
-                User.email.ilike(term),
-                User.phone.ilike(term),
+    if welcome_email:
+        status = welcome_email.strip().lower()
+        if status == "sent":
+            seeker_filters.append(User.welcome_email_status == "sent")
+        elif status == "failed":
+            seeker_filters.append(User.welcome_email_status == "failed")
+        elif status == "pending":
+            seeker_filters.append(User.welcome_email_status == "pending")
+        elif status in ("none", "na"):
+            seeker_filters.append(User.welcome_email_status.is_(None))
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="welcome_email must be one of: sent, failed, pending, none",
             )
-        )
+    if search:
+        term = search.strip()
+        seeker_filters.append(_build_user_search_filter(term))
     count_q = select(func.count(User.id)).where(*seeker_filters)
     total = await db.scalar(count_q)
     result = await db.execute(
         select(User, Portfolio)
         .outerjoin(Portfolio, Portfolio.user_id == User.id)
         .where(*seeker_filters)
-        .order_by(User.created_at.desc())
+        .order_by(User.created_at.desc(), User.id.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
     )
@@ -388,35 +422,17 @@ async def list_providers(
     search: Optional[str] = None,
 ):
     del admin
-    base = select(User).where(User.role == UserRole.provider, User.is_super_admin.is_(False))
+    provider_filters = [User.role == UserRole.provider, User.is_super_admin.is_(False)]
     if search:
-        term = f"%{search.strip()}%"
-        base = base.where(
-            or_(
-                User.first_name.ilike(term),
-                User.last_name.ilike(term),
-                User.email.ilike(term),
-                User.phone.ilike(term),
-                User.company_name.ilike(term),
-            )
-        )
-    count_q = select(func.count(User.id)).where(
-        User.role == UserRole.provider, User.is_super_admin.is_(False)
-    )
-    if search:
-        term = f"%{search.strip()}%"
-        count_q = count_q.where(
-            or_(
-                User.first_name.ilike(term),
-                User.last_name.ilike(term),
-                User.email.ilike(term),
-                User.phone.ilike(term),
-                User.company_name.ilike(term),
-            )
-        )
+        provider_filters.append(_build_user_search_filter(search.strip(), include_company=True))
+    count_q = select(func.count(User.id)).where(*provider_filters)
     total = await db.scalar(count_q)
     result = await db.execute(
-        base.order_by(User.created_at.desc()).offset((page - 1) * page_size).limit(page_size)
+        select(User)
+        .where(*provider_filters)
+        .order_by(User.created_at.desc(), User.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
     )
     users = result.scalars().all()
     return AdminUserListResponse(
