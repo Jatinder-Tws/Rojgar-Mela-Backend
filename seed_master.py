@@ -100,22 +100,28 @@ LANGUAGES = [
 ]
 
 
-ROLES = [
-    "Software Engineer",
-    "Frontend Developer",
-    "Backend Developer",
-    "Full Stack Developer",
-    "Data Scientist",
-    "Data Analyst",
-    "Product Manager",
-    "Project Manager",
-    "Sales Executive",
-    "Marketing Manager",
-    "HR Manager",
-    "Business Analyst",
-    "UI/UX Designer",
-    "DevOps Engineer"
-]
+ROLES = {
+    "Information Technology": [
+        "Software Engineer",
+        "Frontend Developer",
+        "Backend Developer",
+        "Full Stack Developer",
+        "Data Scientist",
+        "Data Analyst",
+        "UI/UX Designer",
+        "DevOps Engineer"
+    ],
+    "Consulting": [
+        "Product Manager",
+        "Project Manager",
+        "Business Analyst",
+        "HR Manager"
+    ],
+    "Marketing & Advertising": [
+        "Sales Executive",
+        "Marketing Manager"
+    ]
+}
 
 async def seed_master_data(session: AsyncSession):
     # Seed Industries
@@ -131,10 +137,14 @@ async def seed_master_data(session: AsyncSession):
             session.add(MasterLanguage(name=lang))
             
     # Seed Roles
-    for role in ROLES:
-        existing = await session.execute(select(MasterRole).where(MasterRole.name == role))
-        if not existing.scalars().first():
-            session.add(MasterRole(name=role))
+    for ind_name, roles in ROLES.items():
+        ind = await session.execute(select(MasterIndustry).where(MasterIndustry.name == ind_name))
+        ind_obj = ind.scalars().first()
+        if ind_obj:
+            for role in roles:
+                existing = await session.execute(select(MasterRole).where(MasterRole.name == role))
+                if not existing.scalars().first():
+                    session.add(MasterRole(name=role, industry_id=ind_obj.id))
             
     # Seed States and Cities
     for state_name, cities in STATES_CITIES.items():
