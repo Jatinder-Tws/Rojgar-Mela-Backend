@@ -5,6 +5,7 @@ from models.user import User
 from models.portfolio import Portfolio
 from datetime import datetime
 from models.master import MasterState, MasterCity, MasterIndustry, MasterLanguage, MasterRole
+from models.master_data import Department, DepartmentJob
 
 null = None
 true = True
@@ -194,6 +195,157 @@ STATES_CITIES = {
     ]
 }
 
+
+DEPARTMENTS_DATA = {
+    "Admissions": [],
+    "Student Services": [],
+    "Faculty Administration": [],
+    "Underwriting": [],
+    "Claims": [],
+    "Loan Processing": [],
+    "Credit Analysis": [],
+    "Civil Engineering": [],
+    "Site Operations": [],
+    "Safety": [],
+    "Project Management": [],
+    "Physical Security": [],
+    "Information Security": [],
+    "Corporate Social Responsibility": [],
+    "Environmental Health & Safety": [],
+    "Sustainability": [],
+    "Facilities": [],
+    "Housekeeping": [],
+    "Technical Writing": [],
+    "Documentation": [],
+    "Knowledge Management": [],
+    "Management": [
+        "Product Manager", "Team Lead", "Delivery Manager", 
+        "Scrum Master", "Business Analyst"
+    ],
+    "Executive Office": [],
+    "Strategy": [],
+    "Corporate Planning": [],
+    "Nursing": [],
+    "Board Administration": [],
+    "Software Development": [],
+    "Custom Development": [
+        "MERN Full Stack Developer", "Python Developer", "Mobile App Developer", 
+        "Java Developer", "PHP Developer", "Node.js Developer", "React Native Developer"
+    ],
+    "Web Development": [],
+    "Mobile Development": [],
+    "DevOps": [],
+    "Cloud Engineering": [],
+    "Infrastructure": [],
+    "Network Administration": [],
+    "Database Administration": [],
+    "Cybersecurity": [],
+    "IT Support": [],
+    "Technical Support": [
+        "Customer Support Executive", "Technical Support Engineer", 
+        "IT Support Specialist", "Desktop Support Engineer"
+    ],
+    "QA Team": [
+        "QA Engineer", "Automation Tester", "Manual Tester", 
+        "Performance Tester", "Security Analyst"
+    ],
+    "QA / Testing": [],
+    "Data Engineering": [],
+    "Artificial Intelligence / Machine Learning": [],
+    "Business Intelligence": [],
+    "Designing Team": [
+        "UI/UX Designer", "Graphic Designer", "Web Designer", 
+        "Motion Graphics Artist", "Product Designer"
+    ],
+    "UI/UX Design": [],
+    "Graphic Design": [],
+    "Product Design": [],
+    "Video Production": [],
+    "Content Creation": [],
+    "Sales Team": [
+        "Business Development Manager", "Sales Executive", "Account Manager", 
+        "Inside Sales Specialist", "Pre-Sales Engineer"
+    ],
+    "Business Development": [],
+    "Account Management": [],
+    "Inside Sales": [],
+    "Field Sales": [],
+    "Pre-Sales": [],
+    "Customer Acquisition": [],
+    "Digital Marketing": [
+        "SEO Specialist", "Content Writer", "Social Media Manager", 
+        "PPC Expert", "Digital Marketing Executive", "Email Marketer"
+    ],
+    "Brand Marketing": [],
+    "Performance Marketing": [],
+    "SEO": [],
+    "Social Media Marketing": [],
+    "Product Marketing": [],
+    "Public Relations": [],
+    "Communications": [],
+    "Human Resources": [],
+    "HR Administration": [
+        "HR Manager", "Talent Acquisition Specialist", "Admin Executive", 
+        "Office Coordinator", "Employee Relations Specialist"
+    ],
+    "Talent Acquisition": [],
+    "Recruitment": [],
+    "Learning & Development": [],
+    "Employee Relations": [],
+    "Compensation & Benefits": [],
+    "Payroll": [],
+    "Operations": [
+        "Operations Manager", "Project Coordinator", "Data Entry Operator", 
+        "Logistics Coordinator", "Supply Chain Analyst"
+    ],
+    "Process Management": [],
+    "Service Delivery": [],
+    "Resource Management": [],
+    "Administration": [],
+    "Customer Support": [],
+    "Customer Success": [],
+    "Call Center": [],
+    "Help Desk": [],
+    "Finance": [],
+    "Accounting": [],
+    "Accounts Payable": [],
+    "Accounts Receivable": [],
+    "Treasury": [],
+    "Taxation": [],
+    "Audit": [],
+    "Financial Planning & Analysis": [],
+    "Legal": [],
+    "Compliance": [],
+    "Risk Management": [],
+    "Corporate Governance": [],
+    "Procurement": [],
+    "Purchasing": [],
+    "Supply Chain": [],
+    "Logistics": [],
+    "Inventory Management": [],
+    "Vendor Management": [],
+    "Warehouse": [],
+    "Production": [],
+    "Manufacturing": [],
+    "Quality Control": [],
+    "Maintenance": [],
+    "Industrial Engineering": [],
+    "Research and Development (R&D)": [],
+    "Innovation Lab": [],
+    "Product Engineering": [],
+    "Data Science": [],
+    "Analytics": [],
+    "Reporting": [],
+    "Data Governance": [],
+    "Product Management": [],
+    "Product Strategy": [],
+    "Product Operations": [],
+    "Medical Administration": [],
+    "Laboratory": [],
+    "Pharmacy": [],
+    "Clinical Operations": [],
+    "Academic Affairs": []
+}
 
 INDUSTRIES = [
     "Information Technology",
@@ -2288,6 +2440,24 @@ PORTFOLIOS_DATA = [
 ]
 
 async def seed_master_data(session: AsyncSession):
+    # Seed Departments and Jobs
+    for dept_name, job_names in DEPARTMENTS_DATA.items():
+        existing = await session.execute(select(Department).where(Department.name == dept_name))
+        dept = existing.scalars().first()
+        if not dept:
+            dept = Department(name=dept_name)
+            session.add(dept)
+            await session.flush()
+        
+        for job_name in job_names:
+            existing_job = await session.execute(
+                select(DepartmentJob).where(DepartmentJob.name == job_name, DepartmentJob.department_id == dept.id)
+            )
+            if not existing_job.scalars().first():
+                session.add(DepartmentJob(name=job_name, department_id=dept.id))
+                
+    await session.flush()
+
     # Seed Industries
     for ind in INDUSTRIES:
         existing = await session.execute(select(MasterIndustry).where(MasterIndustry.name == ind))

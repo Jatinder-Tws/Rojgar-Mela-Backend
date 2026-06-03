@@ -21,12 +21,8 @@ async def lifespan(app: FastAPI):
     Path(settings.UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
     # Initialize DB tables
     await init_db()
-    
-    # Run seeder
-    async with AsyncSessionLocal() as session:
-        await seed_master_data(session)
 
-    # Super admin column + default account
+    # Super admin column + default account and new email columns
     from sqlalchemy import text
     from routers.super_admin import ensure_super_admin_user
 
@@ -44,6 +40,11 @@ async def lifespan(app: FastAPI):
         await conn.execute(
             text("ALTER TABLE users ADD COLUMN IF NOT EXISTS welcome_email_error TEXT")
         )
+
+    # Run seeder
+    async with AsyncSessionLocal() as session:
+        await seed_master_data(session)
+
     await ensure_super_admin_user()
 
     # OCR readiness status (for scanned resume parsing)
@@ -106,7 +107,7 @@ app.add_middleware(
 from routers import auth, users, jobs, resumes, matches, applications, notifications, interviews, assessment, portfolio, analytics, resume_builder, onboarding, master, ai_interview, roadmap, external_candidate, master_data, ai_coach ,interview_scheduling, import_users, superadmin, super_admin, attendance # noqa
 
 
-API_PREFIX = ""
+API_PREFIX = "/api"
 
 routers = [
     jobs.router,
