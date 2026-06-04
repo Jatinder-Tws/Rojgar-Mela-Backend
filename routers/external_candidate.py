@@ -16,7 +16,7 @@ from services.email_service import send_job_fair_welcome_email
 from config import settings
 from typing import List
 
-router = APIRouter(prefix="/api/external", tags=["External Candidates"])
+router = APIRouter(prefix="/external", tags=["External Candidates"])
 
 @router.post("/apply", response_model=ExternalCandidateOut)
 async def apply_for_job(
