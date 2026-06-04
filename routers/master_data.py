@@ -7,7 +7,7 @@ from models.master_data import Department, DepartmentJob
 from typing import List
 from pydantic import BaseModel
 
-router = APIRouter(prefix="/api/master", tags=["Master Data"])
+router = APIRouter(prefix="/master", tags=["Master Data"])
 
 class DepartmentOut(BaseModel):
     id: str
