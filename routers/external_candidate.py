@@ -20,43 +20,16 @@ router = APIRouter(prefix="/external", tags=["External Candidates"])
 
 @router.post("/apply", response_model=ExternalCandidateOut)
 async def apply_for_job(
+    candidate_in: ExternalCandidateCreate,
     background_tasks: BackgroundTasks,
-    candidate_data: str = Form(...),
-    resume: UploadFile = File(None),
-    profile_picture: UploadFile = File(None),
-    salary_slip: UploadFile = File(None),
-    experience_letter: UploadFile = File(None),
     db: AsyncSession = Depends(get_db),
 ):
     """
     Publicly accessible endpoint for candidates to apply for a job or express interest.
-    Accepts candidate_data as JSON string in Form data, plus optional file uploads.
+    Accepts candidate_in as JSON payload.
     """
-    import json
-    import os
-    from services.file_service import save_upload
-
-    try:
-        candidate_dict = json.loads(candidate_data)
-        candidate_in = ExternalCandidateCreate(**candidate_dict)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail="Invalid candidate data format")
-
     try:
         candidate_id = str(uuid.uuid4())
-
-        if resume:
-            file_path, _, _ = await save_upload(resume, candidate_id)
-            candidate_in.resume_url = f"/resumes/{candidate_id}/{os.path.basename(file_path)}"
-        if profile_picture:
-            file_path, _, _ = await save_upload(profile_picture, candidate_id)
-            candidate_in.profile_picture_url = f"/resumes/{candidate_id}/{os.path.basename(file_path)}"
-        if salary_slip:
-            file_path, _, _ = await save_upload(salary_slip, candidate_id)
-            candidate_in.salary_slip_url = f"/resumes/{candidate_id}/{os.path.basename(file_path)}"
-        if experience_letter:
-            file_path, _, _ = await save_upload(experience_letter, candidate_id)
-            candidate_in.experience_letter_url = f"/resumes/{candidate_id}/{os.path.basename(file_path)}"
 
         # Create new candidate record
         db_candidate = ExternalCandidate(**candidate_in.model_dump())
