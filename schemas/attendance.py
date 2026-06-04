@@ -22,6 +22,6 @@ class UserAttendanceResponse(BaseModel):
     id: uuid.UUID
     first_name: Optional[str]
     last_name: Optional[str]
-    email: str
+    email: Optional[str]
     phone: Optional[str]
     attendance_status: str
