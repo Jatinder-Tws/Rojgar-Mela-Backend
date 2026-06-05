@@ -210,3 +210,20 @@ async def upload_profile_pic(
     await db.refresh(user)
 
     return UserOut.model_validate(user)
+
+@router.get("/public/{user_id}", response_model=UserOut)
+async def get_public_user(
+    user_id: str,
+    db: AsyncSession = Depends(get_db)
+):
+    import uuid
+    try:
+        uid = uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid user ID")
+    res = await db.execute(select(User).where(User.id == uid))
+    user = res.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return UserOut.model_validate(user)
+
