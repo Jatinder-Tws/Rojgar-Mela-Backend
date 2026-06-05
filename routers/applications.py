@@ -118,6 +118,48 @@ async def get_my_applications(
     return out
 
 
+@router.get("/all-applicants", response_model=List[ApplicationOut])
+async def get_all_applicants(
+    user: User = Depends(require_provider),
+    db: AsyncSession = Depends(get_db),
+):
+    # Fetch all applications for all jobs posted by the provider
+    result = await db.execute(
+        select(Application, User, JobPosting)
+        .join(JobPosting, Application.job_id == JobPosting.id)
+        .outerjoin(User, Application.seeker_id == User.id)
+        .where(JobPosting.provider_id == user.id)
+        .order_by(Application.applied_at.desc())
+    )
+    rows = result.all()
+    
+    out = []
+    for app, seeker, job in rows:
+        app_out = ApplicationOut.model_validate(app)
+        
+        # Populate job details
+        app_out.job_title = job.title
+        app_out.job_type = job.job_type
+        app_out.company_name = job.posted_by_name
+        app_out.experience_required = job.experience_required
+        app_out.salary_range = job.salary_range
+        
+        # Populate seeker details
+        if seeker:
+            app_out.seeker_first_name = seeker.first_name
+            app_out.seeker_last_name = seeker.last_name
+            app_out.seeker_email = seeker.email
+            app_out.seeker_phone = seeker.phone
+            app_out.seeker_profile_pic_url = seeker.profile_pic_url
+        else:
+            app_out.seeker_first_name = app.candidate_name
+            app_out.seeker_last_name = ""
+            
+        out.append(app_out)
+        
+    return out
+
+
 @router.get("/job/{job_id}", response_model=List[ApplicationOut])
 async def get_job_applications(
     job_id: str,
