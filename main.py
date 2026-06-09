@@ -71,7 +71,7 @@ app = FastAPI(
     title="JobMatch AI API",
     description="AI-powered bidirectional job matching platform",
     version="1.0.0",
-    lifespan=lifespan,
+    # lifespan=lifespan,
 )
 
 # ── Custom Exception Handler for Validation Errors ──────────────────────────
@@ -112,7 +112,7 @@ app.add_middleware(
 )
 
 # ── Routers ─────────────────────────────────────────────────────────────────
-from routers import auth, users, jobs, resumes, matches, applications, notifications, interviews, assessment, portfolio, analytics, resume_builder, onboarding, master, ai_interview, roadmap, external_candidate, master_data, ai_coach ,interview_scheduling, import_users, superadmin, super_admin, attendance # noqa
+from routers import auth, users, jobs, resumes, matches, applications, notifications, interviews, assessment, portfolio, analytics, resume_builder, onboarding, master, ai_interview, roadmap, external_candidate, master_data, ai_coach ,interview_scheduling, import_users, superadmin, super_admin, attendance, job_fair # noqa
 
 
 API_PREFIX = ""
@@ -137,6 +137,7 @@ routers = [
     interview_scheduling.router,
     import_users.router,
     super_admin.router,
+    job_fair.router,
 ]
 
 app.include_router(auth.router)

@@ -20,19 +20,54 @@ router = APIRouter(prefix="/external", tags=["External Candidates"])
 
 @router.post("/apply", response_model=ExternalCandidateOut)
 async def apply_for_job(
-    candidate_in: ExternalCandidateCreate,
     background_tasks: BackgroundTasks,
+    candidate_data: str = Form(...),
+    resume: UploadFile = File(None),
+    profile_picture: UploadFile = File(None),
+    salary_slip: UploadFile = File(None),
+    experience_letter: UploadFile = File(None),
     db: AsyncSession = Depends(get_db),
 ):
     """
     Publicly accessible endpoint for candidates to apply for a job or express interest.
-    Accepts candidate_in as JSON payload.
+    Accepts candidate_data as Form string (JSON serialized) and file uploads.
     """
     try:
         candidate_id = str(uuid.uuid4())
 
+        # Parse and validate candidate_data JSON
+        import json
+        from pydantic import ValidationError
+        try:
+            data_dict = json.loads(candidate_data)
+            candidate_in = ExternalCandidateCreate(**data_dict)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid JSON in candidate_data")
+        except ValidationError as e:
+            raise HTTPException(status_code=422, detail=e.errors())
+
+        # Save files if provided and update URLs
+        import os
+        from services.file_service import save_upload
+
+        if resume:
+            stored_path, _, _ = await save_upload(resume, candidate_id)
+            candidate_in.resume_url = f"/resumes/{candidate_id}/{os.path.basename(stored_path)}"
+        if profile_picture:
+            stored_path, _, _ = await save_upload(profile_picture, candidate_id)
+            candidate_in.profile_picture_url = f"/resumes/{candidate_id}/{os.path.basename(stored_path)}"
+        if salary_slip:
+            stored_path, _, _ = await save_upload(salary_slip, candidate_id)
+            candidate_in.salary_slip_url = f"/resumes/{candidate_id}/{os.path.basename(stored_path)}"
+        if experience_letter:
+            stored_path, _, _ = await save_upload(experience_letter, candidate_id)
+            candidate_in.experience_letter_url = f"/resumes/{candidate_id}/{os.path.basename(stored_path)}"
+
         # Create new candidate record
-        db_candidate = ExternalCandidate(**candidate_in.model_dump())
+        candidate_data_dict = candidate_in.model_dump()
+        candidate_data_dict.pop("job_fair_id", None)
+        candidate_data_dict.pop("job_fair_slug", None)
+        db_candidate = ExternalCandidate(**candidate_data_dict)
         
         # Explicitly set generated fields to avoid None values in response
         db_candidate.id = candidate_id
@@ -129,6 +164,34 @@ async def apply_for_job(
                 applied_at=db_candidate.applied_at
             )
             db.add(app_record)
+        
+        # Link to Job Fair if job_fair_id or job_fair_slug is provided
+        job_fair_id_to_link = candidate_in.job_fair_id
+        if not job_fair_id_to_link and candidate_in.job_fair_slug:
+            from models.job_fair import JobFair
+            jf_result = await db.execute(select(JobFair).filter(JobFair.slug == candidate_in.job_fair_slug))
+            jf = jf_result.scalars().first()
+            if jf:
+                job_fair_id_to_link = jf.id
+        
+        if job_fair_id_to_link:
+            from models.job_fair import JobFairSeeker
+            jfs_result = await db.execute(
+                select(JobFairSeeker).filter(
+                    JobFairSeeker.job_fair_id == job_fair_id_to_link,
+                    JobFairSeeker.seeker_id == user_id
+                )
+            )
+            jfs = jfs_result.scalars().first()
+            if not jfs:
+                jfs = JobFairSeeker(
+                    id=str(uuid.uuid4()),
+                    job_fair_id=job_fair_id_to_link,
+                    seeker_id=user_id,
+                    is_attending=True,
+                    registered_at=db_candidate.applied_at
+                )
+                db.add(jfs)
         
         await db.commit()
         await db.refresh(db_candidate)

@@ -24,6 +24,8 @@ class ExternalCandidateBase(BaseModel):
     experience_letter_url: Optional[str] = None
     profile_picture_url: Optional[str] = None
     job_id: Optional[str] = None
+    job_fair_id: Optional[str] = None
+    job_fair_slug: Optional[str] = None
 
 class ExternalCandidateCreate(ExternalCandidateBase):
     pass

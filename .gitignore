@@ -6,3 +6,5 @@ secrets.*
 credentials.json
 *.pem
 *.key
+alembic/
+alembic.ini

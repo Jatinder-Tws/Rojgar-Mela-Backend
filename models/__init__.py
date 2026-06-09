@@ -18,6 +18,7 @@ from models.external_candidate import ExternalCandidate
 from models.external_candidate_match import ExternalCandidateMatch
 from models.master_data import Department, DepartmentJob
 from models.attendance import Attendance
+from models.job_fair import JobFair, JobFairCompany, JobFairSeeker
 
 __all__ = [
     "User", "UserRole", "JobType", "CompanyType", "ExternalCandidate", "ExternalCandidateMatch",
@@ -37,4 +38,6 @@ __all__ = [
     "Roadmap", "Milestone", "Resource", 
     "MilestoneStatus", "ResourceType", "DifficultyLevel",
     "Attendance",
+    "JobFair", "JobFairCompany", "JobFairSeeker",
 ]
+
