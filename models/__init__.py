@@ -19,6 +19,8 @@ from models.external_candidate_match import ExternalCandidateMatch
 from models.master_data import Department, DepartmentJob
 from models.attendance import Attendance
 from models.job_fair import JobFair, JobFairCompany, JobFairSeeker
+from models.email_template import EmailTemplate
+from models.email_campaign import EmailCampaign, EmailCampaignRecipient, CampaignStatus, AudienceType, RecipientStatus
 
 __all__ = [
     "User", "UserRole", "JobType", "CompanyType", "ExternalCandidate", "ExternalCandidateMatch",
@@ -39,5 +41,7 @@ __all__ = [
     "MilestoneStatus", "ResourceType", "DifficultyLevel",
     "Attendance",
     "JobFair", "JobFairCompany", "JobFairSeeker",
+    "EmailTemplate",
+    "EmailCampaign", "EmailCampaignRecipient", "CampaignStatus", "AudienceType", "RecipientStatus",
 ]
 
