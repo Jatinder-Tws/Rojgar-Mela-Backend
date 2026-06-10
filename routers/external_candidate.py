@@ -12,7 +12,7 @@ from models.user import User, UserRole
 from models.imported_user_password import ImportedUserPassword
 from schemas.external_candidate import ExternalCandidateCreate, ExternalCandidateOut, ExternalCandidateMatchOut
 from services.auth_service import hash_password
-from services.email_service import send_job_fair_welcome_email
+from services.email_service import send_job_fair_welcome_email, send_password_email
 from config import settings
 from typing import List
 
@@ -97,12 +97,12 @@ async def apply_for_job(
         
         first_industry = candidate_in.industries[0] if (candidate_in.industries and len(candidate_in.industries) > 0) else None
         
+        is_new_user = False
         if db_user:
             # Update existing user details
             db_user.first_name = first_name
             db_user.last_name = last_name
             db_user.phone = candidate_in.phone
-            db_user.hashed_password = hashed_pwd
             db_user.is_verified = True
             db_user.gender = candidate_in.gender
             db_user.experience = candidate_in.total_experience
@@ -112,6 +112,7 @@ async def apply_for_job(
             db_user.updated_at = datetime.utcnow()
             user_id = db_user.id
         else:
+            is_new_user = True
             # Create a brand new user
             user_id = str(uuid.uuid4())
             db_user = User(
@@ -133,13 +134,8 @@ async def apply_for_job(
             )
             db.add(db_user)
             
-        # Create or update ImportedUserPassword record
-        pwd_result = await db.execute(select(ImportedUserPassword).filter(ImportedUserPassword.user_id == user_id))
-        db_pwd = pwd_result.scalars().first()
-        if db_pwd:
-            db_pwd.plain_password = dummy_password
-            db_pwd.email = candidate_in.email
-        else:
+        # Create ImportedUserPassword record only for brand new users
+        if is_new_user:
             db_pwd = ImportedUserPassword(
                 id=str(uuid.uuid4()),
                 user_id=user_id,
@@ -196,15 +192,25 @@ async def apply_for_job(
         await db.commit()
         await db.refresh(db_candidate)
 
-        # Trigger Job Fair welcome email
-        profile_link = f"{settings.FRONTEND_URL}/login"
-        background_tasks.add_task(
-            send_job_fair_welcome_email,
-            to_email=candidate_in.email,
-            seeker_name=candidate_in.full_name,
-            password=dummy_password,
-            profile_link=profile_link
-        )
+        # Trigger welcome/credentials email for newly registered seekers
+        if is_new_user:
+            profile_link = f"{settings.FRONTEND_URL}/login"
+            if job_fair_id_to_link:
+                background_tasks.add_task(
+                    send_job_fair_welcome_email,
+                    to_email=candidate_in.email,
+                    seeker_name=candidate_in.full_name,
+                    password=dummy_password,
+                    profile_link=profile_link
+                )
+            else:
+                background_tasks.add_task(
+                    send_password_email,
+                    to_email=candidate_in.email,
+                    first_name=candidate_in.full_name,
+                    password=dummy_password,
+                    role="seeker"
+                )
 
         # Trigger AI matching in background:
         # Find all active jobs that match this candidate's profile

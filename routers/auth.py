@@ -589,3 +589,11 @@ async def create_test_user(
         email=body.email,
         role=body.role,
     )
+
+
+@router.get("/check-email")
+async def check_email(email: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(User).where(User.email == email))
+    user = result.scalar_one_or_none()
+    return {"exists": user is not None}
+

@@ -4,7 +4,7 @@ import logging
 from datetime import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status, Query
 from fastapi.responses import Response
 from sqlalchemy import select, or_, and_, func, exists
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,6 +30,7 @@ from services.auth_service import (
     require_super_admin,
 )
 from services.totp_service import totp_service
+from services.email_service import send_password_email
 
 logger = logging.getLogger(__name__)
 
@@ -318,7 +319,6 @@ async def get_provider_participated_job_fairs(
 async def get_job_fair(
     id_or_slug: str,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
 ):
     """Get a single Job Fair by ID or slug."""
     job_fair = await get_job_fair_by_id_or_slug(id_or_slug, db)
@@ -332,6 +332,7 @@ async def get_job_fair(
 @router.post("/{id_or_slug}/register-company", status_code=201)
 async def register_company_to_job_fair(
     id_or_slug: str,
+    background_tasks: BackgroundTasks,
     company_name: str = Form(...),
     email: str = Form(...),
     phone: str = Form(...),
@@ -427,6 +428,14 @@ async def register_company_to_job_fair(
         )
         db.add(db_pwd)
         await db.flush()
+
+        background_tasks.add_task(
+            send_password_email,
+            to_email=email,
+            first_name=company_name,
+            password=temp_pwd,
+            role="provider"
+        )
     else:
         # Update details if missing
         if not user.company_name:
@@ -619,6 +628,33 @@ async def get_job_fair_seekers(
     if not jf:
         raise HTTPException(status_code=404, detail="Job Fair not found")
 
+    # Secure access to student seeker lists:
+    # 1. Super admin can see all
+    # 2. Providers can see seekers if they are registered for this Job Fair
+    # 3. Anyone else is forbidden
+    if not current_user.is_super_admin:
+        if current_user.role == UserRole.provider:
+            # Check if provider is registered
+            jfc_exists = await db.execute(
+                select(exists().where(
+                    and_(
+                        JobFairCompany.job_fair_id == jf.id,
+                        JobFairCompany.provider_id == current_user.id
+                    )
+                ))
+            )
+            if not jfc_exists.scalar():
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You must be registered for this Job Fair to view candidates."
+                )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not authorized to view candidates for this Job Fair."
+            )
+
+
     query = (
         select(JobFairSeeker, User)
         .join(User, JobFairSeeker.seeker_id == User.id)
@@ -704,6 +740,16 @@ async def get_job_fair_seekers(
         resume_db = resume_res.scalar_one_or_none()
         resume_url = f"/api/resumes/{seeker.id}/download" if resume_db else None
 
+        # Fetch candidate details
+        from models.external_candidate import ExternalCandidate
+        cand_res = await db.execute(
+            select(ExternalCandidate)
+            .where(ExternalCandidate.email == seeker.email)
+            .order_by(ExternalCandidate.applied_at.desc())
+            .limit(1)
+        )
+        cand = cand_res.scalar_one_or_none()
+
         out.append(
             JobFairSeekerOut(
                 id=jfs.id,
@@ -716,6 +762,18 @@ async def get_job_fair_seekers(
                 seeker_email=seeker.email,
                 seeker_phone=seeker.phone,
                 seeker_resume_url=resume_url,
+                seeker_gender=cand.gender if cand else None,
+                seeker_date_of_birth=cand.date_of_birth if cand else None,
+                seeker_state=cand.state if cand else None,
+                seeker_city=cand.city if cand else None,
+                seeker_department=cand.department if cand else None,
+                seeker_sub_role=cand.sub_role if cand else None,
+                seeker_industries=cand.industries if cand else None,
+                seeker_available_shift=cand.available_shift if cand else None,
+                seeker_total_experience=cand.total_experience if cand else None,
+                seeker_current_ctc=cand.current_ctc if cand else None,
+                seeker_source=cand.source if cand else None,
+                seeker_professional_journey=cand.professional_journey if cand else None,
             )
         )
     return JobFairSeekerListResponse(items=out, total=total, page=page, page_size=page_size)

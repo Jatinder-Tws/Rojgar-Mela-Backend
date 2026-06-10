@@ -205,7 +205,7 @@ async def upload_profile_pic(
 
     # Update user record
     # If old pic exists, maybe delete it later (optional)
-    user.profile_pic_url = f"/api/uploads/{filename}"
+    user.profile_pic_url = f"/uploads/{filename}"
     await db.commit()
     await db.refresh(user)
 
