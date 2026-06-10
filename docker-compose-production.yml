@@ -11,7 +11,7 @@ services:
     volumes:
       - pg_data_prod:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U adminuser -d job_db"]
+      test: [ "CMD-SHELL", "pg_isready -U adminuser -d job_db" ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -23,20 +23,6 @@ services:
       - "6380:6379" # Exposed on different port to avoid conflicts with local dev
     volumes:
       - redis_data_prod:/data
-
-  # One-shot init: creates tables; seeds master data only if not yet recorded in app_seed_state.
-  # Safe on every `docker compose up` when pg_data_prod volume already has data.
-  db-init:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    restart: "no"
-    environment:
-      - DATABASE_URL=postgresql+asyncpg://adminuser:jobXrojgarmela@postgres:5432/job_db
-    depends_on:
-      postgres:
-        condition: service_healthy
-    command: python run_prod.py
 
   backend:
     build:
@@ -55,8 +41,6 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
-      db-init:
-        condition: service_completed_successfully
     volumes:
       - .:/app
       - uploads_data_prod:/app/uploads
