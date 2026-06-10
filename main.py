@@ -6,72 +6,15 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
-from pathlib import Path
-
 from config import settings, get_cors_allow_origins, get_cors_origin_regex
 from database import init_db, patch_email_admin_schema, AsyncSessionLocal, engine
-from seed_master import seed_master_data
-from seed_state import is_master_seed_completed, mark_master_seed_completed
 
 logger = logging.getLogger(__name__)
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Startup / shutdown events."""
-    # Create upload directories
-    Path(settings.UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
-    # Initialize DB tables
-    await init_db()
-
-    # Super admin column + default account and new email columns
-    from sqlalchemy import text
-    from routers.super_admin import ensure_super_admin_user
-
-    async with engine.begin() as conn:
-        await conn.execute(
-            text(
-                "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_super_admin BOOLEAN NOT NULL DEFAULT FALSE"
-            )
-        )
-        await conn.execute(
-            text(
-                "ALTER TABLE users ADD COLUMN IF NOT EXISTS welcome_email_status VARCHAR(20)"
-            )
-        )
-        await conn.execute(
-            text("ALTER TABLE users ADD COLUMN IF NOT EXISTS welcome_email_error TEXT")
-        )
-
-    # Run seeder once (db-init does this in production; guard avoids repeat on restart)
-    force_seed = os.getenv("FORCE_MASTER_SEED", "").lower() in ("1", "true", "yes")
-    if force_seed or not await is_master_seed_completed():
-        async with AsyncSessionLocal() as session:
-            await seed_master_data(session)
-        await mark_master_seed_completed()
-        logger.info("Master data seed applied")
-    else:
-        logger.info("Master data seed already applied — skipping")
-
-    await ensure_super_admin_user()
-
-    # OCR readiness status (for scanned resume parsing)
-    from services.resume_parser import get_ocr_readiness
-
-    ocr_status = get_ocr_readiness()
-    if ocr_status.get("ready"):
-        logger.info("[OCR] Ready: %s", ocr_status.get("details", "available"))
-    else:
-        logger.warning("[OCR] Not ready: %s", ocr_status.get("details", "missing configuration"))
-
-    yield
-
 
 app = FastAPI(
     title="JobMatch AI API",
     description="AI-powered bidirectional job matching platform",
     version="1.0.0",
-    # lifespan=lifespan,
 )
 
 
