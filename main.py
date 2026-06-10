@@ -9,7 +9,7 @@ from fastapi.exceptions import RequestValidationError
 from pathlib import Path
 
 from config import settings, get_cors_allow_origins, get_cors_origin_regex
-from database import init_db, AsyncSessionLocal, engine
+from database import init_db, patch_email_admin_schema, AsyncSessionLocal, engine
 from seed_master import seed_master_data
 from seed_state import is_master_seed_completed, mark_master_seed_completed
 
@@ -74,6 +74,13 @@ app = FastAPI(
     # lifespan=lifespan,
 )
 
+
+@app.on_event("startup")
+async def ensure_db_tables():
+    """Create any missing tables and patch email admin schema."""
+    await init_db()
+    await patch_email_admin_schema()
+
 # ── Custom Exception Handler for Validation Errors ──────────────────────────
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
@@ -112,7 +119,7 @@ app.add_middleware(
 )
 
 # ── Routers ─────────────────────────────────────────────────────────────────
-from routers import auth, users, jobs, resumes, matches, applications, notifications, interviews, assessment, portfolio, analytics, resume_builder, onboarding, master, ai_interview, roadmap, external_candidate, master_data, ai_coach ,interview_scheduling, import_users, superadmin, super_admin, attendance, job_fair # noqa
+from routers import auth, users, jobs, resumes, matches, applications, notifications, interviews, assessment, portfolio, analytics, resume_builder, onboarding, master, ai_interview, roadmap, external_candidate, master_data, ai_coach ,interview_scheduling, import_users, superadmin, super_admin, attendance, job_fair, email_admin # noqa
 
 
 API_PREFIX = ""
@@ -138,6 +145,7 @@ routers = [
     import_users.router,
     super_admin.router,
     job_fair.router,
+    email_admin.router,
 ]
 
 app.include_router(auth.router)

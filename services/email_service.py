@@ -32,7 +32,7 @@ def _attach_inline_image(msg: MIMEMultipart, file_path: Path, content_id: str) -
     msg.attach(image)
 
 
-async def _send_email(to_email: str, subject: str, html_body: str) -> None:
+async def _send_email(to_email: str, subject: str, html_body: str, *, raise_on_error: bool = False) -> None:
     """Internal SMTP sender using aiosmtplib."""
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
@@ -60,8 +60,10 @@ async def _send_email(to_email: str, subject: str, html_body: str) -> None:
             start_tls=settings.SMTP_TLS if not use_tls else False,
         )
     except Exception as e:
-        # Log but don't crash the request if email fails
-        print(f"[EMAIL ERROR] Failed to send to {to_email}: {e}")
+        err_msg = str(e) or "SMTP delivery failed"
+        print(f"[EMAIL ERROR] Failed to send to {to_email}: {err_msg}")
+        if raise_on_error:
+            raise RuntimeError(err_msg) from e
 
 
 async def send_otp_email(to_email: str, otp: str, first_name: str) -> None:
