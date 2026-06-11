@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, DateTime, String, Text, Boolean, ForeignKey
+from sqlalchemy import Column, DateTime, String, Text, Boolean, ForeignKey, JSON
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -20,6 +20,7 @@ class JobFair(Base):
     location = Column(String(200), nullable=False)
     banner_image_url = Column(Text, nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
+    industries = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 

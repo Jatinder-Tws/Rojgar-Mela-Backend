@@ -10,15 +10,14 @@ class ExternalCandidateBase(BaseModel):
     city: Optional[str] = None
     date_of_birth: Optional[str] = None
     gender: Optional[str] = None
-    department: Optional[str] = None
     sub_role: Optional[str] = None
     industries: Optional[List[str]] = None
     available_shift: Optional[str] = None
     total_experience: Optional[str] = None
     current_ctc: Optional[str] = None
+    current_designation: Optional[str] = None
     
     source: Optional[str] = None
-    professional_journey: Optional[str] = None
     resume_url: Optional[str] = None
     salary_slip_url: Optional[str] = None
     experience_letter_url: Optional[str] = None

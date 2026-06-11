@@ -63,14 +63,14 @@ class JobFairSeekerOut(BaseModel):
     seeker_date_of_birth: Optional[str] = None
     seeker_state: Optional[str] = None
     seeker_city: Optional[str] = None
-    seeker_department: Optional[str] = None
     seeker_sub_role: Optional[str] = None
     seeker_industries: Optional[List[str]] = None
     seeker_available_shift: Optional[str] = None
     seeker_total_experience: Optional[str] = None
     seeker_current_ctc: Optional[str] = None
     seeker_source: Optional[str] = None
-    seeker_professional_journey: Optional[str] = None
+    seeker_current_designation: Optional[str] = None
+    seeker_profile_picture_url: Optional[str] = None
 
     class Config:
         from_attributes = True

@@ -3,7 +3,7 @@ Super Admin controller – business logic from routers/super_admin.py
 """
 import asyncio
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, List
 
 from fastapi import HTTPException
 from sqlalchemy import and_, func, or_, select
@@ -40,7 +40,7 @@ def _build_user_search_filter(search: str, include_company: bool = False):
     return or_(*predicates)
 
 
-def _user_to_admin_out(user: User, role_label: str, profile_completion_percentage: Optional[int] = None) -> AdminUserOut:
+def _user_to_admin_out(user: User, role_label: str, profile_completion_percentage: Optional[int] = None, registered_job_fairs: Optional[List[str]] = None) -> AdminUserOut:
     job_type = user.job_type.value if user.job_type and hasattr(user.job_type, "value") else user.job_type
     company_type = user.company_type.value if user.company_type and hasattr(user.company_type, "value") else user.company_type
     return AdminUserOut(
@@ -52,7 +52,7 @@ def _user_to_admin_out(user: User, role_label: str, profile_completion_percentag
         company_name=user.company_name, company_type=company_type, company_location=user.company_location,
         company_size=user.company_size, profile_completion_percentage=profile_completion_percentage,
         welcome_email_status=user.welcome_email_status, welcome_email_error=user.welcome_email_error,
-        created_at=user.created_at,
+        created_at=user.created_at, registered_job_fairs=registered_job_fairs,
     )
 
 
@@ -149,20 +149,10 @@ def get_import_job_status(job_id: str) -> ImportJobStatus:
     return ImportJobStatus(**job)
 
 
-async def list_seekers(db: AsyncSession, page: int, page_size: int, search: Optional[str], welcome_email: Optional[str]) -> AdminUserListResponse:
+async def list_seekers(db: AsyncSession, page: int, page_size: int, search: Optional[str], industry: Optional[str]) -> AdminUserListResponse:
     seeker_filters = [User.role == UserRole.seeker, User.is_super_admin.is_(False)]
-    if welcome_email:
-        status = welcome_email.strip().lower()
-        if status == "sent":
-            seeker_filters.append(User.welcome_email_status == "sent")
-        elif status == "failed":
-            seeker_filters.append(User.welcome_email_status == "failed")
-        elif status == "pending":
-            seeker_filters.append(User.welcome_email_status == "pending")
-        elif status in ("none", "na"):
-            seeker_filters.append(User.welcome_email_status.is_(None))
-        else:
-            raise HTTPException(status_code=400, detail="welcome_email must be one of: sent, failed, pending, none")
+    if industry:
+        seeker_filters.append(User.industry.ilike(f"%{industry.strip()}%"))
     if search:
         seeker_filters.append(_build_user_search_filter(search.strip()))
     total = await db.scalar(select(func.count(User.id)).where(*seeker_filters))
@@ -172,11 +162,20 @@ async def list_seekers(db: AsyncSession, page: int, page_size: int, search: Opti
         .offset((page - 1) * page_size).limit(page_size)
     )
     items = []
+    from models.job_fair import JobFair, JobFairSeeker
     for user, portfolio in result.all():
         pct = 0
         if portfolio:
             pct, _, _ = calculate_completion(portfolio, user)
-        items.append(_user_to_admin_out(user, "seeker", profile_completion_percentage=pct))
+        # Fetch registered job fairs
+        jf_res = await db.execute(
+            select(JobFair.title)
+            .join(JobFairSeeker, JobFairSeeker.job_fair_id == JobFair.id)
+            .where(JobFairSeeker.seeker_id == user.id)
+            .order_by(JobFairSeeker.registered_at.desc())
+        )
+        jf_titles = [r[0] for r in jf_res.all()]
+        items.append(_user_to_admin_out(user, "seeker", profile_completion_percentage=pct, registered_job_fairs=jf_titles))
     return AdminUserListResponse(items=items, total=total or 0, page=page, page_size=page_size)
 
 
@@ -204,7 +203,15 @@ async def get_seeker(user_id: str, db: AsyncSession) -> AdminUserOut:
     pct = 0
     if portfolio:
         pct, _, _ = calculate_completion(portfolio, user)
-    return _user_to_admin_out(user, "seeker", profile_completion_percentage=pct)
+    from models.job_fair import JobFair, JobFairSeeker
+    jf_res = await db.execute(
+        select(JobFair.title)
+        .join(JobFairSeeker, JobFairSeeker.job_fair_id == JobFair.id)
+        .where(JobFairSeeker.seeker_id == user.id)
+        .order_by(JobFairSeeker.registered_at.desc())
+    )
+    jf_titles = [r[0] for r in jf_res.all()]
+    return _user_to_admin_out(user, "seeker", profile_completion_percentage=pct, registered_job_fairs=jf_titles)
 
 
 async def update_seeker(user_id: str, body: AdminSeekerUpdate, db: AsyncSession) -> AdminUserOut:

@@ -32,16 +32,15 @@ class ExternalCandidate(Base):
     gender = Column(String(100), nullable=True)
 
     # Step 2: Job & Experience Details  
-    department = Column(String(100), nullable=True)
     sub_role = Column(String(100), nullable=True)
     industries = Column(JSON, nullable=True)  # List of industry specialties
     available_shift = Column(String(50), nullable=True)
     total_experience = Column(String(100), nullable=True)
     current_ctc = Column(String(50), nullable=True)
+    current_designation = Column(String(100), nullable=True)
 
     # Step 3: Final Submission
     source = Column(String(100), nullable=True)  # e.g., Instagram, LinkedIn
-    professional_journey = Column(Text, nullable=True)  # 50 words about journey
     resume_url = Column(Text, nullable=True)
     salary_slip_url = Column(Text, nullable=True)
     experience_letter_url = Column(Text, nullable=True)

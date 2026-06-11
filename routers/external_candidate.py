@@ -108,7 +108,7 @@ async def apply_for_job(
             db_user.experience = candidate_in.total_experience
             db_user.address = address or db_user.address
             db_user.industry = first_industry or db_user.industry
-            db_user.job_role = candidate_in.sub_role or candidate_in.department or db_user.job_role
+            db_user.job_role = candidate_in.sub_role or db_user.job_role
             db_user.updated_at = datetime.utcnow()
             user_id = db_user.id
         else:
@@ -129,7 +129,7 @@ async def apply_for_job(
                 experience=candidate_in.total_experience,
                 address=address,
                 industry=first_industry,
-                job_role=candidate_in.sub_role or candidate_in.department,
+                job_role=candidate_in.sub_role,
                 is_first_login=True
             )
             db.add(db_user)
@@ -461,7 +461,7 @@ async def get_job_external_candidate_matches(job_id: str, db: AsyncSession = Dep
             "full_name": candidate.full_name,
             "email": candidate.email,
             "phone": candidate.phone,
-            "department": candidate.department,
+            "current_designation": candidate.current_designation,
             "sub_role": candidate.sub_role,
             "total_experience": candidate.total_experience,
             "industries": candidate.industries,

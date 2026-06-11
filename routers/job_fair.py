@@ -619,6 +619,7 @@ async def get_job_fair_seekers(
     current_user: User = Depends(get_current_user),
     search: Optional[str] = Query(None),
     resume: Optional[str] = Query(None),
+    industry: Optional[str] = Query(None),
     sort_by: Optional[str] = Query("date_newest"),
     page: int = Query(1, ge=1),
     page_size: int = Query(15, ge=1, le=100),
@@ -685,6 +686,18 @@ async def get_job_fair_seekers(
     elif resume == "no_resume":
         query = query.where(~exists().where(Resume.user_id == User.id))
 
+    if industry:
+        from models.external_candidate import ExternalCandidate
+        from sqlalchemy import String
+        query = query.where(
+            exists().where(
+                and_(
+                    ExternalCandidate.email == User.email,
+                    func.cast(ExternalCandidate.industries, String).ilike(f"%{industry.strip()}%")
+                )
+            )
+        )
+
     if sort_by == "name_asc":
         query = query.order_by(func.concat(func.coalesce(User.first_name, ""), " ", func.coalesce(User.last_name, "")).asc())
     elif sort_by == "name_desc":
@@ -720,6 +733,18 @@ async def get_job_fair_seekers(
         count_query = count_query.where(exists().where(Resume.user_id == User.id))
     elif resume == "no_resume":
         count_query = count_query.where(~exists().where(Resume.user_id == User.id))
+
+    if industry:
+        from models.external_candidate import ExternalCandidate
+        from sqlalchemy import String
+        count_query = count_query.where(
+            exists().where(
+                and_(
+                    ExternalCandidate.email == User.email,
+                    func.cast(ExternalCandidate.industries, String).ilike(f"%{industry.strip()}%")
+                )
+            )
+        )
 
     total_res = await db.execute(count_query)
     total = total_res.scalar() or 0
@@ -761,19 +786,19 @@ async def get_job_fair_seekers(
                 seeker_last_name=seeker.last_name,
                 seeker_email=seeker.email,
                 seeker_phone=seeker.phone,
-                seeker_resume_url=resume_url,
+                seeker_resume_url=resume_url or (cand.resume_url if cand else None),
                 seeker_gender=cand.gender if cand else None,
                 seeker_date_of_birth=cand.date_of_birth if cand else None,
                 seeker_state=cand.state if cand else None,
                 seeker_city=cand.city if cand else None,
-                seeker_department=cand.department if cand else None,
                 seeker_sub_role=cand.sub_role if cand else None,
                 seeker_industries=cand.industries if cand else None,
                 seeker_available_shift=cand.available_shift if cand else None,
                 seeker_total_experience=cand.total_experience if cand else None,
                 seeker_current_ctc=cand.current_ctc if cand else None,
                 seeker_source=cand.source if cand else None,
-                seeker_professional_journey=cand.professional_journey if cand else None,
+                seeker_current_designation=cand.current_designation if cand else None,
+                seeker_profile_picture_url=cand.profile_picture_url if cand else None,
             )
         )
     return JobFairSeekerListResponse(items=out, total=total, page=page, page_size=page_size)

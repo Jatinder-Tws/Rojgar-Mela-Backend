@@ -108,6 +108,7 @@ class AdminUserOut(BaseModel):
     welcome_email_status: Optional[str] = None
     welcome_email_error: Optional[str] = None
     created_at: datetime
+    registered_job_fairs: Optional[List[str]] = None
 
     class Config:
         from_attributes = True

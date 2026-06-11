@@ -71,9 +71,9 @@ async def get_import_job_status(job_id: str, admin: User = Depends(require_super
 async def list_seekers(
     admin: User = Depends(require_super_admin), db: AsyncSession = Depends(get_db),
     page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
-    search: Optional[str] = None, welcome_email: Optional[str] = Query(None),
+    search: Optional[str] = None, industry: Optional[str] = Query(None),
 ):
-    return await ctrl_list_seekers(db, page, page_size, search, welcome_email)
+    return await ctrl_list_seekers(db, page, page_size, search, industry)
 
 
 @router.post("/seekers", response_model=AdminUserOut, status_code=201)
