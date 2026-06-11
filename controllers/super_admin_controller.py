@@ -6,23 +6,35 @@ from datetime import datetime, timedelta
 from typing import Optional, List
 
 from fastapi import HTTPException
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
+import os
+import uuid as uuid_lib
+
+from fastapi import UploadFile
 from models.application import Application
+from models.assessment import AssessmentResult, AssessmentSession
+from models.interview import Interview
 from models.job import JobPosting
+from models.match import Match
 from models.portfolio import Portfolio
 from models.user import CompanyType, JobType, User, UserRole
 from schemas.super_admin import (
+    AdminApplicationListItem, AdminApplicationListResponse, AdminAssessmentListItem,
+    AdminAssessmentListResponse, AdminInterviewListItem, AdminInterviewListResponse,
+    AdminJobListItem, AdminJobListResponse, AdminMatchListItem, AdminMatchListResponse,
     AdminProviderCreate, AdminProviderUpdate, AdminSeekerCreate, AdminSeekerUpdate,
     AdminSetPasswordRequest, AdminUserListResponse, AdminUserOut, BulkImportJobStarted,
-    DetailedPlatformAnalytics, ImportJobStatus, PlatformStatsResponse,
-    SuperAdminLoginRequest, SuperAdminLoginResponse,
+    DashboardAnalyticsResponse, DetailedPlatformAnalytics, ImportJobStatus, PlatformStatsResponse,
+    SuperAdminChangePasswordRequest, SuperAdminLoginRequest, SuperAdminLoginResponse,
+    SuperAdminProfileOut, SuperAdminProfileUpdate,
 )
 from services.auth_service import create_access_token, hash_password, verify_password
 from services.import_job_store import create_job as _create_job, get_job as _get_job
 from services.super_admin_analytics import get_detailed_platform_analytics
+from services.dashboard_analytics import get_dashboard_analytics
 from services.super_admin_bulk_import import run_bulk_import_job
 from services.portfolio_service import calculate_completion
 from services.super_admin_utils import normalize_phone as _normalize_phone, temp_password as _temp_password
@@ -63,6 +75,23 @@ async def _check_duplicate(db: AsyncSession, email: str, phone: str, exclude_id:
     existing = (await db.execute(q)).scalar_one_or_none()
     if existing:
         raise HTTPException(status_code=409, detail="Email or phone already in use")
+
+
+async def _seeker_job_fair_names(db: AsyncSession, seeker_id: str) -> List[str]:
+    """DB uses job_fairs.name (not ORM title column)."""
+    result = await db.execute(
+        text(
+            """
+            SELECT jf.name
+            FROM job_fair_seekers jfs
+            JOIN job_fairs jf ON jf.id = jfs.job_fair_id
+            WHERE jfs.seeker_id = :seeker_id
+            ORDER BY jfs.registered_at DESC
+            """
+        ),
+        {"seeker_id": seeker_id},
+    )
+    return [row[0] for row in result.all() if row[0]]
 
 
 async def _get_role_user(db: AsyncSession, user_id: str, role: UserRole) -> User:
@@ -108,8 +137,260 @@ async def super_admin_login(body: SuperAdminLoginRequest, db: AsyncSession) -> S
     return SuperAdminLoginResponse(access_token=token, user={"id": user.id, "email": user.email, "first_name": user.first_name, "last_name": user.last_name, "role": "super_admin", "is_super_admin": True})
 
 
-def super_admin_me(admin: User) -> dict:
-    return {"id": admin.id, "email": admin.email, "first_name": admin.first_name, "last_name": admin.last_name, "role": "super_admin", "is_super_admin": True}
+def super_admin_me(admin: User) -> SuperAdminProfileOut:
+    return SuperAdminProfileOut(
+        id=admin.id,
+        email=admin.email,
+        first_name=admin.first_name,
+        last_name=admin.last_name,
+        phone=admin.phone,
+        profile_pic_url=admin.profile_pic_url,
+        role="super_admin",
+        is_super_admin=True,
+    )
+
+
+def _user_display_name(user: User | None, fallback: str = "Unknown") -> str:
+    if not user:
+        return fallback
+    parts = [user.first_name or "", user.last_name or ""]
+    name = " ".join(p for p in parts if p).strip()
+    return name or user.email or fallback
+
+
+async def update_super_admin_profile(admin: User, body: SuperAdminProfileUpdate, db: AsyncSession) -> SuperAdminProfileOut:
+    if body.email and body.email.lower() != (admin.email or "").lower():
+        existing = await db.scalar(select(User).where(User.email == body.email, User.id != admin.id))
+        if existing:
+            raise HTTPException(status_code=400, detail="Email already in use")
+        admin.email = body.email
+    if body.first_name is not None:
+        admin.first_name = body.first_name
+    if body.last_name is not None:
+        admin.last_name = body.last_name
+    if body.phone is not None:
+        admin.phone = _normalize_phone(body.phone)
+    await db.commit()
+    await db.refresh(admin)
+    return super_admin_me(admin)
+
+
+async def change_super_admin_password(admin: User, body: SuperAdminChangePasswordRequest, db: AsyncSession) -> SuperAdminProfileOut:
+    if not admin.hashed_password or not verify_password(body.current_password, admin.hashed_password):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    admin.hashed_password = hash_password(body.new_password)
+    await db.commit()
+    await db.refresh(admin)
+    return super_admin_me(admin)
+
+
+async def upload_super_admin_profile_pic(file: UploadFile, admin: User, db: AsyncSession) -> SuperAdminProfileOut:
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image")
+    ext = os.path.splitext(file.filename or "")[1] or ".jpg"
+    filename = f"profile_{admin.id}_{uuid_lib.uuid4().hex}{ext}"
+    file_path = os.path.join(settings.UPLOAD_DIR, filename)
+    try:
+        content = await file.read()
+        with open(file_path, "wb") as f:
+            f.write(content)
+    except Exception:
+        raise HTTPException(status_code=500, detail="Could not save profile image")
+    admin.profile_pic_url = f"/uploads/{filename}"
+    await db.commit()
+    await db.refresh(admin)
+    return super_admin_me(admin)
+
+
+async def list_platform_jobs(
+    db: AsyncSession, page: int, page_size: int, search: Optional[str] = None
+) -> AdminJobListResponse:
+    base = (
+        select(JobPosting, User)
+        .join(User, JobPosting.provider_id == User.id)
+    )
+    if search:
+        term = f"%{search.strip()}%"
+        base = base.where(or_(JobPosting.title.ilike(term), User.company_name.ilike(term)))
+    count_q = select(func.count(JobPosting.id)).select_from(JobPosting).join(User, JobPosting.provider_id == User.id)
+    if search:
+        term = f"%{search.strip()}%"
+        count_q = count_q.where(or_(JobPosting.title.ilike(term), User.company_name.ilike(term)))
+    total = await db.scalar(count_q) or 0
+    offset = (page - 1) * page_size
+    rows = (await db.execute(base.order_by(JobPosting.created_at.desc()).offset(offset).limit(page_size))).all()
+    items = [
+        AdminJobListItem(
+            id=str(job.id),
+            title=job.title,
+            company=user.company_name or _user_display_name(user, "Provider"),
+            industry=job.industry,
+            location=job.location,
+            is_active=bool(job.is_active),
+            created_at=job.created_at,
+        )
+        for job, user in rows
+    ]
+    return AdminJobListResponse(items=items, total=int(total), page=page, page_size=page_size)
+
+
+async def list_platform_matches(
+    db: AsyncSession, page: int, page_size: int, search: Optional[str] = None
+) -> AdminMatchListResponse:
+    from sqlalchemy.orm import aliased
+    Seeker = aliased(User)
+    Provider = aliased(User)
+    base = (
+        select(Match, Seeker, JobPosting, Provider)
+        .join(Seeker, Match.seeker_id == Seeker.id)
+        .join(JobPosting, Match.job_id == JobPosting.id)
+        .join(Provider, JobPosting.provider_id == Provider.id)
+    )
+    if search:
+        term = f"%{search.strip()}%"
+        base = base.where(or_(Seeker.first_name.ilike(term), Seeker.last_name.ilike(term), JobPosting.title.ilike(term)))
+    count_q = select(func.count(Match.id)).select_from(Match).join(Seeker, Match.seeker_id == Seeker.id).join(JobPosting, Match.job_id == JobPosting.id)
+    if search:
+        term = f"%{search.strip()}%"
+        count_q = count_q.where(or_(Seeker.first_name.ilike(term), Seeker.last_name.ilike(term), JobPosting.title.ilike(term)))
+    total = await db.scalar(count_q) or 0
+    offset = (page - 1) * page_size
+    rows = (await db.execute(base.order_by(Match.created_at.desc()).offset(offset).limit(page_size))).all()
+    items = [
+        AdminMatchListItem(
+            id=str(match.id),
+            seeker_name=_user_display_name(seeker),
+            seeker_email=seeker.email,
+            job_title=job.title,
+            company=provider.company_name or _user_display_name(provider, "Provider"),
+            score=float(match.score or 0),
+            created_at=match.created_at,
+        )
+        for match, seeker, job, provider in rows
+    ]
+    return AdminMatchListResponse(items=items, total=int(total), page=page, page_size=page_size)
+
+
+async def list_platform_applications(
+    db: AsyncSession, page: int, page_size: int, search: Optional[str] = None
+) -> AdminApplicationListResponse:
+    from sqlalchemy.orm import aliased
+    Seeker = aliased(User)
+    Provider = aliased(User)
+    base = (
+        select(Application, JobPosting, Provider, Seeker)
+        .join(JobPosting, Application.job_id == JobPosting.id)
+        .join(Provider, JobPosting.provider_id == Provider.id)
+        .outerjoin(Seeker, Application.seeker_id == Seeker.id)
+    )
+    if search:
+        term = f"%{search.strip()}%"
+        base = base.where(
+            or_(
+                Application.candidate_name.ilike(term),
+                Application.candidate_email.ilike(term),
+                JobPosting.title.ilike(term),
+            )
+        )
+    count_q = select(func.count(Application.id)).select_from(Application).join(JobPosting, Application.job_id == JobPosting.id)
+    if search:
+        term = f"%{search.strip()}%"
+        count_q = count_q.where(
+            or_(
+                Application.candidate_name.ilike(term),
+                Application.candidate_email.ilike(term),
+                JobPosting.title.ilike(term),
+            )
+        )
+    total = await db.scalar(count_q) or 0
+    offset = (page - 1) * page_size
+    rows = (await db.execute(base.order_by(Application.applied_at.desc()).offset(offset).limit(page_size))).all()
+    items = []
+    for app, job, provider, seeker in rows:
+        candidate = app.candidate_name or _user_display_name(seeker, "Candidate")
+        items.append(
+            AdminApplicationListItem(
+                id=str(app.id),
+                candidate_name=candidate,
+                candidate_email=app.candidate_email or (seeker.email if seeker else None),
+                job_title=job.title,
+                company=provider.company_name or _user_display_name(provider, "Provider"),
+                status=str(app.status.value if hasattr(app.status, "value") else app.status),
+                applied_at=app.applied_at,
+            )
+        )
+    return AdminApplicationListResponse(items=items, total=int(total), page=page, page_size=page_size)
+
+
+async def list_platform_interviews(
+    db: AsyncSession, page: int, page_size: int, search: Optional[str] = None
+) -> AdminInterviewListResponse:
+    from sqlalchemy.orm import aliased
+    Seeker = aliased(User)
+    Provider = aliased(User)
+    base = (
+        select(Interview, Seeker, Provider, JobPosting)
+        .join(Seeker, Interview.seeker_id == Seeker.id)
+        .join(Provider, Interview.provider_id == Provider.id)
+        .join(JobPosting, Interview.job_id == JobPosting.id)
+    )
+    if search:
+        term = f"%{search.strip()}%"
+        base = base.where(or_(Interview.title.ilike(term), JobPosting.title.ilike(term)))
+    count_q = select(func.count(Interview.id)).select_from(Interview).join(JobPosting, Interview.job_id == JobPosting.id)
+    if search:
+        term = f"%{search.strip()}%"
+        count_q = count_q.where(or_(Interview.title.ilike(term), JobPosting.title.ilike(term)))
+    total = await db.scalar(count_q) or 0
+    offset = (page - 1) * page_size
+    rows = (await db.execute(base.order_by(Interview.scheduled_at.desc()).offset(offset).limit(page_size))).all()
+    items = [
+        AdminInterviewListItem(
+            id=str(iv.id),
+            title=iv.title,
+            seeker_name=_user_display_name(seeker),
+            provider_name=provider.company_name or _user_display_name(provider, "Provider"),
+            job_title=job.title,
+            scheduled_at=iv.scheduled_at,
+            source=str(iv.source.value if hasattr(iv.source, "value") else iv.source),
+        )
+        for iv, seeker, provider, job in rows
+    ]
+    return AdminInterviewListResponse(items=items, total=int(total), page=page, page_size=page_size)
+
+
+async def list_platform_assessments(
+    db: AsyncSession, page: int, page_size: int, search: Optional[str] = None
+) -> AdminAssessmentListResponse:
+    base = (
+        select(AssessmentResult, User, AssessmentSession)
+        .outerjoin(User, AssessmentResult.user_id == User.id)
+        .join(AssessmentSession, AssessmentResult.session_id == AssessmentSession.id)
+    )
+    if search:
+        term = f"%{search.strip()}%"
+        base = base.where(or_(User.first_name.ilike(term), User.last_name.ilike(term), User.email.ilike(term)))
+    count_q = select(func.count(AssessmentResult.id)).select_from(AssessmentResult).outerjoin(User, AssessmentResult.user_id == User.id)
+    if search:
+        term = f"%{search.strip()}%"
+        count_q = count_q.where(or_(User.first_name.ilike(term), User.last_name.ilike(term), User.email.ilike(term)))
+    total = await db.scalar(count_q) or 0
+    offset = (page - 1) * page_size
+    rows = (await db.execute(base.order_by(AssessmentResult.created_at.desc()).offset(offset).limit(page_size))).all()
+    items = [
+        AdminAssessmentListItem(
+            id=str(result.id),
+            user_name=_user_display_name(user, "Guest"),
+            user_email=user.email if user else None,
+            personality_type=result.personality_type,
+            iq_score=result.iq_score,
+            aptitude_score=result.aptitude_score,
+            status=session.status or "completed",
+            created_at=result.created_at,
+        )
+        for result, user, session in rows
+    ]
+    return AdminAssessmentListResponse(items=items, total=int(total), page=page, page_size=page_size)
 
 
 async def platform_stats(db: AsyncSession) -> PlatformStatsResponse:
@@ -142,6 +423,16 @@ async def detailed_platform_analytics(db: AsyncSession) -> DetailedPlatformAnaly
     return DetailedPlatformAnalytics(**data)
 
 
+async def dashboard_analytics(
+    db: AsyncSession,
+    target_date: Optional[datetime] = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+) -> DashboardAnalyticsResponse:
+    data = await get_dashboard_analytics(db, target_date, start_date, end_date)
+    return DashboardAnalyticsResponse(**data)
+
+
 def get_import_job_status(job_id: str) -> ImportJobStatus:
     job = _get_job(job_id)
     if not job:
@@ -162,19 +453,11 @@ async def list_seekers(db: AsyncSession, page: int, page_size: int, search: Opti
         .offset((page - 1) * page_size).limit(page_size)
     )
     items = []
-    from models.job_fair import JobFair, JobFairSeeker
     for user, portfolio in result.all():
         pct = 0
         if portfolio:
             pct, _, _ = calculate_completion(portfolio, user)
-        # Fetch registered job fairs
-        jf_res = await db.execute(
-            select(JobFair.title)
-            .join(JobFairSeeker, JobFairSeeker.job_fair_id == JobFair.id)
-            .where(JobFairSeeker.seeker_id == user.id)
-            .order_by(JobFairSeeker.registered_at.desc())
-        )
-        jf_titles = [r[0] for r in jf_res.all()]
+        jf_titles = await _seeker_job_fair_names(db, user.id)
         items.append(_user_to_admin_out(user, "seeker", profile_completion_percentage=pct, registered_job_fairs=jf_titles))
     return AdminUserListResponse(items=items, total=total or 0, page=page, page_size=page_size)
 
@@ -203,14 +486,7 @@ async def get_seeker(user_id: str, db: AsyncSession) -> AdminUserOut:
     pct = 0
     if portfolio:
         pct, _, _ = calculate_completion(portfolio, user)
-    from models.job_fair import JobFair, JobFairSeeker
-    jf_res = await db.execute(
-        select(JobFair.title)
-        .join(JobFairSeeker, JobFairSeeker.job_fair_id == JobFair.id)
-        .where(JobFairSeeker.seeker_id == user.id)
-        .order_by(JobFairSeeker.registered_at.desc())
-    )
-    jf_titles = [r[0] for r in jf_res.all()]
+    jf_titles = await _seeker_job_fair_names(db, user.id)
     return _user_to_admin_out(user, "seeker", profile_completion_percentage=pct, registered_job_fairs=jf_titles)
 
 

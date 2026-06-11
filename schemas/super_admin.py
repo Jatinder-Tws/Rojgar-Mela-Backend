@@ -195,3 +195,254 @@ class DetailedPlatformAnalytics(BaseModel):
     applications_by_status: dict
     recent_shortlists: List[ShortlistActivityItem]
     top_providers_by_shortlists: List[ProviderShortlistRank]
+
+
+class DashboardKpiItem(BaseModel):
+    key: str
+    label: str
+    value: int
+    trend: float
+
+
+class DashboardSummaryMetric(BaseModel):
+    label: str
+    value: str
+    trend: Optional[float] = None
+
+
+class DashboardFunnelStage(BaseModel):
+    stage: str
+    count: int
+    pct: float
+
+
+class DashboardScoreBracket(BaseModel):
+    range: str
+    count: int
+    pct: float
+
+
+class DashboardIndustryMatch(BaseModel):
+    industry: str
+    avg_score: float
+    count: int
+
+
+class DashboardSkillGap(BaseModel):
+    skill: str
+    count: int
+    pct: float
+
+
+class DashboardAiStatCard(BaseModel):
+    key: str
+    label: str
+    value: str
+    trend: Optional[float] = None
+
+
+class DashboardAiMatching(BaseModel):
+    total_matches: int
+    avg_score: float
+    top_score: float
+    above_90: int
+    above_80: int
+    above_70: int
+    stat_cards: List[DashboardAiStatCard]
+    score_distribution: List[DashboardScoreBracket]
+    industry_analysis: List[DashboardIndustryMatch]
+    skill_gaps: List[DashboardSkillGap]
+
+
+class DashboardGrowthPoint(BaseModel):
+    date: str
+    count: int
+
+
+class DashboardExperienceLevel(BaseModel):
+    level: str
+    count: int
+    pct: float
+
+
+class DashboardIndustryDist(BaseModel):
+    industry: str
+    count: int
+    pct: float
+
+
+class DashboardSkill(BaseModel):
+    skill: str
+    count: int
+
+
+class DashboardRecruiter(BaseModel):
+    name: str
+    applications: int
+
+
+class DashboardSeekerRow(BaseModel):
+    name: str
+    industry: str
+    status: str
+    created_at: Optional[str] = None
+
+
+class DashboardJobRow(BaseModel):
+    title: str
+    company: str
+    industry: str
+    status: str
+    created_at: Optional[str] = None
+
+
+class DashboardApplicationRow(BaseModel):
+    candidate: str
+    job: str
+    status: str
+    applied_at: Optional[str] = None
+
+
+class DashboardActivityItem(BaseModel):
+    type: str
+    message: str
+    time: Optional[str] = None
+
+
+class DashboardAlert(BaseModel):
+    level: str
+    message: str
+
+
+class DashboardOverviewItem(BaseModel):
+    label: str
+    value: int
+    trend: float
+
+
+class SuperAdminProfileOut(BaseModel):
+    id: str
+    email: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    phone: str
+    profile_pic_url: Optional[str] = None
+    role: str = "super_admin"
+    is_super_admin: bool = True
+
+
+class SuperAdminProfileUpdate(BaseModel):
+    first_name: Optional[str] = Field(None, min_length=1, max_length=50)
+    last_name: Optional[str] = Field(None, min_length=1, max_length=50)
+    email: Optional[EmailStr] = None
+    phone: Optional[str] = Field(None, min_length=10, max_length=15)
+
+
+class SuperAdminChangePasswordRequest(BaseModel):
+    current_password: str = Field(..., min_length=1)
+    new_password: str = Field(..., min_length=8)
+
+
+class AdminJobListItem(BaseModel):
+    id: str
+    title: str
+    company: str
+    industry: Optional[str] = None
+    location: Optional[str] = None
+    is_active: bool
+    created_at: datetime
+
+
+class AdminMatchListItem(BaseModel):
+    id: str
+    seeker_name: str
+    seeker_email: Optional[str] = None
+    job_title: str
+    company: str
+    score: float
+    created_at: datetime
+
+
+class AdminApplicationListItem(BaseModel):
+    id: str
+    candidate_name: str
+    candidate_email: Optional[str] = None
+    job_title: str
+    company: str
+    status: str
+    applied_at: datetime
+
+
+class AdminInterviewListItem(BaseModel):
+    id: str
+    title: str
+    seeker_name: str
+    provider_name: str
+    job_title: str
+    scheduled_at: datetime
+    source: str
+
+
+class AdminAssessmentListItem(BaseModel):
+    id: str
+    user_name: str
+    user_email: Optional[str] = None
+    personality_type: Optional[str] = None
+    iq_score: Optional[int] = None
+    aptitude_score: Optional[int] = None
+    status: str
+    created_at: datetime
+
+
+class AdminJobListResponse(BaseModel):
+    items: List[AdminJobListItem]
+    total: int
+    page: int
+    page_size: int
+
+
+class AdminMatchListResponse(BaseModel):
+    items: List[AdminMatchListItem]
+    total: int
+    page: int
+    page_size: int
+
+
+class AdminApplicationListResponse(BaseModel):
+    items: List[AdminApplicationListItem]
+    total: int
+    page: int
+    page_size: int
+
+
+class AdminInterviewListResponse(BaseModel):
+    items: List[AdminInterviewListItem]
+    total: int
+    page: int
+    page_size: int
+
+
+class AdminAssessmentListResponse(BaseModel):
+    items: List[AdminAssessmentListItem]
+    total: int
+    page: int
+    page_size: int
+
+
+class DashboardAnalyticsResponse(BaseModel):
+    generated_at: str
+    today_kpis: List[DashboardKpiItem]
+    summary_columns: dict
+    recruitment_funnel: List[DashboardFunnelStage]
+    ai_matching: DashboardAiMatching
+    candidate_growth: dict
+    experience_breakdown: List[DashboardExperienceLevel]
+    industry_distribution: List[DashboardIndustryDist]
+    top_skills: List[DashboardSkill]
+    active_recruiters: List[DashboardRecruiter]
+    latest_seekers: List[DashboardSeekerRow]
+    recent_jobs: List[DashboardJobRow]
+    recent_applications: List[DashboardApplicationRow]
+    recent_activity: List[DashboardActivityItem]
+    system_alerts: List[DashboardAlert]
+    platform_overview: List[DashboardOverviewItem]

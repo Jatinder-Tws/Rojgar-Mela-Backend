@@ -20,10 +20,12 @@ class JobFairUpdate(BaseModel):
     location: Optional[str] = None
     banner_image_url: Optional[str] = None
     is_active: Optional[bool] = None
+    industries: Optional[List[str]] = None
 
 class JobFairOut(JobFairBase):
     id: str
     slug: str
+    industries: Optional[List[str]] = None
     created_at: datetime
     updated_at: datetime
 
@@ -78,6 +80,21 @@ class JobFairSeekerOut(BaseModel):
 
 class JobFairListResponse(BaseModel):
     items: List[JobFairOut]
+    total: int
+    page: int
+    page_size: int
+
+
+class JobFairCompanyPublicOut(BaseModel):
+    id: str
+    company_name: Optional[str] = None
+    profile_pic_url: Optional[str] = None
+    sector: Optional[str] = None
+    vacancy: Optional[str] = None
+
+
+class JobFairCompanyPublicListResponse(BaseModel):
+    items: List[JobFairCompanyPublicOut]
     total: int
     page: int
     page_size: int

@@ -2,6 +2,7 @@
 Super admin router – route definitions only.
 Business logic lives in controllers/super_admin_controller.py
 """
+from datetime import datetime
 from typing import Optional
 from fastapi import APIRouter, Depends, File, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,17 +10,28 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database import get_db
 from models.user import User
 from schemas.super_admin import (
-    AdminProviderCreate, AdminProviderUpdate, AdminSeekerCreate, AdminSeekerUpdate,
-    AdminSetPasswordRequest, AdminUserListResponse, AdminUserOut, BulkImportJobStarted,
-    DetailedPlatformAnalytics, ImportJobStatus, PlatformStatsResponse,
-    SuperAdminLoginRequest, SuperAdminLoginResponse,
+    AdminApplicationListResponse, AdminAssessmentListResponse, AdminInterviewListResponse,
+    AdminJobListResponse, AdminMatchListResponse, AdminProviderCreate, AdminProviderUpdate,
+    AdminSeekerCreate, AdminSeekerUpdate, AdminSetPasswordRequest, AdminUserListResponse,
+    AdminUserOut, BulkImportJobStarted, DashboardAnalyticsResponse, DetailedPlatformAnalytics,
+    ImportJobStatus, PlatformStatsResponse, SuperAdminChangePasswordRequest, SuperAdminLoginRequest,
+    SuperAdminLoginResponse, SuperAdminProfileOut, SuperAdminProfileUpdate,
 )
 from services.auth_service import require_super_admin
 from controllers.super_admin_controller import (
     super_admin_login as ctrl_login,
     super_admin_me as ctrl_me,
+    update_super_admin_profile as ctrl_update_profile,
+    change_super_admin_password as ctrl_change_password,
+    upload_super_admin_profile_pic as ctrl_upload_profile_pic,
+    list_platform_jobs as ctrl_list_jobs,
+    list_platform_matches as ctrl_list_matches,
+    list_platform_applications as ctrl_list_applications,
+    list_platform_interviews as ctrl_list_interviews,
+    list_platform_assessments as ctrl_list_assessments,
     platform_stats as ctrl_platform_stats,
     detailed_platform_analytics as ctrl_detailed_analytics,
+    dashboard_analytics as ctrl_dashboard_analytics,
     get_import_job_status as ctrl_import_job_status,
     list_seekers as ctrl_list_seekers,
     create_seeker as ctrl_create_seeker,
@@ -45,9 +57,91 @@ async def super_admin_login(body: SuperAdminLoginRequest, db: AsyncSession = Dep
     return await ctrl_login(body, db)
 
 
-@router.get("/me")
+@router.get("/me", response_model=SuperAdminProfileOut)
 async def super_admin_me(admin: User = Depends(require_super_admin)):
     return ctrl_me(admin)
+
+
+@router.put("/me", response_model=SuperAdminProfileOut)
+async def update_super_admin_me(
+    body: SuperAdminProfileUpdate,
+    admin: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_update_profile(admin, body, db)
+
+
+@router.patch("/me/password", response_model=SuperAdminProfileOut)
+async def change_super_admin_me_password(
+    body: SuperAdminChangePasswordRequest,
+    admin: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_change_password(admin, body, db)
+
+
+@router.post("/me/profile-pic", response_model=SuperAdminProfileOut)
+async def upload_super_admin_profile_pic(
+    file: UploadFile = File(...),
+    admin: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_upload_profile_pic(file, admin, db)
+
+
+@router.get("/jobs", response_model=AdminJobListResponse)
+async def list_jobs(
+    admin: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    search: Optional[str] = None,
+):
+    return await ctrl_list_jobs(db, page, page_size, search)
+
+
+@router.get("/matches", response_model=AdminMatchListResponse)
+async def list_matches(
+    admin: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    search: Optional[str] = None,
+):
+    return await ctrl_list_matches(db, page, page_size, search)
+
+
+@router.get("/applications", response_model=AdminApplicationListResponse)
+async def list_applications(
+    admin: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    search: Optional[str] = None,
+):
+    return await ctrl_list_applications(db, page, page_size, search)
+
+
+@router.get("/interviews", response_model=AdminInterviewListResponse)
+async def list_interviews(
+    admin: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    search: Optional[str] = None,
+):
+    return await ctrl_list_interviews(db, page, page_size, search)
+
+
+@router.get("/assessments", response_model=AdminAssessmentListResponse)
+async def list_assessments(
+    admin: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    search: Optional[str] = None,
+):
+    return await ctrl_list_assessments(db, page, page_size, search)
 
 
 @router.get("/stats", response_model=PlatformStatsResponse)
@@ -58,6 +152,20 @@ async def platform_stats(admin: User = Depends(require_super_admin), db: AsyncSe
 @router.get("/analytics/detailed", response_model=DetailedPlatformAnalytics)
 async def detailed_platform_analytics(admin: User = Depends(require_super_admin), db: AsyncSession = Depends(get_db)):
     return await ctrl_detailed_analytics(db)
+
+
+@router.get("/analytics/dashboard", response_model=DashboardAnalyticsResponse)
+async def dashboard_analytics(
+    admin: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+    target_date: Optional[str] = Query(None, description="ISO date YYYY-MM-DD (legacy single day)"),
+    start_date: Optional[str] = Query(None, description="Range start YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="Range end YYYY-MM-DD"),
+):
+    parsed_target = datetime.fromisoformat(target_date) if target_date else None
+    parsed_start = datetime.fromisoformat(start_date) if start_date else None
+    parsed_end = datetime.fromisoformat(end_date) if end_date else None
+    return await ctrl_dashboard_analytics(db, parsed_target, parsed_start, parsed_end)
 
 
 @router.get("/import-jobs/{job_id}", response_model=ImportJobStatus)

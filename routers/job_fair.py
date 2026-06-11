@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
 from database import get_db
-from models.job_fair import JobFair, JobFairCompany, JobFairSeeker
+from models.job_fair import JobFairCompany, JobFairSeeker
 from models.user import User, UserRole, CompanyType
 from models.imported_user_password import ImportedUserPassword
 from schemas.job_fair import (
@@ -22,6 +22,8 @@ from schemas.job_fair import (
     JobFairCompanyOut,
     JobFairSeekerOut,
     JobFairCompanyListResponse,
+    JobFairCompanyPublicOut,
+    JobFairCompanyPublicListResponse,
     JobFairSeekerListResponse,
 )
 from services.auth_service import (
@@ -31,6 +33,16 @@ from services.auth_service import (
 )
 from services.totp_service import totp_service
 from services.email_service import send_password_email
+from services.job_fair_db import (
+    get_job_fair_db,
+    list_job_fairs_db,
+    list_job_fairs_for_ids_db,
+    slug_exists_db,
+    create_job_fair_db,
+    update_job_fair_db,
+    set_job_fair_banner_db,
+    delete_job_fair_db,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,12 +66,10 @@ async def generate_unique_slug(title: str, db: AsyncSession) -> str:
 
     slug = base_slug
     counter = 1
-    while True:
-        result = await db.execute(select(JobFair).where(JobFair.slug == slug))
-        if not result.scalar_one_or_none():
-            return slug
+    while await slug_exists_db(db, slug):
         slug = f"{base_slug}-{counter}"
         counter += 1
+    return slug
 
 
 def is_valid_uuid(val: str) -> bool:
@@ -70,16 +80,8 @@ def is_valid_uuid(val: str) -> bool:
         return False
 
 
-async def get_job_fair_by_id_or_slug(id_or_slug: str, db: AsyncSession) -> JobFair | None:
-    if is_valid_uuid(id_or_slug):
-        result = await db.execute(
-            select(JobFair).where((JobFair.id == id_or_slug) | (JobFair.slug == id_or_slug))
-        )
-    else:
-        result = await db.execute(
-            select(JobFair).where(JobFair.slug == id_or_slug)
-        )
-    return result.scalar_one_or_none()
+async def get_job_fair_by_id_or_slug(id_or_slug: str, db: AsyncSession) -> JobFairOut | None:
+    return await get_job_fair_db(db, id_or_slug)
 
 
 async def _save_banner_image(banner_image: UploadFile) -> str:
@@ -113,33 +115,41 @@ async def create_job_fair(
     location: str = Form(...),
     description: str = Form(None),
     is_active: bool = Form(True),
+    industries: str = Form(None),
     banner_image: UploadFile = File(None),
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(require_super_admin),
 ):
     """Super Admin: Create a new Job Fair (multipart/form-data, optional banner image)."""
-    from datetime import timezone
+    import json as _json
+
     banner_url = None
     if banner_image and banner_image.filename:
         banner_url = await _save_banner_image(banner_image)
 
     slug = await generate_unique_slug(title, db)
-    job_fair = JobFair(
-        id=str(uuid.uuid4()),
-        slug=slug,
+    industries_list = None
+    if industries:
+        try:
+            parsed = _json.loads(industries)
+            if isinstance(parsed, list):
+                industries_list = parsed
+        except _json.JSONDecodeError:
+            pass
+
+    fair_date = datetime.fromisoformat(date.replace("Z", "+00:00")).replace(tzinfo=None)
+    return await create_job_fair_db(
+        db,
         title=title,
         description=description,
-        date=datetime.fromisoformat(date).replace(tzinfo=None),
+        fair_date=fair_date,
         location=location,
-        banner_image_url=banner_url,
         is_active=is_active,
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
+        slug=slug,
+        banner_image_url=banner_url,
+        industries=industries_list,
+        created_by_id=admin.id,
     )
-    db.add(job_fair)
-    await db.commit()
-    await db.refresh(job_fair)
-    return job_fair
 
 
 @router.put("/{id}", response_model=JobFairOut)
@@ -150,26 +160,34 @@ async def update_job_fair(
     admin: User = Depends(require_super_admin),
 ):
     """Super Admin: Update an existing Job Fair."""
-    result = await db.execute(select(JobFair).where(JobFair.id == id))
-    job_fair = result.scalar_one_or_none()
-    if not job_fair:
+    existing = await get_job_fair_db(db, id)
+    if not existing:
         raise HTTPException(status_code=404, detail="Job Fair not found")
 
     update_data = body.model_dump(exclude_unset=True)
-    if "title" in update_data and update_data["title"] != job_fair.title:
-        # Generate new slug if title changes
-        job_fair.slug = await generate_unique_slug(update_data["title"], db)
+    new_slug = None
+    if "title" in update_data and update_data["title"] != existing.title:
+        new_slug = await generate_unique_slug(update_data["title"], db)
 
+    fair_date = None
     if "date" in update_data and update_data["date"] is not None:
-        update_data["date"] = update_data["date"].replace(tzinfo=None)
+        fair_date = update_data["date"].replace(tzinfo=None)
 
-    for key, val in update_data.items():
-        setattr(job_fair, key, val)
-
-    job_fair.updated_at = datetime.utcnow()
-    await db.commit()
-    await db.refresh(job_fair)
-    return job_fair
+    updated = await update_job_fair_db(
+        db,
+        id,
+        title=update_data.get("title"),
+        description=update_data.get("description"),
+        fair_date=fair_date,
+        location=update_data.get("location"),
+        is_active=update_data.get("is_active"),
+        slug=new_slug,
+        banner_image_url=update_data.get("banner_image_url"),
+        industries=update_data.get("industries"),
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Job Fair not found")
+    return updated
 
 
 @router.delete("/{id}", status_code=204)
@@ -179,13 +197,8 @@ async def delete_job_fair(
     admin: User = Depends(require_super_admin),
 ):
     """Super Admin: Delete a Job Fair."""
-    result = await db.execute(select(JobFair).where(JobFair.id == id))
-    job_fair = result.scalar_one_or_none()
-    if not job_fair:
+    if not await delete_job_fair_db(db, id):
         raise HTTPException(status_code=404, detail="Job Fair not found")
-
-    await db.delete(job_fair)
-    await db.commit()
     return Response(status_code=204)
 
 
@@ -197,17 +210,15 @@ async def upload_job_fair_banner(
     admin: User = Depends(require_super_admin),
 ):
     """Super Admin: Upload or replace the banner/poster image for a Job Fair."""
-    result = await db.execute(select(JobFair).where(JobFair.id == id))
-    job_fair = result.scalar_one_or_none()
-    if not job_fair:
+    existing = await get_job_fair_db(db, id)
+    if not existing:
         raise HTTPException(status_code=404, detail="Job Fair not found")
 
     banner_url = await _save_banner_image(banner_image)
-    job_fair.banner_image_url = banner_url
-    job_fair.updated_at = datetime.utcnow()
-    await db.commit()
-    await db.refresh(job_fair)
-    return job_fair
+    updated = await set_job_fair_banner_db(db, id, banner_url)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Job Fair not found")
+    return updated
 
 
 # ── PUBLIC & AUTHENTICATED USER ENDPOINTS ──────────────────────────────────────
@@ -222,46 +233,9 @@ async def list_job_fairs(
     page_size: int = Query(12, ge=1, le=100),
 ):
     """List all Job Fairs with search, sorting, and pagination (open to all authenticated users)."""
-    query = select(JobFair)
-
-    if search:
-        term = f"%{search.strip()}%"
-        query = query.where(
-            or_(
-                JobFair.title.ilike(term),
-                JobFair.location.ilike(term),
-            )
-        )
-
-    if sort_by == "date_desc":
-        query = query.order_by(JobFair.date.desc())
-    elif sort_by == "title_asc":
-        query = query.order_by(JobFair.title.asc())
-    elif sort_by == "title_desc":
-        query = query.order_by(JobFair.title.desc())
-    else:
-        # Default: date_asc — soonest upcoming first
-        query = query.order_by(JobFair.date.asc())
-
-    # Count
-    count_query = select(func.count(JobFair.id))
-    if search:
-        term = f"%{search.strip()}%"
-        count_query = count_query.where(
-            or_(
-                JobFair.title.ilike(term),
-                JobFair.location.ilike(term),
-            )
-        )
-    total_res = await db.execute(count_query)
-    total = total_res.scalar() or 0
-
-    # Paginate
-    offset = (page - 1) * page_size
-    query = query.offset(offset).limit(page_size)
-    result = await db.execute(query)
-    items = result.scalars().all()
-
+    items, total = await list_job_fairs_db(
+        db, search=search, sort_by=sort_by or "date_asc", page=page, page_size=page_size
+    )
     return JobFairListResponse(items=items, total=total, page=page, page_size=page_size)
 
 @router.get("/my-fairs", response_model=List[JobFairOut])
@@ -272,20 +246,18 @@ async def get_my_job_fairs(
     """Get all Job Fairs that the logged-in user (seeker or provider) has registered for."""
     if current_user.role == UserRole.provider:
         result = await db.execute(
-            select(JobFair)
-            .join(JobFairCompany, JobFair.id == JobFairCompany.job_fair_id)
+            select(JobFairCompany.job_fair_id)
             .where(JobFairCompany.provider_id == current_user.id)
-            .order_by(JobFair.date.desc())
         )
-        return result.scalars().all()
+        fair_ids = [str(row[0]) for row in result.fetchall()]
+        return await list_job_fairs_for_ids_db(db, fair_ids)
     elif current_user.role == UserRole.seeker:
         result = await db.execute(
-            select(JobFair)
-            .join(JobFairSeeker, JobFair.id == JobFairSeeker.job_fair_id)
+            select(JobFairSeeker.job_fair_id)
             .where(JobFairSeeker.seeker_id == current_user.id)
-            .order_by(JobFair.date.desc())
         )
-        return result.scalars().all()
+        fair_ids = [str(row[0]) for row in result.fetchall()]
+        return await list_job_fairs_for_ids_db(db, fair_ids)
     else:
         raise HTTPException(
             status_code=403,
@@ -307,12 +279,11 @@ async def get_provider_participated_job_fairs(
         )
 
     result = await db.execute(
-        select(JobFair)
-        .join(JobFairCompany, JobFair.id == JobFairCompany.job_fair_id)
+        select(JobFairCompany.job_fair_id)
         .where(JobFairCompany.provider_id == current_user.id)
-        .order_by(JobFair.date.desc())
     )
-    return result.scalars().all()
+    fair_ids = [str(row[0]) for row in result.fetchall()]
+    return await list_job_fairs_for_ids_db(db, fair_ids)
 
 
 @router.get("/{id_or_slug}", response_model=JobFairOut)
@@ -342,6 +313,13 @@ async def register_company_to_job_fair(
     company_location: str = Form(None),
     company_size: str = Form(None),
     company_address: str = Form(None),
+    website: str = Form(None),
+    state: str = Form(None),
+    city: str = Form(None),
+    contact_person_name: str = Form(None),
+    contact_person_designation: str = Form(None),
+    contact_person_phone: str = Form(None),
+    openings: str = Form(None),
     logo: UploadFile = File(None),
     db: AsyncSession = Depends(get_db),
 ):
@@ -382,6 +360,46 @@ async def register_company_to_job_fair(
 
         logo_url = f"/uploads/company_logos/{safe_name}"
 
+    import json as _json
+
+    # Resolve location from state/city if provided
+    resolved_location = company_location
+    if city or state:
+        parts = [p for p in [city, state] if p and p.strip()]
+        if parts:
+            resolved_location = ", ".join(parts)
+
+    # Parse multiple openings JSON if provided
+    parsed_openings = []
+    if openings:
+        try:
+            parsed_openings = _json.loads(openings)
+            if not isinstance(parsed_openings, list):
+                parsed_openings = []
+        except (ValueError, TypeError):
+            parsed_openings = []
+
+    if parsed_openings:
+        dept_parts = [o.get("department", "").strip() for o in parsed_openings if o.get("department")]
+        vac_parts = [str(o.get("vacancy", "")).strip() for o in parsed_openings if o.get("vacancy")]
+        if dept_parts and not department:
+            department = ", ".join(dept_parts)
+        if vac_parts and not vacancy:
+            vacancy = ", ".join(vac_parts)
+
+    extra_meta = {}
+    if website and website.strip():
+        extra_meta["website"] = website.strip()
+    if contact_person_name and contact_person_name.strip():
+        extra_meta["contact_person_name"] = contact_person_name.strip()
+    if contact_person_designation and contact_person_designation.strip():
+        extra_meta["contact_person_designation"] = contact_person_designation.strip()
+    if contact_person_phone and contact_person_phone.strip():
+        extra_meta["contact_person_phone"] = contact_person_phone.strip()
+    if parsed_openings:
+        extra_meta["openings"] = parsed_openings
+    extra_meta_json = _json.dumps(extra_meta) if extra_meta else None
+
     # Check if User (provider) exists by email only
     user_result = await db.execute(
         select(User).where(User.email == email)
@@ -395,7 +413,7 @@ async def register_company_to_job_fair(
 
         user = User(
             id=str(uuid.uuid4()),
-            first_name=company_name,
+            first_name=(contact_person_name or company_name).strip(),
             last_name="",
             email=email,
             phone=phone,
@@ -403,10 +421,14 @@ async def register_company_to_job_fair(
             role=UserRole.provider,
             company_name=company_name,
             company_type=CompanyType.company,
+            industry=sector,
+            job_role=contact_person_designation,
             profile_pic_url=logo_url,
-            company_location=company_location,
+            company_location=resolved_location,
             company_size=company_size,
             company_address=company_address,
+            job_roles_offering=_json.dumps(parsed_openings) if parsed_openings else None,
+            specific_requirements=extra_meta_json,
             is_verified=True,
             onboarding_complete=True,
             totp_secret=totp_service.generate_secret(),
@@ -442,12 +464,20 @@ async def register_company_to_job_fair(
             user.company_name = company_name
         if logo_url and not user.profile_pic_url:
             user.profile_pic_url = logo_url
-        if company_location and not user.company_location:
-            user.company_location = company_location
+        if resolved_location and not user.company_location:
+            user.company_location = resolved_location
         if company_size and not user.company_size:
             user.company_size = company_size
         if company_address and not user.company_address:
             user.company_address = company_address
+        if sector and not user.industry:
+            user.industry = sector
+        if contact_person_designation and not user.job_role:
+            user.job_role = contact_person_designation
+        if parsed_openings and not user.job_roles_offering:
+            user.job_roles_offering = _json.dumps(parsed_openings)
+        if extra_meta_json and not user.specific_requirements:
+            user.specific_requirements = extra_meta_json
         if user.role != UserRole.provider:
             # Coerce role to provider if registration was performed as seeker/other
             user.role = UserRole.provider
@@ -519,6 +549,46 @@ async def get_job_fair_qrcode(
 
 
 # ── ORGANIZER REGISTRANT LISTS ────────────────────────────────────────────────
+
+@router.get("/{id_or_slug}/companies/public", response_model=JobFairCompanyPublicListResponse)
+async def get_job_fair_companies_public(
+    id_or_slug: str,
+    db: AsyncSession = Depends(get_db),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
+):
+    """Public preview of registered companies (no contact details)."""
+    jf = await get_job_fair_by_id_or_slug(id_or_slug, db)
+    if not jf:
+        raise HTTPException(status_code=404, detail="Job Fair not found")
+
+    count_res = await db.execute(
+        select(func.count(JobFairCompany.id)).where(JobFairCompany.job_fair_id == jf.id)
+    )
+    total = count_res.scalar() or 0
+
+    offset = (page - 1) * page_size
+    result = await db.execute(
+        select(JobFairCompany, User)
+        .join(User, JobFairCompany.provider_id == User.id)
+        .where(JobFairCompany.job_fair_id == jf.id)
+        .order_by(JobFairCompany.registered_at.desc())
+        .offset(offset)
+        .limit(page_size)
+    )
+
+    items = [
+        JobFairCompanyPublicOut(
+            id=jfc.id,
+            company_name=provider.company_name or provider.first_name,
+            profile_pic_url=provider.profile_pic_url,
+            sector=jfc.sector,
+            vacancy=jfc.vacancy,
+        )
+        for jfc, provider in result.all()
+    ]
+    return JobFairCompanyPublicListResponse(items=items, total=total, page=page, page_size=page_size)
+
 
 @router.get("/{id_or_slug}/companies", response_model=JobFairCompanyListResponse)
 async def get_job_fair_companies(

@@ -228,7 +228,7 @@ async def send_job_fair_welcome_email(
     html = prepare_html_for_delivery(html)
     await send_campaign_email(
         to_email,
-        "11th Mega Job Fair 2026 (4 June) – Login & Complete Your Profile",
+        "The Job Carnival 2026 (19 June) – Login & Complete Your Profile",
         html,
         raise_on_error=True,
     )

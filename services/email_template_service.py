@@ -14,6 +14,7 @@ _UPLOADS_ROOT = Path(settings.UPLOAD_DIR)
 
 _BRAND_LOGO_FILES: dict[str, tuple[str, ...]] = {
     "cicu_logo": ("cicu_logo.jpg", "cicu_logo.png"),
+    "lgc_logo": ("lgc_logo.png", "lgc_logo.jpg", "lgc_logo.jpeg"),
     "rojgar_logo": ("rojgar_logo.png",),
 }
 

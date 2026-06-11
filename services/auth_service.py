@@ -92,6 +92,17 @@ async def require_provider(user: User = Depends(require_verified)) -> User:
     return user
 
 
+async def require_provider_or_super_admin(user: User = Depends(get_current_user)) -> User:
+    if getattr(user, "is_super_admin", False):
+        return user
+    if not user.is_verified:
+        raise HTTPException(status_code=403, detail="Email not verified")
+    role_str = user.role.value if hasattr(user.role, "value") else str(user.role)
+    if role_str != "provider":
+        raise HTTPException(status_code=403, detail="Only job providers can perform this action")
+    return user
+
+
 async def require_super_admin(user: User = Depends(get_current_user)) -> User:
     if not getattr(user, "is_super_admin", False):
         raise HTTPException(status_code=403, detail="Super admin access required")

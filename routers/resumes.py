@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database import get_db
 from models.user import User
 from schemas.jobs import ResumeImproveRequest, ResumeOut, ResumeProcessingStatusOut
-from services.auth_service import require_seeker, require_provider
+from services.auth_service import require_seeker, require_provider_or_super_admin
 from controllers.resumes_controller import (
     upload_resume as ctrl_upload_resume,
     get_my_resume_processing_status as ctrl_get_my_resume_processing_status,
@@ -40,12 +40,20 @@ async def download_my_resume(user: User = Depends(require_seeker), db: AsyncSess
 
 
 @router.get("/{user_id}/download")
-async def download_candidate_resume(user_id: str, provider: User = Depends(require_provider), db: AsyncSession = Depends(get_db)):
+async def download_candidate_resume(
+    user_id: str,
+    _user: User = Depends(require_provider_or_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
     return await ctrl_download_candidate_resume(user_id, db)
 
 
 @router.get("/{user_id}/status")
-async def check_candidate_resume_status(user_id: str, provider: User = Depends(require_provider), db: AsyncSession = Depends(get_db)):
+async def check_candidate_resume_status(
+    user_id: str,
+    _user: User = Depends(require_provider_or_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
     return await ctrl_check_candidate_resume_status(user_id, db)
 
 

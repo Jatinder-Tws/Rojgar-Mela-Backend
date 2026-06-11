@@ -164,11 +164,10 @@ async def apply_for_job(
         # Link to Job Fair if job_fair_id or job_fair_slug is provided
         job_fair_id_to_link = candidate_in.job_fair_id
         if not job_fair_id_to_link and candidate_in.job_fair_slug:
-            from models.job_fair import JobFair
-            jf_result = await db.execute(select(JobFair).filter(JobFair.slug == candidate_in.job_fair_slug))
-            jf = jf_result.scalars().first()
-            if jf:
-                job_fair_id_to_link = jf.id
+            from services.job_fair_db import get_job_fair_db
+            jf_out = await get_job_fair_db(db, candidate_in.job_fair_slug)
+            if jf_out:
+                job_fair_id_to_link = jf_out.id
         
         if job_fair_id_to_link:
             from models.job_fair import JobFairSeeker
