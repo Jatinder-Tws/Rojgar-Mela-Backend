@@ -4,16 +4,30 @@ from typing import Any, Optional
 
 from jinja2 import Environment, Template, select_autoescape
 
+from config import settings
 from models.email_template import EmailTemplate
 from models.user import User, UserRole
 
 _jinja_env = Environment(autoescape=select_autoescape(["html", "xml"]))
 
+# External logo URLs used in legacy templates — replaced with cid: at send time.
+CICU_LOGO_URL = (
+    "https://spatial-aqua-roadrunner.myfilebase.com/ipfs/"
+    "QmSXRsnibbzf9yNo8Zqieqc35Ybbu5wn1YneR9MJkjgM9u"
+)
+ROJGAR_LOGO_URL = (
+    "https://spatial-aqua-roadrunner.myfilebase.com/ipfs/"
+    "QmP8nbxreh5FS1KABK3599syFUFY5UoV7hHcrA9riAfRxT"
+)
+
 SAMPLE_CONTEXT = {
     "first_name": "Rahul",
     "last_name": "Sharma",
     "name": "Rahul Sharma",
+    "seeker_name": "Rahul Sharma",
     "email": "rahul@example.com",
+    "password": "",
+    "profile_link": f"{settings.FRONTEND_URL.rstrip('/')}/login",
     "industry": "Information Technology",
     "company_name": "Tech Solutions Pvt Ltd",
     "role_label": "Job Seeker",
@@ -34,17 +48,31 @@ def build_user_context(user: User) -> dict[str, Any]:
     last = user.last_name or ""
     full_name = f"{first} {last}".strip() or "User"
     role_label = "Job Provider" if user.role == UserRole.provider else "Job Seeker"
+    login_url = f"{settings.FRONTEND_URL.rstrip('/')}/login"
     return {
         "first_name": first or "User",
         "last_name": last,
         "name": full_name,
+        "seeker_name": full_name,
         "email": user.email or "",
+        "password": "",
+        "profile_link": login_url,
         "industry": user.industry or "",
         "company_name": user.company_name or "",
         "role_label": role_label,
         "phone": user.phone or "",
         "year": datetime.utcnow().year,
     }
+
+
+def prepare_html_for_delivery(html_body: str) -> str:
+    """Normalize campaign HTML: inline logos and strip stray placeholder text."""
+    html = html_body
+    html = html.replace(CICU_LOGO_URL, "cid:cicu_logo")
+    html = html.replace(ROJGAR_LOGO_URL, "cid:rojgar_logo")
+    # Remove leftover JS-style placeholder text sometimes pasted into templates.
+    html = re.sub(r"(?i)(?<![\w>])undefined(?![\w<])", "", html)
+    return html
 
 
 def render_template_string(template_str: str, context: dict[str, Any]) -> str:
@@ -57,7 +85,7 @@ def render_email_template(
 ) -> tuple[str, str]:
     ctx = {**SAMPLE_CONTEXT, **(context or {})}
     subject = render_template_string(template.subject, ctx)
-    html_body = render_template_string(template.html_body, ctx)
+    html_body = prepare_html_for_delivery(render_template_string(template.html_body, ctx))
     return subject, html_body
 
 
@@ -67,4 +95,6 @@ def preview_email(
     sample_data: Optional[dict[str, Any]] = None,
 ) -> tuple[str, str]:
     ctx = {**SAMPLE_CONTEXT, **(sample_data or {})}
-    return render_template_string(subject, ctx), render_template_string(html_body, ctx)
+    rendered_subject = render_template_string(subject, ctx)
+    rendered_html = prepare_html_for_delivery(render_template_string(html_body, ctx))
+    return rendered_subject, rendered_html

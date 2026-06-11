@@ -16,7 +16,8 @@ from models.email_campaign import (
 from models.email_template import EmailTemplate
 from models.user import User, UserRole
 from services.email_campaign_job_store import create_campaign_job, get_job, update_job
-from services.email_service import _send_email
+from config import settings
+from services.email_service import send_campaign_email
 from services.email_template_service import build_user_context, render_email_template
 
 
@@ -189,7 +190,7 @@ async def _run_campaign_send_job_inner(job_id: str, campaign_id: str) -> None:
             try:
                 context = build_user_context(user)
                 subject, html_body = render_email_template(template, context)
-                await _send_email(user.email, subject, html_body, raise_on_error=True)
+                await send_campaign_email(user.email, subject, html_body, raise_on_error=True)
                 recipient.status = RecipientStatus.sent
                 recipient.sent_at = datetime.utcnow()
                 sent += 1
@@ -241,11 +242,15 @@ def _build_recipient_context(recipient: EmailCampaignRecipient, user: Optional[U
     parts = [p for p in name.split() if p]
     first = parts[0] if parts else "User"
     last = " ".join(parts[1:]) if len(parts) > 1 else ""
+    login_url = f"{settings.FRONTEND_URL.rstrip('/')}/login"
     return {
         "first_name": first,
         "last_name": last,
         "name": name,
+        "seeker_name": name,
         "email": recipient.email,
+        "password": "",
+        "profile_link": login_url,
         "industry": "",
         "company_name": "",
         "role_label": "User",
@@ -293,7 +298,7 @@ async def resend_to_recipient(
     try:
         context = _build_recipient_context(recipient, user)
         subject, html_body = render_email_template(template, context)
-        await _send_email(recipient.email, subject, html_body, raise_on_error=True)
+        await send_campaign_email(recipient.email, subject, html_body, raise_on_error=True)
         recipient.status = RecipientStatus.sent
         recipient.error = None
         recipient.sent_at = datetime.utcnow()
@@ -331,7 +336,7 @@ async def resend_all_failed(db: AsyncSession, campaign_id: str) -> tuple[int, in
         try:
             context = _build_recipient_context(recipient, user)
             subject, html_body = render_email_template(template, context)
-            await _send_email(recipient.email, subject, html_body, raise_on_error=True)
+            await send_campaign_email(recipient.email, subject, html_body, raise_on_error=True)
             recipient.status = RecipientStatus.sent
             recipient.error = None
             recipient.sent_at = datetime.utcnow()

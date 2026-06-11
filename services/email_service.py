@@ -2,11 +2,13 @@ from datetime import datetime, date
 from pathlib import Path
 from typing import Optional
 import re
+import uuid
 
 import aiosmtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.image import MIMEImage
+from email.utils import parseaddr
 from jinja2 import Environment, FileSystemLoader
 
 from config import settings
@@ -16,6 +18,44 @@ _template_dir = Path(__file__).parent.parent / "templates"
 _env = Environment(loader=FileSystemLoader(str(_template_dir)), autoescape=True)
 
 _UPLOADS_DIR = Path(__file__).parent.parent / "uploads"
+
+_INLINE_LOGOS = (
+    ("cicu_logo", ("cicu_logo.jpg", "cicu_logo.png")),
+    ("rojgar_logo", ("rojgar_logo.png",)),
+)
+
+
+def _sender_domain() -> str:
+    _, addr = parseaddr(settings.SMTP_FROM)
+    if addr and "@" in addr:
+        return addr.split("@", 1)[1]
+    return "rojgarmela.ai"
+
+
+def _message_id() -> str:
+    return f"<{uuid.uuid4().hex}@{_sender_domain()}>"
+
+
+def _html_to_plain_text(html_body: str) -> str:
+    text = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", "", html_body)
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
+    text = re.sub(r"</p>", "\n\n", text, flags=re.I)
+    text = re.sub(r"<[^<]+>", "", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _apply_common_headers(msg: MIMEMultipart, to_email: str, subject: str, *, is_bulk: bool = False) -> None:
+    msg["Subject"] = subject
+    msg["From"] = settings.SMTP_FROM
+    msg["To"] = to_email
+    msg["Message-ID"] = _message_id()
+    msg["Reply-To"] = settings.SMTP_USER or parseaddr(settings.SMTP_FROM)[1]
+    if is_bulk:
+        msg["Precedence"] = "bulk"
+        reply_addr = parseaddr(settings.SMTP_FROM)[1] or settings.SMTP_USER
+        if reply_addr:
+            msg["List-Unsubscribe"] = f"<mailto:{reply_addr}?subject=unsubscribe>"
 
 
 def _attach_inline_image(msg: MIMEMultipart, file_path: Path, content_id: str) -> None:
@@ -32,22 +72,21 @@ def _attach_inline_image(msg: MIMEMultipart, file_path: Path, content_id: str) -
     msg.attach(image)
 
 
-async def _send_email(to_email: str, subject: str, html_body: str, *, raise_on_error: bool = False) -> None:
-    """Internal SMTP sender using aiosmtplib."""
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = settings.SMTP_FROM
-    msg["To"] = to_email
-    msg["Message-ID"] = f"<{datetime.utcnow().timestamp()}@jobmatch.ai>"
-    msg["Reply-To"] = settings.SMTP_USER
-    
-    # Create plain text version by stripping HTML tags
-    text_body = re.sub('<[^<]+>', '', html_body)
-    
-    # Attach parts (plain text must be attached first)
-    msg.attach(MIMEText(text_body, "plain"))
-    msg.attach(MIMEText(html_body, "html"))
+def _attach_brand_logos(msg: MIMEMultipart, html_body: str) -> None:
+    """Attach CICU/Rojgar logos when the HTML references them via cid:."""
+    if "cid:cicu_logo" not in html_body and "cid:rojgar_logo" not in html_body:
+        return
+    for content_id, filenames in _INLINE_LOGOS:
+        if f"cid:{content_id}" not in html_body:
+            continue
+        for filename in filenames:
+            path = _UPLOADS_DIR / filename
+            if path.is_file():
+                _attach_inline_image(msg, path, content_id)
+                break
 
+
+async def _deliver_message(msg: MIMEMultipart, to_email: str, *, raise_on_error: bool = False) -> None:
     try:
         use_tls = settings.SMTP_PORT == 465
         await aiosmtplib.send(
@@ -64,6 +103,37 @@ async def _send_email(to_email: str, subject: str, html_body: str, *, raise_on_e
         print(f"[EMAIL ERROR] Failed to send to {to_email}: {err_msg}")
         if raise_on_error:
             raise RuntimeError(err_msg) from e
+
+
+async def _send_email(to_email: str, subject: str, html_body: str, *, raise_on_error: bool = False) -> None:
+    """Internal SMTP sender using aiosmtplib."""
+    msg = MIMEMultipart("alternative")
+    _apply_common_headers(msg, to_email, subject)
+    text_body = _html_to_plain_text(html_body)
+    msg.attach(MIMEText(text_body, "plain"))
+    msg.attach(MIMEText(html_body, "html"))
+    await _deliver_message(msg, to_email, raise_on_error=raise_on_error)
+
+
+async def send_campaign_email(
+    to_email: str,
+    subject: str,
+    html_body: str,
+    *,
+    raise_on_error: bool = False,
+) -> None:
+    """Send campaign HTML with inline brand logos and bulk-friendly headers."""
+    msg = MIMEMultipart("related")
+    _apply_common_headers(msg, to_email, subject, is_bulk=True)
+
+    msg_alternative = MIMEMultipart("alternative")
+    text_body = _html_to_plain_text(html_body)
+    msg_alternative.attach(MIMEText(text_body, "plain"))
+    msg_alternative.attach(MIMEText(html_body, "html"))
+    msg.attach(msg_alternative)
+
+    _attach_brand_logos(msg, html_body)
+    await _deliver_message(msg, to_email, raise_on_error=raise_on_error)
 
 
 async def send_otp_email(to_email: str, otp: str, first_name: str) -> None:
@@ -160,37 +230,12 @@ async def send_job_fair_welcome_email(
         year=datetime.utcnow().year,
     )
 
-    # Build the email with inline image
-    # Structure: mixed -> related -> alternative (text + html) + image
-    msg = MIMEMultipart("related")
-    msg["Subject"] = "11th Mega Job Fair 2026 (4 June) – Login & Complete Your Profile"
-    msg["From"] = settings.SMTP_FROM
-    msg["To"] = to_email
-    msg["Message-ID"] = f"<{datetime.utcnow().timestamp()}@jobmatch.ai>"
-    msg["Reply-To"] = settings.SMTP_USER
+    from services.email_template_service import prepare_html_for_delivery
 
-    # Create the text/html alternatives
-    msg_alternative = MIMEMultipart("alternative")
-    text_body = re.sub('<[^<]+>', '', html)
-    msg_alternative.attach(MIMEText(text_body, "plain"))
-    msg_alternative.attach(MIMEText(html, "html"))
-    msg.attach(msg_alternative)
-
-    _attach_inline_image(msg, _UPLOADS_DIR / "cicu_logo.jpg", "cicu_logo")
-    _attach_inline_image(msg, _UPLOADS_DIR / "rojgar_logo.png", "rojgar_logo")
-
-    # Send the email
-    try:
-        use_tls = settings.SMTP_PORT == 465
-        await aiosmtplib.send(
-            msg,
-            hostname=settings.SMTP_HOST,
-            port=settings.SMTP_PORT,
-            username=settings.SMTP_USER,
-            password=settings.SMTP_PASSWORD,
-            use_tls=use_tls,
-            start_tls=settings.SMTP_TLS if not use_tls else False,
-        )
-    except Exception as e:
-        print(f"[EMAIL ERROR] Failed to send to {to_email}: {e}")
-        raise
+    html = prepare_html_for_delivery(html)
+    await send_campaign_email(
+        to_email,
+        "11th Mega Job Fair 2026 (4 June) – Login & Complete Your Profile",
+        html,
+        raise_on_error=True,
+    )
