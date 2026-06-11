@@ -1,8 +1,9 @@
 """Super admin email templates and bulk email campaigns."""
 import asyncio
+import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,6 +30,7 @@ from schemas.email_admin import (
     EmailTemplateCreate,
     EmailTemplateListResponse,
     EmailTemplateOut,
+    EmailImageUploadResponse,
     EmailTemplatePreviewRequest,
     EmailTemplatePreviewResponse,
     EmailTemplateTestSendRequest,
@@ -45,7 +47,14 @@ from services.email_campaign_service import (
     start_campaign_job,
 )
 from services.email_service import _send_email, send_campaign_email
-from services.email_template_service import preview_email, render_email_template, slugify
+from config import settings
+from services.email_template_service import (
+    build_image_html_snippet,
+    email_assets_dir,
+    preview_email,
+    render_email_template,
+    slugify,
+)
 
 router = APIRouter(prefix="/super-admin", tags=["super-admin-email"])
 
@@ -139,6 +148,44 @@ async def preview_email_template(
 ):
     subject, html_body = preview_email(body.subject, body.html_body, body.sample_data)
     return EmailTemplatePreviewResponse(subject=subject, html_body=html_body)
+
+
+_ALLOWED_IMAGE_TYPES = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+}
+
+
+@router.post("/email-templates/upload-image", response_model=EmailImageUploadResponse)
+async def upload_email_template_image(
+    file: UploadFile = File(...),
+    _admin: User = Depends(require_super_admin),
+):
+    content_type = (file.content_type or "").lower()
+    if content_type not in _ALLOWED_IMAGE_TYPES:
+        raise HTTPException(status_code=400, detail="Only PNG, JPEG, GIF, and WebP images are allowed")
+
+    data = await file.read()
+    max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
+    if len(data) > max_bytes:
+        raise HTTPException(status_code=400, detail=f"Image must be under {settings.MAX_UPLOAD_MB} MB")
+    if not data:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    ext = _ALLOWED_IMAGE_TYPES[content_type]
+    content_id = f"email_img_{uuid.uuid4().hex[:12]}"
+    dest = email_assets_dir() / f"{content_id}{ext}"
+    dest.write_bytes(data)
+
+    public_url = f"/uploads/email_assets/{content_id}{ext}"
+    return EmailImageUploadResponse(
+        cid=content_id,
+        url=public_url,
+        html_snippet=build_image_html_snippet(content_id),
+    )
 
 
 @router.get("/email-templates/{template_id}", response_model=EmailTemplateOut)

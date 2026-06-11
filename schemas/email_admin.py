@@ -60,6 +60,12 @@ class EmailTemplateTestSendRequest(BaseModel):
     to_email: str
 
 
+class EmailImageUploadResponse(BaseModel):
+    cid: str
+    url: str
+    html_snippet: str
+
+
 class AudienceFilter(BaseModel):
     industries: Optional[list[str]] = None
     user_ids: Optional[list[str]] = None
