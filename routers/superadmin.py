@@ -1,15 +1,16 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel, EmailStr
 
-from config import settings
 from database import get_db
-from models.user import User, UserRole
-from services.auth_service import hash_password, verify_password, create_access_token
 from schemas.auth import UserOut, TokenResponse
+from controllers.superadmin_controller import (
+    register_superadmin as ctrl_register_superadmin,
+    login_superadmin as ctrl_login_superadmin,
+)
 
 router = APIRouter(prefix="/superadmin", tags=["superadmin"])
+
 
 class SuperAdminRegisterRequest(BaseModel):
     first_name: str
@@ -17,79 +18,19 @@ class SuperAdminRegisterRequest(BaseModel):
     email: EmailStr
     phone: str
     password: str
-    secret_key: str  # Required to prove authorization to create a superadmin
+    secret_key: str
+
 
 class SuperAdminLoginRequest(BaseModel):
     email: EmailStr
     password: str
 
+
 @router.post("/register", response_model=TokenResponse, status_code=201)
-async def register_superadmin(
-    body: SuperAdminRegisterRequest,
-    db: AsyncSession = Depends(get_db)
-):
-    if not settings.SUPERADMIN_SECRET_KEY:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="SUPERADMIN_SECRET_KEY is not configured."
-        )
+async def register_superadmin(body: SuperAdminRegisterRequest, db: AsyncSession = Depends(get_db)):
+    return await ctrl_register_superadmin(body, db)
 
-    if body.secret_key != settings.SUPERADMIN_SECRET_KEY:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Invalid superadmin secret key."
-        )
-
-    # Check duplicate email or phone
-    existing = await db.execute(
-        select(User).where((User.email == body.email) | (User.phone == body.phone))
-    )
-    if existing.scalar_one_or_none():
-        raise HTTPException(
-            status_code=409, detail="An account with this email or phone already exists"
-        )
-
-    user = User(
-        first_name=body.first_name,
-        last_name=body.last_name,
-        email=body.email,
-        phone=body.phone,
-        role=UserRole.superadmin,
-        hashed_password=hash_password(body.password),
-        is_verified=True,  # Auto verify superadmins for simplicity
-        onboarding_complete=True,
-        is_assessment_done=True,
-    )
-
-    db.add(user)
-    await db.commit()
-    await db.refresh(user)
-
-    token = create_access_token({"sub": user.id})
-    return TokenResponse(access_token=token, user=UserOut.model_validate(user))
 
 @router.post("/login", response_model=TokenResponse)
-async def login_superadmin(
-    body: SuperAdminLoginRequest,
-    db: AsyncSession = Depends(get_db)
-):
-    result = await db.execute(select(User).where(User.email == body.email))
-    user = result.scalar_one_or_none()
-
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="No account found with this email"
-        )
-
-    if user.role != UserRole.superadmin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="This account does not have superadmin privileges"
-        )
-
-    if not verify_password(body.password, user.hashed_password):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="Incorrect password"
-        )
-
-    token = create_access_token({"sub": user.id})
-    return TokenResponse(access_token=token, user=UserOut.model_validate(user))
+async def login_superadmin(body: SuperAdminLoginRequest, db: AsyncSession = Depends(get_db)):
+    return await ctrl_login_superadmin(body, db)

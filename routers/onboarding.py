@@ -1,13 +1,14 @@
-from fastapi import APIRouter, Depends, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 from models.user import User
 from schemas.auth import UserOut, OnboardingRequest
 from services.auth_service import require_verified
-from routers.users import complete_onboarding
+from controllers.users_controller import complete_onboarding
 
 router = APIRouter(prefix="/onboarding", tags=["onboarding"])
+
 
 @router.post("/complete", response_model=UserOut)
 async def onboarding_complete_alias(
