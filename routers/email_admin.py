@@ -44,7 +44,7 @@ from services.email_campaign_service import (
     run_campaign_send_job,
     start_campaign_job,
 )
-from services.email_service import _send_email
+from services.email_service import _send_email, send_campaign_email
 from services.email_template_service import preview_email, render_email_template, slugify
 
 router = APIRouter(prefix="/super-admin", tags=["super-admin-email"])
@@ -213,7 +213,7 @@ async def test_send_email_template(
         raise HTTPException(status_code=404, detail="Template not found")
 
     subject, html_body = render_email_template(template)
-    await _send_email(body.to_email, subject, html_body)
+    await send_campaign_email(body.to_email, subject, html_body)
     return {"message": f"Test email sent to {body.to_email}"}
 
 
