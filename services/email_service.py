@@ -19,10 +19,6 @@ _env = Environment(loader=FileSystemLoader(str(_template_dir)), autoescape=True)
 
 _UPLOADS_DIR = Path(__file__).parent.parent / "uploads"
 
-_INLINE_LOGOS = (
-    ("cicu_logo", ("cicu_logo.jpg", "cicu_logo.png")),
-    ("rojgar_logo", ("rojgar_logo.png",)),
-)
 
 
 def _sender_domain() -> str:
@@ -72,18 +68,15 @@ def _attach_inline_image(msg: MIMEMultipart, file_path: Path, content_id: str) -
     msg.attach(image)
 
 
-def _attach_brand_logos(msg: MIMEMultipart, html_body: str) -> None:
-    """Attach CICU/Rojgar logos when the HTML references them via cid:."""
-    if "cid:cicu_logo" not in html_body and "cid:rojgar_logo" not in html_body:
-        return
-    for content_id, filenames in _INLINE_LOGOS:
-        if f"cid:{content_id}" not in html_body:
-            continue
-        for filename in filenames:
-            path = _UPLOADS_DIR / filename
-            if path.is_file():
-                _attach_inline_image(msg, path, content_id)
-                break
+def _attach_inline_images(msg: MIMEMultipart, html_body: str) -> None:
+    """Attach all images referenced via cid: in the HTML body."""
+    from services.email_template_service import cid_to_file_path
+
+    content_ids = set(re.findall(r"cid:([a-zA-Z0-9_\-]+)", html_body))
+    for content_id in content_ids:
+        path = cid_to_file_path(content_id)
+        if path:
+            _attach_inline_image(msg, path, content_id)
 
 
 async def _deliver_message(msg: MIMEMultipart, to_email: str, *, raise_on_error: bool = False) -> None:
@@ -132,7 +125,7 @@ async def send_campaign_email(
     msg_alternative.attach(MIMEText(html_body, "html"))
     msg.attach(msg_alternative)
 
-    _attach_brand_logos(msg, html_body)
+    _attach_inline_images(msg, html_body)
     await _deliver_message(msg, to_email, raise_on_error=raise_on_error)
 
 
