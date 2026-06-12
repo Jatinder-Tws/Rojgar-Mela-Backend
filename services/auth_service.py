@@ -1,5 +1,6 @@
 import random
 import string
+import secrets
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -52,6 +53,24 @@ def generate_otp() -> str:
 
 def otp_expiry() -> datetime:
     return datetime.utcnow() + timedelta(minutes=10)
+
+
+def generate_secure_password(min_len: int = 8, max_len: int = 15) -> str:
+    lower = string.ascii_lowercase
+    upper = string.ascii_uppercase
+    digits = string.digits
+    special = "!@#$%^&*"
+    alphabet = lower + upper + digits + special
+    
+    length = secrets.choice(range(min_len, max_len + 1))
+    while True:
+        password = "".join(secrets.choice(alphabet) for _ in range(length))
+        if (any(c in lower for c in password) and
+            any(c in upper for c in password) and
+            any(c in digits for c in password) and
+            any(c in special for c in password)):
+            return password
+
 
 
 async def get_current_user(

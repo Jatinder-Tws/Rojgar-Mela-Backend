@@ -30,6 +30,7 @@ from services.auth_service import (
     get_current_user,
     hash_password,
     require_super_admin,
+    generate_secure_password,
 )
 from services.totp_service import totp_service
 from services.email_service import send_password_email
@@ -408,7 +409,7 @@ async def register_company_to_job_fair(
 
     if not user:
         # Create new provider user
-        temp_pwd = phone.strip()
+        temp_pwd = generate_secure_password()
         hashed_pwd = hash_password(temp_pwd)
 
         user = User(

@@ -11,7 +11,7 @@ from models.job import JobPosting
 from models.user import User, UserRole
 from models.imported_user_password import ImportedUserPassword
 from schemas.external_candidate import ExternalCandidateCreate, ExternalCandidateOut, ExternalCandidateMatchOut
-from services.auth_service import hash_password
+from services.auth_service import hash_password, generate_secure_password
 from services.email_service import send_job_fair_welcome_email, send_password_email
 from config import settings
 from typing import List
@@ -67,6 +67,7 @@ async def apply_for_job(
         candidate_data_dict = candidate_in.model_dump()
         candidate_data_dict.pop("job_fair_id", None)
         candidate_data_dict.pop("job_fair_slug", None)
+        candidate_data_dict.pop("agreed", None)
         db_candidate = ExternalCandidate(**candidate_data_dict)
         
         # Explicitly set generated fields to avoid None values in response
@@ -85,7 +86,7 @@ async def apply_for_job(
         first_name = name_parts[0]
         last_name = name_parts[1] if len(name_parts) > 1 else ""
         
-        dummy_password = candidate_in.phone.strip()
+        dummy_password = generate_secure_password()
         hashed_pwd = hash_password(dummy_password)
         
         addr_parts = []

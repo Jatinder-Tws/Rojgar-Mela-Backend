@@ -169,40 +169,96 @@ async def send_password_email(to_email: str, first_name: str, password: str, rol
     """Send account credentials email with temporary password."""
     role_label = "Job Seeker" if role == "seeker" else "Job Provider"
     html = f"""
-    <html>
-    <head><style>
-        body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
-        .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
-        .header {{ background: #2563eb; color: white; padding: 20px; text-align: center; }}
-        .content {{ padding: 30px 20px; background: #f9fafb; }}
-        .credentials {{ background: white; border: 2px dashed #2563eb; padding: 20px; margin: 20px 0; border-radius: 8px; }}
-        .password {{ font-size: 20px; font-weight: bold; color: #2563eb; letter-spacing: 2px; }}
-        .warning {{ background: #fef3c7; padding: 10px; border-radius: 4px; font-size: 13px; color: #92400e; }}
-        .footer {{ text-align: center; padding: 20px; color: #6b7280; font-size: 12px; }}
-    </style></head>
-    <body>
-        <div class="container">
-            <div class="header"><h1>Welcome to Rojgar Mela!</h1></div>
-            <div class="content">
-                <p>Hi <strong>{first_name}</strong>,</p>
-                <p>Your account has been created as a <strong>{role_label}</strong>.</p>
-                <p>Use the following credentials to log in:</p>
-                <div class="credentials">
-                    <p><strong>Email:</strong> {to_email}</p>
-                    <p><strong>Password:</strong></p>
-                    <p class="password">{password}</p>
-                </div>
-                <div class="warning">
-                    <strong>⚠️ Important:</strong> Please change this password after your first login.
-                    Do not share your password with anyone.
-                </div>
-                <p>After logging in, you'll be prompted to set up Two-Factor Authentication (TOTP) for added security.</p>
-            </div>
-            <div class="footer">© {datetime.utcnow().year} Rojgar Mela. All rights reserved.</div>
-        </div>
-    </body>
-    </html>
-    """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Your Account Credentials – CICU</title>
+</head>
+<body style="margin:0;padding:0;background:#eef4f9;font-family:'Segoe UI',Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased;">
+    <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="background:#eef4f9;padding:32px 16px;">
+        <tr>
+            <td align="center">
+                <table width="600" cellpadding="0" cellspacing="0" role="presentation" style="max-width:600px;width:100%;background:#ffffff;border-radius:4px;overflow:hidden;box-shadow:0 4px 18px rgba(15,40,80,0.08);">
+                    <!-- Partner logos: CICU (left) · Rojgar Mela (right) -->
+                    <tr>
+                        <td style="padding:25px 32px 8px;background:#ffffff;">
+                            <table width="100%" cellpadding="0" cellspacing="0" role="presentation">
+                                <tr>
+                                    <td align="left" valign="middle" width="50%" style="padding-right:12px;">
+                                        <img src="https://spatial-aqua-roadrunner.myfilebase.com/ipfs/QmSXRsnibbzf9yNo8Zqieqc35Ybbu5wn1YneR9MJkjgM9u" alt="CICU" style="height:56px;width:auto;max-width:240px;display:block;object-fit:contain;" />
+                                    </td>
+                                    <td align="right" valign="middle" width="50%" style="padding-left:12px;">
+                                        <img src="https://spatial-aqua-roadrunner.myfilebase.com/ipfs/QmP8nbxreh5FS1KABK3599syFUFY5UoV7hHcrA9riAfRxT" alt="Rojgar Mela AI" style="height:48px;width:auto;max-width:240px;display:block;margin-left:auto;object-fit:contain;" />
+                                    </td>
+                                </tr>
+                            </table>
+                        </td>
+                    </tr>
+                    <!-- Main body -->
+                    <tr>
+                        <td style="padding:10px 36px 24px;background:#ffffff;text-align:left;">
+                            <h1 style="margin:0 0 16px 0;font-size:22px;font-weight:700;color:#0f2d52;line-height:1.3;border-bottom:3px solid #ea580c;padding-bottom:10px;">Welcome to Rojgar Mela!</h1>
+                            <p style="margin:0 0 14px 0;font-size:15px;line-height:1.65;color:#1f2937;">Hi <strong>{first_name}</strong>,</p>
+                            <p style="margin:0 0 18px 0;font-size:15px;line-height:1.65;color:#1f2937;">Your account has been successfully created as a <strong>{role_label}</strong>. We are thrilled to welcome you to the Rojgar Mela platform!</p>
+                            <p style="margin:0 0 18px 0;font-size:15px;line-height:1.65;color:#1f2937;">Use the credentials below to log in to your account and get started:</p>
+                            <!-- Credentials Box -->
+                            <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="margin:0 0 22px 0;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;">
+                                <tr>
+                                    <td style="padding:16px 18px;">
+                                        <p style="margin:0 0 10px 0;font-size:12px;font-weight:700;color:#0f2d52;text-transform:uppercase;letter-spacing:0.06em;">Your Login Credentials</p>
+                                        <p style="margin:0 0 8px 0;font-size:14px;color:#334155;"><strong>Login Email:</strong> {to_email}</p>
+                                        <p style="margin:0;font-size:14px;color:#334155;"><strong>Temporary Password:</strong> <span style="font-family:monospace;font-size:16px;font-weight:bold;color:#ea580c;background:#fff7ed;padding:4px 8px;border-radius:4px;border:1px solid #ffedd5;">{password}</span></p>
+                                    </td>
+                                </tr>
+                            </table>
+                            <!-- Security Warning -->
+                            <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="margin:0 0 22px 0;background:#fffbeb;border-left:4px solid #d97706;border-radius:0 4px 4px 0;">
+                                <tr>
+                                    <td style="padding:16px 18px;">
+                                        <p style="margin:0 0 8px 0;font-size:14px;font-weight:700;color:#92400e;">⚠️ Security Notice</p>
+                                        <p style="margin:0;font-size:14px;line-height:1.65;color:#334155;">Please change your password immediately after logging in. Do not share your temporary credentials with anyone. For your protection, you will be prompted to set up Two-Factor Authentication (TOTP) upon first login.</p>
+                                    </td>
+                                </tr>
+                            </table>
+                            <!-- CTA -->
+                            <table cellpadding="0" align="center" cellspacing="0" role="presentation" style="margin:0 0 24px 0;" width="100%">
+                                <tr>
+                                    <td align="center">
+                                        <a href="{settings.FRONTEND_URL}/login" target="_blank" style="display:inline-block;background:#0f2d52;color:#ffffff;text-decoration:none;font-size:15px;font-weight:600;padding:14px 32px;border-radius:4px;letter-spacing:0.02em;">Log In to Dashboard</a>
+                                    </td>
+                                </tr>
+                            </table>
+                            <p style="margin:0;font-size:15px;line-height:1.6;color:#1f2937;">Regards,<br /><strong style="color:#0f2d52;">Mega Job Fair Organizing Committee</strong><br /><span style="font-size:13px;color:#64748b;">CICU x Rojgar Mela AI</span></p>
+                        </td>
+                    </tr>
+                    <!-- Footer with logos -->
+                    <tr>
+                        <td style="background:#eef5fb;padding:24px 32px 8px;border-top:1px solid #dbeafe;">
+                            <table width="100%" cellpadding="0" cellspacing="0" role="presentation">
+                                <tr>
+                                    <td align="left" valign="middle" width="50%"><img src="https://spatial-aqua-roadrunner.myfilebase.com/ipfs/QmSXRsnibbzf9yNo8Zqieqc35Ybbu5wn1YneR9MJkjgM9u" alt="CICU" style="height:48px;width:auto;max-width:200px;display:block;object-fit:contain;" /></td>
+                                    <td align="right" valign="middle" width="50%"><img src="https://spatial-aqua-roadrunner.myfilebase.com/ipfs/QmP8nbxreh5FS1KABK3599syFUFY5UoV7hHcrA9riAfRxT" alt="Rojgar Mela AI" style="height:40px;width:auto;max-width:200px;display:block;margin-left:auto;object-fit:contain;" /></td>
+                                </tr>
+                            </table>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td align="center" style="background:#eef5fb;padding:8px 32px 32px;">
+                            <p style="margin:0 0 8px 0;font-size:14px;color:#475569;line-height:1.5;">If you have any questions,</p>
+                            <p style="margin:0 0 6px 0;font-size:14px;color:#475569;line-height:1.5;">Please email us at <a href="mailto:usahuja@swanindia.com" style="color:#2563eb;text-decoration:none;font-weight:600;">cicu@cicuindia.org</a></p>
+                            <p style="margin:0 0 16px 0;font-size:14px;color:#475569;line-height:1.5;">or <a href="mailto:chamber@cicuindia.org" style="color:#2563eb;text-decoration:none;font-weight:600;">chamber@cicuindia.org</a></p>
+                            <p style="margin:0;font-size:12px;color:#94a3b8;line-height:1.5;">You received this email because you registered for the Mega Job Fair.<br />© {datetime.utcnow().year} CICU &amp; Rojgar Mela AI. All rights reserved.</p>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>
+"""
     await _send_email(to_email, "Your Rojgar Mela Account Credentials", html)
 
 
