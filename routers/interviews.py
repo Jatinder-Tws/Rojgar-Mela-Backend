@@ -4,9 +4,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 from models.user import User
-from schemas.interviews import InterviewCreate, InterviewOut
+from schemas.interviews import InterviewCreate, InterviewOut, InterviewOutcomeUpdate
 from services.auth_service import require_provider, require_verified
-from services.interview_scheduling_dbservice import create_interview, get_user_interviews
+from services.interview_scheduling_dbservice import create_interview, get_user_interviews, record_interview_outcome
 
 router = APIRouter(prefix="/interviews", tags=["interviews"])
 
@@ -24,4 +24,14 @@ async def get_my_interviews(
     db: AsyncSession = Depends(get_db),
 ):
     return await get_user_interviews(db, user)
+
+
+@router.patch("/{interview_id}/outcome", response_model=InterviewOut)
+async def set_interview_outcome(
+    interview_id: str,
+    body: InterviewOutcomeUpdate,
+    user: User = Depends(require_provider),
+    db: AsyncSession = Depends(get_db),
+):
+    return await record_interview_outcome(db, interview_id, body, user)
 

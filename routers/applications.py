@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 from models.user import User
-from schemas.jobs import ApplicationCreate, ApplicationOut, RejectApplicationRequest, ShortlistedApplicationOut
+from schemas.jobs import ApplicationCreate, ApplicationOut, ProviderShortlistRequest, RejectApplicationRequest, ShortlistedApplicationOut
 from services.auth_service import require_seeker, require_provider, require_verified
 from controllers.applications_controller import (
     apply_to_job as ctrl_apply_to_job,
@@ -16,6 +16,7 @@ from controllers.applications_controller import (
     shortlist_application as ctrl_shortlist_application,
     reject_application as ctrl_reject_application,
     update_application_status as ctrl_update_application_status,
+    provider_shortlist_candidate as ctrl_provider_shortlist_candidate,
 )
 
 router = APIRouter(prefix="/applications", tags=["applications"])
@@ -51,6 +52,15 @@ async def get_shortlisted_applications(user: User = Depends(require_provider), d
 @router.get("/job/{job_id}", response_model=List[ApplicationOut])
 async def get_job_applications(job_id: str, user: User = Depends(require_provider), db: AsyncSession = Depends(get_db)):
     return await ctrl_get_job_applications(job_id, user, db)
+
+
+@router.post("/provider-shortlist", response_model=ApplicationOut, status_code=201)
+async def provider_shortlist_candidate(
+    body: ProviderShortlistRequest,
+    user: User = Depends(require_provider),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_provider_shortlist_candidate(body, user, db)
 
 
 @router.patch("/{app_id}/shortlist", response_model=ApplicationOut)

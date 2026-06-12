@@ -9,9 +9,22 @@ import enum
 def _uuid():
     return str(uuid.uuid4())
 
-class InterviewSource(str,enum.Enum):
+class InterviewSource(str, enum.Enum):
     manual = "manual"
     auto = "auto"
+
+
+class InterviewType(str, enum.Enum):
+    video = "video"
+    walk_in = "walk_in"
+
+
+class InterviewStatus(str, enum.Enum):
+    scheduled = "scheduled"
+    completed = "completed"
+    cancelled = "cancelled"
+    no_show = "no_show"
+
 
 class Interview(Base):
     __tablename__ = "interviews"
@@ -23,9 +36,13 @@ class Interview(Base):
 
     title = Column(String(200), nullable=False)
     agenda = Column(Text, nullable=True)
+    interview_type = Column(Enum(InterviewType), default=InterviewType.video, nullable=False)
+    meeting_link = Column(Text, nullable=True)
+    location = Column(Text, nullable=True)
+    status = Column(Enum(InterviewStatus), default=InterviewStatus.scheduled, nullable=False)
     scheduled_at = Column(DateTime, nullable=False)
     scheduled_period = Column(String(2), nullable=True)
-    interviewer_name = Column(String(200),nullable=False)
+    interviewer_name = Column(String(200), nullable=False)
     
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)

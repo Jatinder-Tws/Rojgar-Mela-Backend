@@ -1,6 +1,11 @@
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Literal, Optional
 from pydantic import AliasChoices, BaseModel, Field, field_serializer, field_validator
+
+InterviewTypeLiteral = Literal["video", "walk_in"]
+InterviewStatusLiteral = Literal["scheduled", "completed", "cancelled", "no_show"]
+InterviewOutcomeLiteral = Literal["selected", "rejected"]
+
 
 class InterviewCreate(BaseModel):
     seeker_id: str
@@ -8,6 +13,9 @@ class InterviewCreate(BaseModel):
     title: str
     interviewer_name: str
     agenda: Optional[str] = None
+    interview_type: InterviewTypeLiteral = "video"
+    meeting_link: Optional[str] = None
+    location: Optional[str] = None
     scheduled_at: datetime
     application_id: Optional[str] = None
     scheduled_period: Optional[str] = Field(
@@ -32,6 +40,7 @@ class InterviewCreate(BaseModel):
             return s
         raise ValueError("scheduled_period must be 'AM' or 'PM'")
 
+
 class InterviewOut(BaseModel):
     id: str
     seeker_id: str
@@ -42,10 +51,14 @@ class InterviewOut(BaseModel):
     title: str
     interviewer_name: str
     agenda: Optional[str] = None
+    interview_type: str = "video"
+    meeting_link: Optional[str] = None
+    location: Optional[str] = None
+    status: str = "scheduled"
     scheduled_at: datetime
     created_at: datetime
     scheduled_period: Optional[str] = None
-    
+
     # Enriched data for display
     seeker_name: Optional[str] = None
     provider_name: Optional[str] = None
@@ -63,3 +76,8 @@ class InterviewOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class InterviewOutcomeUpdate(BaseModel):
+    outcome: InterviewOutcomeLiteral
+    notes: Optional[str] = None

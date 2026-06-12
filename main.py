@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
 from config import settings, get_cors_allow_origins, get_cors_origin_regex
-from database import init_db, patch_email_admin_schema, AsyncSessionLocal, engine
+from database import init_db, patch_email_admin_schema, patch_interview_application_schema, AsyncSessionLocal, engine
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +23,7 @@ async def ensure_db_tables():
     """Create any missing tables and patch email admin schema."""
     await init_db()
     await patch_email_admin_schema()
+    await patch_interview_application_schema()
 
 # ── Custom Exception Handler for Validation Errors ──────────────────────────
 @app.exception_handler(RequestValidationError)
@@ -62,7 +63,7 @@ app.add_middleware(
 )
 
 # ── Routers ─────────────────────────────────────────────────────────────────
-from routers import auth, users, jobs, resumes, matches, applications, notifications, interviews, assessment, portfolio, analytics, resume_builder, onboarding, master, ai_interview, roadmap, external_candidate, master_data, ai_coach ,interview_scheduling, import_users, superadmin, super_admin, attendance, job_fair, email_admin # noqa
+from routers import auth, users, jobs, resumes, matches, applications, notifications, interviews, assessment, portfolio, analytics, resume_builder, onboarding, master, ai_interview, roadmap, external_candidate, master_data, ai_coach ,interview_scheduling, import_users, superadmin, super_admin, super_admin_support, support, attendance, job_fair, email_admin # noqa
 
 
 API_PREFIX = ""
@@ -87,6 +88,8 @@ routers = [
     interview_scheduling.router,
     import_users.router,
     super_admin.router,
+    super_admin_support.router,
+    support.router,
     job_fair.router,
     email_admin.router,
 ]
@@ -107,15 +110,28 @@ app.mount(
 
 
 # ── WebSockets ──────────────────────────────────────────────────────────────
-from fastapi import WebSocket, WebSocketDisconnect
+from fastapi import WebSocket, WebSocketDisconnect, Query
+from jose import JWTError, jwt
 from services.websocket_manager import manager
 
+
+async def _validate_ws_token(token: str, user_id: str) -> bool:
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        return payload.get("sub") == user_id
+    except JWTError:
+        return False
+
+
 @app.websocket("/ws/{user_id}")
-async def websocket_endpoint(websocket: WebSocket, user_id: str):
+async def websocket_endpoint(websocket: WebSocket, user_id: str, token: str = Query(...)):
+    if not await _validate_ws_token(token, user_id):
+        await websocket.close(code=4001)
+        return
+
     await manager.connect(user_id, websocket)
     try:
         while True:
-            # Keep connection alive, we don't expect messages from client yet
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(user_id, websocket)

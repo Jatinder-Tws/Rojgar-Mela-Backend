@@ -104,6 +104,15 @@ async def require_verified(user: User = Depends(get_current_user)) -> User:
     return user
 
 
+async def require_authenticated(user: User = Depends(get_current_user)) -> User:
+    """Verified seeker/provider or super admin (super admins skip email verification)."""
+    if getattr(user, "is_super_admin", False):
+        return user
+    if not user.is_verified:
+        raise HTTPException(status_code=403, detail="Email not verified")
+    return user
+
+
 async def require_seeker(user: User = Depends(require_verified)) -> User:
     if user.role is None:
         raise HTTPException(status_code=403, detail="Please complete onboarding to access this page")
@@ -134,4 +143,15 @@ async def require_provider_or_super_admin(user: User = Depends(get_current_user)
 async def require_super_admin(user: User = Depends(get_current_user)) -> User:
     if not getattr(user, "is_super_admin", False):
         raise HTTPException(status_code=403, detail="Super admin access required")
+    return user
+
+
+async def require_seeker_or_provider(user: User = Depends(require_verified)) -> User:
+    if getattr(user, "is_super_admin", False):
+        raise HTTPException(status_code=403, detail="Super admins cannot use this endpoint")
+    if user.role is None:
+        raise HTTPException(status_code=403, detail="Please complete onboarding first")
+    role_str = user.role.value if hasattr(user.role, "value") else str(user.role)
+    if role_str not in ("seeker", "provider"):
+        raise HTTPException(status_code=403, detail="Only job seekers and providers can access support")
     return user

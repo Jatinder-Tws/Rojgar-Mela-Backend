@@ -13,7 +13,7 @@ from models.job import JobPosting
 from models.application import Application
 from models.resume import Resume
 from models.interview import Interview
-
+from models.external_candidate import ExternalCandidate
 
 async def seeker_stats(user: User, db: AsyncSession) -> dict:
     """Aggregated analytics for a job seeker dashboard."""

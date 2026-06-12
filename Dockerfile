@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y \
     libcairo2-dev \
     libffi-dev \
     libssl-dev \
+    fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies

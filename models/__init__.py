@@ -21,6 +21,8 @@ from models.attendance import Attendance
 from models.job_fair import JobFair, JobFairCompany, JobFairSeeker
 from models.email_template import EmailTemplate
 from models.email_campaign import EmailCampaign, EmailCampaignRecipient, CampaignStatus, AudienceType, RecipientStatus
+from models.support_ticket import SupportTicket, TicketMessage, TicketStatus, TicketCategory, TicketPriority
+from models.platform_feedback import PlatformFeedback, FeedbackCategory
 
 __all__ = [
     "User", "UserRole", "JobType", "CompanyType", "ExternalCandidate", "ExternalCandidateMatch",
@@ -43,5 +45,7 @@ __all__ = [
     "JobFair", "JobFairCompany", "JobFairSeeker",
     "EmailTemplate",
     "EmailCampaign", "EmailCampaignRecipient", "CampaignStatus", "AudienceType", "RecipientStatus",
+    "SupportTicket", "TicketMessage", "TicketStatus", "TicketCategory", "TicketPriority",
+    "PlatformFeedback", "FeedbackCategory",
 ]
 

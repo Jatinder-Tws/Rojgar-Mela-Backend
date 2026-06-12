@@ -39,8 +39,28 @@ async def init_db():
     """Create all tables and enable pgvector extension."""
     async with engine.begin() as conn:
         await conn.execute(__import__("sqlalchemy").text("CREATE EXTENSION IF NOT EXISTS vector"))
-        from models import user, resume, job, match, application, notification, otp, interview, provider_interview_settings, provider_availability_window, assessment, portfolio, master, ai_interview, roadmap, ai_coach, imported_user_password, attendance, job_fair, email_template, email_campaign  # noqa
+        from models import user, resume, job, match, application, notification, otp, interview, provider_interview_settings, provider_availability_window, assessment, portfolio, master, ai_interview, roadmap, ai_coach, imported_user_password, attendance, job_fair, email_template, email_campaign, support_ticket, platform_feedback  # noqa
         await conn.run_sync(Base.metadata.create_all)
+
+
+async def patch_interview_application_schema():
+    """Add interview lifecycle columns and application status enum values."""
+    from sqlalchemy import text
+
+    statements = [
+        "ALTER TYPE applicationstatus ADD VALUE IF NOT EXISTS 'interviewing'",
+        "ALTER TYPE applicationstatus ADD VALUE IF NOT EXISTS 'selected'",
+        "ALTER TABLE interviews ADD COLUMN IF NOT EXISTS interview_type VARCHAR(20) NOT NULL DEFAULT 'video'",
+        "ALTER TABLE interviews ADD COLUMN IF NOT EXISTS meeting_link TEXT",
+        "ALTER TABLE interviews ADD COLUMN IF NOT EXISTS location TEXT",
+        "ALTER TABLE interviews ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'scheduled'",
+    ]
+    async with engine.begin() as conn:
+        for sql in statements:
+            try:
+                await conn.execute(text(sql))
+            except Exception:
+                pass
 
 
 async def patch_email_admin_schema():

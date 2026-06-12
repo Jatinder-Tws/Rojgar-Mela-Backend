@@ -118,6 +118,12 @@ class User(Base):
     notifications = relationship(
         "Notification", back_populates="user", cascade="all, delete-orphan"
     )
+    support_tickets = relationship(
+        "SupportTicket", back_populates="user", cascade="all, delete-orphan"
+    )
+    platform_feedback = relationship(
+        "PlatformFeedback", back_populates="user", cascade="all, delete-orphan"
+    )
     roadmaps = relationship(
         "Roadmap", back_populates="user", cascade="all, delete-orphan"
     )

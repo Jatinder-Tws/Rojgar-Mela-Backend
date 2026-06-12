@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config import settings
 from database import get_db
 from models.job_fair import JobFairCompany, JobFairSeeker
+from models.notification import NotificationType
 from models.user import User, UserRole, CompanyType
 from models.imported_user_password import ImportedUserPassword
 from schemas.job_fair import (
@@ -492,8 +493,10 @@ async def register_company_to_job_fair(
         )
     )
     jfc = jfc_result.scalar_one_or_none()
+    is_new_registration = False
 
     if not jfc:
+        is_new_registration = True
         jfc = JobFairCompany(
             id=str(uuid.uuid4()),
             job_fair_id=jf.id,
@@ -537,6 +540,18 @@ async def register_company_to_job_fair(
         jfc.city = city or jfc.city
 
     await db.commit()
+
+    if is_new_registration:
+        from services.notification_service import notify_super_admins
+        await notify_super_admins(
+            db,
+            title="New Job Fair Registration",
+            message=f"{company_name} registered for {jf.title}.",
+            type=NotificationType.application,
+            related_job_id=str(jf.id),
+            related_user_id=str(user.id),
+        )
+
     return {"status": "success", "message": "Company registered successfully"}
 
 
@@ -559,18 +574,11 @@ async def get_job_fair_qrcode(
     else:
         url = f"{settings.FRONTEND_URL}/job-fair/{jf.slug}/register-company"
 
-    # Generate QR Code using PIL
-    import qrcode
-    from io import BytesIO
+    from services.job_fair_qr_service import generate_job_fair_qr_poster
 
-    qr = qrcode.QRCode(version=1, box_size=10, border=5)
-    qr.add_data(url)
-    qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white")
-
-    img_byte_arr = BytesIO()
-    img.save(img_byte_arr, format="PNG")
-    img_bytes = img_byte_arr.getvalue()
+    portal_label = "Student Registration" if type == "student" else "Employer Registration"
+    headline = f"{jf.title} — {portal_label}"
+    img_bytes = generate_job_fair_qr_poster(url, headline=headline)
 
     return Response(content=img_bytes, media_type="image/png")
 

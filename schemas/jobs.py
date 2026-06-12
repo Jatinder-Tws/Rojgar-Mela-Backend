@@ -122,6 +122,11 @@ class ApplicationCreate(BaseModel):
     job_id: str
 
 
+class ProviderShortlistRequest(BaseModel):
+    seeker_id: str
+    job_id: str
+
+
 class RejectApplicationRequest(BaseModel):
     rejection_reason: str
 
@@ -143,6 +148,7 @@ class ApplicationOut(BaseModel):
     salary_range: Optional[str] = None
     job_description: Optional[str] = None
     required_skills: Optional[List[str]] = []
+    location: Optional[str] = None
     ai_interview_enabled: Optional[bool] = False
     # Seeker details (populated for provider-facing endpoints)
     seeker_first_name: Optional[str] = None
@@ -181,6 +187,9 @@ class ShortlistedApplicationOut(BaseModel):
     seeker_email: str
     seeker_phone: Optional[str] = None
     seeker_profile_pic_url: Optional[str] = None
+    has_interview: bool = False
+    interview_id: Optional[str] = None
+    interview_status: Optional[str] = None
 
     class Config:
         from_attributes = True

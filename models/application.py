@@ -10,6 +10,8 @@ from database import Base
 class ApplicationStatus(str, enum.Enum):
     applied = "applied"
     shortlisted = "shortlisted"
+    interviewing = "interviewing"
+    selected = "selected"
     rejected = "rejected"
     auto_applied = "auto_applied"
 

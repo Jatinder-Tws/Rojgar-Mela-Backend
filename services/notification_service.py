@@ -71,3 +71,30 @@ async def create_notification(
         logger.error(f"Error creating notification: {e}")
         await db.rollback()
         raise e
+
+
+async def notify_super_admins(
+    db: AsyncSession,
+    title: str,
+    message: str,
+    type: NotificationType = NotificationType.general,
+    related_job_id: Optional[str] = None,
+    related_user_id: Optional[str] = None,
+):
+    """Send the same in-app notification to every super admin user."""
+    from models.user import User
+    from sqlalchemy import select
+
+    result = await db.execute(select(User).where(User.is_super_admin.is_(True)))
+    admins = result.scalars().all()
+    for admin in admins:
+        await create_notification(
+            db,
+            user_id=str(admin.id),
+            type=type,
+            title=title,
+            message=message,
+            related_job_id=related_job_id,
+            related_user_id=related_user_id,
+            email_notification=False,
+        )

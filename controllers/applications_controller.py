@@ -10,7 +10,8 @@ from models.resume import Resume
 from models.user import User
 from models.notification import Notification, NotificationType
 from models.external_candidate import ExternalCandidate
-from schemas.jobs import ApplicationCreate, ApplicationOut, RejectApplicationRequest, ShortlistedApplicationOut
+from models.interview import Interview
+from schemas.jobs import ApplicationCreate, ApplicationOut, ProviderShortlistRequest, RejectApplicationRequest, ShortlistedApplicationOut
 from services.ai_feedback_service import generate_rejection_feedback
 from services.email_service import send_notification_email
 from services.notification_service import create_notification
@@ -57,11 +58,12 @@ async def apply_to_job(
         )
 
     await db.commit()
-    try:
-        await auto_schedule_for_application(db, app, user, job)
-        await db.commit()
-    except Exception:
-        await db.rollback()
+    if provider:
+        try:
+            await auto_schedule_for_application(db, app, provider, job)
+            await db.commit()
+        except Exception:
+            await db.rollback()
     await db.refresh(app)
     return ApplicationOut.model_validate(app)
 
@@ -93,6 +95,7 @@ async def get_my_applications(user: User, db: AsyncSession) -> List[ApplicationO
             job_description=job.description,
             required_skills=job.required_skills if isinstance(job.required_skills, list) else [],
             ai_interview_enabled=job.ai_interview_enabled,
+            location=job.location,
         ))
     return out
 
@@ -142,7 +145,6 @@ async def get_job_applications(job_id: str, user: User, db: AsyncSession) -> Lis
         .order_by(Application.applied_at.desc())
     )
     rows = result.all()
-    print("The rows result are ----------------------------", rows)
     out = []
     for app, seeker in rows:
         app_out = ApplicationOut.model_validate(app)
@@ -169,7 +171,6 @@ async def get_job_applications(job_id: str, user: User, db: AsyncSession) -> Lis
             app_out.candidate_resume_url = app.candidate_resume_url
         app_out.ai_feedback = app.ai_feedback
         out.append(app_out)
-    print(out)
     return out
 
 
@@ -227,14 +228,28 @@ async def get_shortlisted_applications(user: User, db: AsyncSession) -> List[Sho
         .where(
             and_(
                 JobPosting.provider_id == user.id,
-                Application.status == ApplicationStatus.shortlisted,
+                Application.status.in_([
+                    ApplicationStatus.shortlisted,
+                    ApplicationStatus.interviewing,
+                ]),
             )
         )
         .order_by(Application.updated_at.desc())
     )
     rows = result.all()
+    app_ids = [str(app.id) for app, _, _ in rows]
+    interview_map: dict[str, Interview] = {}
+    if app_ids:
+        iv_result = await db.execute(
+            select(Interview).where(Interview.application_id.in_(app_ids))
+        )
+        for iv in iv_result.scalars().all():
+            if iv.application_id:
+                interview_map[str(iv.application_id)] = iv
+
     out = []
     for app, job, seeker in rows:
+        iv = interview_map.get(str(app.id))
         out.append(ShortlistedApplicationOut(
             id=str(app.id),
             job_id=str(app.job_id),
@@ -247,8 +262,78 @@ async def get_shortlisted_applications(user: User, db: AsyncSession) -> List[Sho
             seeker_email=seeker.email if seeker else (app.candidate_email or ""),
             seeker_phone=seeker.phone if seeker else app.candidate_phone,
             seeker_profile_pic_url=seeker.profile_pic_url if seeker else None,
+            has_interview=iv is not None,
+            interview_id=str(iv.id) if iv else None,
+            interview_status=str(iv.status.value) if iv and iv.status else None,
         ))
     return out
+
+
+async def provider_shortlist_candidate(
+    body: ProviderShortlistRequest,
+    user: User,
+    db: AsyncSession,
+) -> ApplicationOut:
+    job_result = await db.execute(
+        select(JobPosting).where(
+            JobPosting.id == body.job_id,
+            JobPosting.provider_id == user.id,
+            JobPosting.is_active == True,  # noqa: E712
+        )
+    )
+    job = job_result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    seeker_result = await db.execute(select(User).where(User.id == body.seeker_id))
+    seeker = seeker_result.scalar_one_or_none()
+    if not seeker:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    existing = await db.execute(
+        select(Application).where(
+            and_(Application.seeker_id == body.seeker_id, Application.job_id == body.job_id)
+        )
+    )
+    app = existing.scalar_one_or_none()
+
+    if app:
+        if app.status in (ApplicationStatus.shortlisted, ApplicationStatus.interviewing, ApplicationStatus.selected):
+            raise HTTPException(status_code=409, detail="Candidate is already shortlisted for this job")
+        if app.status == ApplicationStatus.rejected:
+            raise HTTPException(status_code=409, detail="Candidate was rejected for this job")
+        app.status = ApplicationStatus.shortlisted
+    else:
+        app = Application(
+            seeker_id=body.seeker_id,
+            job_id=body.job_id,
+            status=ApplicationStatus.shortlisted,
+        )
+        db.add(app)
+
+    await db.commit()
+    await db.refresh(app)
+
+    await create_notification(
+        db=db,
+        user_id=seeker.id,
+        type=NotificationType.shortlisted,
+        title=f"🎉 Your resume was shortlisted for {job.title}!",
+        message=f"Congratulations! {user.first_name} from {user.company_name or 'a company'} has shortlisted you for '{job.title}'. They may reach out soon.",
+        related_job_id=str(job.id),
+        related_user_id=str(user.id),
+    )
+    await db.commit()
+
+    try:
+        await auto_schedule_for_application(db, app, user, job)
+        await db.commit()
+    except Exception:
+        logger.exception("Auto-schedule failed for application %s", app.id)
+
+    app_out = ApplicationOut.model_validate(app)
+    app_out.job_title = job.title
+    return app_out
 
 
 async def shortlist_application(app_id: str, user: User, db: AsyncSession) -> ApplicationOut:
@@ -263,6 +348,9 @@ async def shortlist_application(app_id: str, user: User, db: AsyncSession) -> Ap
     job = job_result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=403, detail="Forbidden")
+
+    if app.status in (ApplicationStatus.shortlisted, ApplicationStatus.interviewing, ApplicationStatus.selected):
+        raise HTTPException(status_code=409, detail="Candidate is already shortlisted")
 
     app.status = ApplicationStatus.shortlisted
     await db.commit()
@@ -370,6 +458,8 @@ async def update_application_status(
             raise HTTPException(status_code=403, detail="Forbidden")
 
         if status == "shortlisted":
+            if app.status in (ApplicationStatus.shortlisted, ApplicationStatus.interviewing, ApplicationStatus.selected):
+                raise HTTPException(status_code=409, detail="Candidate is already shortlisted")
             app.status = ApplicationStatus.shortlisted
             await db.commit()
 
@@ -393,6 +483,10 @@ async def update_application_status(
         elif status == "rejected":
             app.status = ApplicationStatus.rejected
             app.rejection_reason = ai_feedback or "Not specified"
+            await db.commit()
+
+        elif status in ("interviewing", "selected"):
+            app.status = ApplicationStatus(status)
             await db.commit()
 
         else:

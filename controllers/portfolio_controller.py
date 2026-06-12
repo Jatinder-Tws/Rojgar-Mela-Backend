@@ -32,6 +32,7 @@ def _portfolio_to_out(portfolio: Portfolio, user: User) -> dict:
         "first_name": user.first_name,
         "last_name": user.last_name,
         "email": user.email,
+        "industry": user.industry,
         "profile_pic_url": user.profile_pic_url,
         "headline": portfolio.headline,
         "bio": portfolio.bio,

@@ -7,14 +7,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from fastapi import HTTPException
 
-from models.interview import Interview, InterviewSource
+from models.application import Application, ApplicationStatus
+from models.interview import Interview, InterviewSource, InterviewStatus, InterviewType
 from models.provider_availability_window import ProviderAvailabilityWindow
 from models.provider_interview_settings import ProviderInterviewSettings
 from models.user import User
 from models.job import JobPosting
 from models.notification import NotificationType
 from services.notification_service import create_notification
-from schemas.interviews import InterviewCreate, InterviewOut
+from schemas.interviews import InterviewCreate, InterviewOut, InterviewOutcomeUpdate
 from schemas.interview_scheduling import ProviderInterviewSettingsUpdate
 
 
@@ -153,6 +154,12 @@ async def create_interview(
         db, provider.id, scheduled_at, settings.slot_duration_minutes
     )
 
+    interview_type = InterviewType(body.interview_type) if body.interview_type else InterviewType.video
+    if interview_type == InterviewType.video and not body.meeting_link:
+        raise HTTPException(status_code=400, detail="Meeting link is required for video interviews")
+    if interview_type == InterviewType.walk_in and not body.location:
+        raise HTTPException(status_code=400, detail="Location is required for walk-in interviews")
+
     interview = Interview(
         seeker_id=body.seeker_id,
         provider_id=provider.id,
@@ -161,11 +168,21 @@ async def create_interview(
         title=body.title,
         interviewer_name=body.interviewer_name,
         agenda=body.agenda,
+        interview_type=interview_type,
+        meeting_link=body.meeting_link,
+        location=body.location,
+        status=InterviewStatus.scheduled,
         scheduled_at=scheduled_at,
         scheduled_period=body.scheduled_period,
         source=InterviewSource.manual,
     )
     db.add(interview)
+
+    if body.application_id:
+        app_result = await db.execute(select(Application).where(Application.id == body.application_id))
+        application = app_result.scalar_one_or_none()
+        if application:
+            application.status = ApplicationStatus.interviewing
     
     # Notify seeker
     await create_notification(
@@ -222,3 +239,64 @@ async def get_user_interviews(
         out.append(item)
         
     return out
+
+
+async def record_interview_outcome(
+    db: AsyncSession,
+    interview_id: str,
+    body: InterviewOutcomeUpdate,
+    provider: User,
+) -> InterviewOut:
+    result = await db.execute(select(Interview).where(Interview.id == interview_id))
+    interview = result.scalar_one_or_none()
+    if not interview:
+        raise HTTPException(status_code=404, detail="Interview not found")
+    if interview.provider_id != provider.id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if interview.status == InterviewStatus.completed:
+        raise HTTPException(status_code=409, detail="Interview outcome already recorded")
+
+    interview.status = InterviewStatus.completed
+    if body.notes:
+        interview.agenda = (interview.agenda or "") + f"\n\nOutcome notes: {body.notes}"
+
+    if interview.application_id:
+        app_result = await db.execute(select(Application).where(Application.id == interview.application_id))
+        application = app_result.scalar_one_or_none()
+        if application:
+            if body.outcome == "selected":
+                application.status = ApplicationStatus.selected
+                outcome_title = "Congratulations! You were selected"
+                outcome_msg = f"You have been selected after your interview for '{interview.title}'."
+                notif_type = NotificationType.shortlisted
+            else:
+                application.status = ApplicationStatus.rejected
+                application.rejection_reason = body.notes or "Not selected after interview"
+                outcome_title = "Interview outcome update"
+                outcome_msg = f"Thank you for interviewing. Unfortunately you were not selected for this role."
+                notif_type = NotificationType.rejected
+
+            await create_notification(
+                db=db,
+                user_id=interview.seeker_id,
+                type=notif_type,
+                title=outcome_title,
+                message=outcome_msg,
+                related_job_id=str(interview.job_id),
+                related_user_id=str(provider.id),
+            )
+
+    await db.commit()
+    await db.refresh(interview)
+
+    job_res = await db.execute(select(JobPosting.title).where(JobPosting.id == interview.job_id))
+    job_title = job_res.scalar()
+    seeker_res = await db.execute(select(User.first_name, User.last_name).where(User.id == interview.seeker_id))
+    seeker_data = seeker_res.first()
+    s_fn, s_ln = seeker_data if seeker_data else ("Unknown", "User")
+
+    item = InterviewOut.model_validate(interview)
+    item.job_title = job_title
+    item.seeker_name = f"{s_fn} {s_ln}"
+    item.provider_name = f"{provider.first_name} {provider.last_name}"
+    return item
