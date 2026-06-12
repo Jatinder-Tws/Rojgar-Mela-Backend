@@ -105,14 +105,16 @@ def _notify_provider_after_matching(job_id: str):
     Runs inside a separate asyncio loop since we're in a sync Celery context.
     """
     from database import AsyncSessionLocal
-    from sqlalchemy import select, func, text
+    from sqlalchemy import select, func
 
     async def _push():
         async with AsyncSessionLocal() as db:
+            from models.job import JobPosting
+            from models.external_candidate_match import ExternalCandidateMatch
+
             # Get the job's provider_id
             row = await db.execute(
-                text("SELECT provider_id, title FROM job_postings WHERE id = :jid"),
-                {"jid": job_id},
+                select(JobPosting.provider_id, JobPosting.title).where(JobPosting.id == job_id)
             )
             job_info = row.fetchone()
             if not job_info:
@@ -121,10 +123,7 @@ def _notify_provider_after_matching(job_id: str):
 
             # Count new external matches for this job
             count_row = await db.execute(
-                text(
-                    "SELECT COUNT(*) FROM external_candidate_matches WHERE job_id = :jid"
-                ),
-                {"jid": job_id},
+                select(func.count(ExternalCandidateMatch.id)).where(ExternalCandidateMatch.job_id == job_id)
             )
             count = count_row.scalar() or 0
 

@@ -9,7 +9,8 @@ from schemas.auth import (
     LoginResponse, TokenResponse, TOTPSetupResponse, TOTPStatusResponse,
     TOTPLoginRequest, CreateTestUserRequest, CreateTestUserResponse,
     ForgotPasswordRequest, ForgotPasswordResponse, ResetPasswordRequest,
-    ResetPasswordResponse, VerifyResetOtpRequest,
+    ResetPasswordResponse, VerifyResetOtpRequest, RefreshTokenRequest,
+    RefreshTokenResponse,
 )
 from services.auth_service import get_current_user, require_verified
 from controllers.auth_controller import (
@@ -29,6 +30,7 @@ from controllers.auth_controller import (
     totp_verify as ctrl_totp_verify,
     create_test_user as ctrl_create_test_user,
     check_email as ctrl_check_email,
+    refresh_token as ctrl_refresh_token,
 )
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -112,3 +114,8 @@ async def create_test_user(body: CreateTestUserRequest, background_tasks: Backgr
 @router.get("/check-email")
 async def check_email(email: str, db: AsyncSession = Depends(get_db)):
     return await ctrl_check_email(email, db)
+
+
+@router.post("/refresh", response_model=RefreshTokenResponse)
+async def refresh_token(body: RefreshTokenRequest, db: AsyncSession = Depends(get_db)):
+    return await ctrl_refresh_token(body, db)

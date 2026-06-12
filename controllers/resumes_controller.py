@@ -220,7 +220,9 @@ async def _process_resume(resume_id: str, file_path: str, filename: str) -> None
             if not res.parsed_text:
                 await _update_resume_processing(resume_id, "failed", "Could not extract text from resume. Try a clearer PDF or DOCX.")
                 return
-            await s.execute(sa_text("DELETE FROM matches WHERE seeker_id = :sid"), {"sid": res.user_id})
+            from models.match import Match
+            from sqlalchemy import delete
+            await s.execute(delete(Match).where(Match.seeker_id == res.user_id))
             await s.commit()
             await embed_and_store_resume(res, s)
 

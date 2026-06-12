@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     SECRET_KEY: str = "change-this-secret"
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 10080  # 7 days
+    REFRESH_TOKEN_EXPIRE_MINUTES: int = 10080  # 7 days
 
     # OpenAI
     OPENAI_API_KEY: str = ""

@@ -553,7 +553,9 @@ async def generate_resume(
                 if not r or not r.parsed_text:
                     return
                 # Clear old matches
-                await s.execute(sa_text("DELETE FROM matches WHERE seeker_id = :sid"), {"sid": r.user_id})
+                from models.match import Match
+                from sqlalchemy import delete
+                await s.execute(delete(Match).where(Match.seeker_id == r.user_id))
                 await s.commit()
                 await embed_and_store_resume(r, s)
                 await proactive_match_resume_to_jobs(rid)

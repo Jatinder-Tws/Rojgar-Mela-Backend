@@ -173,6 +173,7 @@ class ResetPasswordRequest(BaseModel):
 class ResetPasswordResponse(BaseModel):
     message: str
     access_token: Optional[str] = None
+    refresh_token: Optional[str] = None
     token_type: str = "bearer"
 
 
@@ -183,6 +184,7 @@ class LoginRequest(BaseModel):
 
 class TokenResponse(BaseModel):
     access_token: str
+    refresh_token: Optional[str] = None
     token_type: str = "bearer"
     user: "UserOut"
 
@@ -190,6 +192,7 @@ class TokenResponse(BaseModel):
 class LoginResponse(BaseModel):
     message: Optional[str] = None
     access_token: Optional[str] = None
+    refresh_token: Optional[str] = None
     token_type: Optional[str] = "bearer"
     user: Optional["UserOut"] = None
     requires_totp: bool = False
@@ -197,6 +200,16 @@ class LoginResponse(BaseModel):
     requires_setup: bool = False
     email: Optional[str] = None
     qr_code_base64: Optional[str] = None
+
+
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
+
+
+class RefreshTokenResponse(BaseModel):
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
 
 
 

@@ -38,6 +38,8 @@ class ExternalCandidate(Base):
     total_experience = Column(String(100), nullable=True)
     current_ctc = Column(String(50), nullable=True)
     current_designation = Column(String(100), nullable=True)
+    year_of_passing = Column(String(50), nullable=True)
+    skills = Column(Text, nullable=True)
 
     # Step 3: Final Submission
     source = Column(String(100), nullable=True)  # e.g., Instagram, LinkedIn

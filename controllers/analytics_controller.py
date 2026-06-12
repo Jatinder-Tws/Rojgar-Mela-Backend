@@ -2,7 +2,7 @@
 Analytics controller – aggregated stats for Seeker and Provider dashboards.
 """
 from typing import List
-from sqlalchemy import select, func, case, and_, text
+from sqlalchemy import select, func, case, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime, timedelta, timezone
 
@@ -173,9 +173,11 @@ async def provider_stats(user: User, db: AsyncSession) -> dict:
         ext_matches_per_job[jid] = ext_matches_per_job.get(jid, 0) + 1
 
     pending_result = await db.execute(
-        text(
-            "SELECT COUNT(*) FROM external_candidates "
-            "WHERE is_matched = false AND status NOT IN ('rejected')"
+        select(func.count())
+        .select_from(ExternalCandidate)
+        .where(
+            ExternalCandidate.is_matched == False,
+            ExternalCandidate.status != "rejected"
         )
     )
     pending_external_count = pending_result.scalar() or 0

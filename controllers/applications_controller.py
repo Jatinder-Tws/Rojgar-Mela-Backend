@@ -208,10 +208,12 @@ async def get_all_external_applications(user: User, db: AsyncSession) -> List[Ap
             candidate_gender=candidate.gender,
             candidate_experience=candidate.total_experience,
             candidate_resume_url=candidate.resume_url,
-            candidate_job_category=candidate.department,
+            candidate_job_category=", ".join(candidate.industries) if isinstance(candidate.industries, list) else (candidate.industries or None),
             candidate_job_role=candidate.sub_role,
             candidate_job_location=candidate.state,
-            candidate_journey=candidate.professional_journey,
+            candidate_journey=None,
+            candidate_year_of_passing=candidate.year_of_passing,
+            candidate_skills=candidate.skills,
         )
         out.append(app_out)
     return out

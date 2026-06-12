@@ -32,11 +32,13 @@ async def get_my_applications(user: User = Depends(require_seeker), db: AsyncSes
 
 
 @router.get("/all", response_model=List[ApplicationOut])
+@router.get("/all-applicants", response_model=List[ApplicationOut])
 async def get_all_applicants(user: User = Depends(require_provider), db: AsyncSession = Depends(get_db)):
     return await ctrl_get_all_applicants(user, db)
 
 
 @router.get("/external", response_model=List[ApplicationOut])
+@router.get("/external-applicants", response_model=List[ApplicationOut])
 async def get_all_external_applications(user: User = Depends(require_provider), db: AsyncSession = Depends(get_db)):
     return await ctrl_get_all_external_applications(user, db)
 

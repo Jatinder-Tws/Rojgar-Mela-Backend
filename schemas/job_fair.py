@@ -45,6 +45,16 @@ class JobFairCompanyOut(BaseModel):
     email: Optional[str] = None
     phone: Optional[str] = None
     profile_pic_url: Optional[str] = None
+    # Detailed company registration fields
+    website: Optional[str] = None
+    company_size: Optional[str] = None
+    company_address: Optional[str] = None
+    contact_person_name: Optional[str] = None
+    contact_person_designation: Optional[str] = None
+    contact_person_phone: Optional[str] = None
+    openings: Optional[List[dict]] = None
+    state: Optional[str] = None
+    city: Optional[str] = None
 
     class Config:
         from_attributes = True

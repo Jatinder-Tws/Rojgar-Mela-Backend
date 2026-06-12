@@ -6,6 +6,7 @@ from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException, BackgroundTasks
 
+from config import settings
 from models.user import User
 from models.otp import OTPRecord
 from schemas.auth import (
@@ -31,11 +32,14 @@ from schemas.auth import (
     ResetPasswordRequest,
     ResetPasswordResponse,
     VerifyResetOtpRequest,
+    RefreshTokenRequest,
+    RefreshTokenResponse,
 )
 from services.auth_service import (
     hash_password,
     verify_password,
     create_access_token,
+    create_refresh_token,
     generate_otp,
     otp_expiry,
 )
@@ -136,7 +140,8 @@ async def verify_otp(body: VerifyOtpRequest, db: AsyncSession) -> TokenResponse:
     await db.commit()
 
     token = create_access_token({"sub": user.id})
-    return TokenResponse(access_token=token, user=UserOut.model_validate(user))
+    refresh_token = create_refresh_token({"sub": user.id})
+    return TokenResponse(access_token=token, refresh_token=refresh_token, user=UserOut.model_validate(user))
 
 
 async def send_phone_otp(body: SendPhoneOtpRequest, db: AsyncSession) -> LoginResponse:
@@ -207,7 +212,8 @@ async def verify_phone_otp(body: VerifyPhoneOtpRequest, db: AsyncSession) -> Tok
         user.is_first_login = False
         await db.commit()
         token = create_access_token({"sub": user.id})
-        return TokenResponse(access_token=token, user=UserOut.model_validate(user))
+        refresh_token = create_refresh_token({"sub": user.id})
+        return TokenResponse(access_token=token, refresh_token=refresh_token, user=UserOut.model_validate(user))
     else:
         raise HTTPException(status_code=400, detail="Invalid or expired TOTP code")
 
@@ -279,7 +285,8 @@ async def login(
             )
 
         token = create_access_token({"sub": user.id})
-        return LoginResponse(access_token=token, user=UserOut.model_validate(user))
+        refresh_token = create_refresh_token({"sub": user.id})
+        return LoginResponse(access_token=token, refresh_token=refresh_token, user=UserOut.model_validate(user))
 
     except HTTPException:
         raise
@@ -360,9 +367,11 @@ async def reset_password(body: ResetPasswordRequest, db: AsyncSession) -> ResetP
     await db.commit()
 
     token = create_access_token({"sub": user.id})
+    refresh_token = create_refresh_token({"sub": user.id})
     return ResetPasswordResponse(
         message="Password reset successfully",
         access_token=token,
+        refresh_token=refresh_token,
     )
 
 
@@ -425,7 +434,8 @@ async def totp_verify(body: TOTPLoginRequest, db: AsyncSession) -> LoginResponse
 
     if totp_service.verify_code(user.totp_secret, body.code):
         token = create_access_token({"sub": user.id})
-        return LoginResponse(access_token=token, user=UserOut.model_validate(user))
+        refresh_token = create_refresh_token({"sub": user.id})
+        return LoginResponse(access_token=token, refresh_token=refresh_token, user=UserOut.model_validate(user))
     else:
         raise HTTPException(status_code=400, detail="Invalid TOTP code")
 
@@ -486,3 +496,35 @@ async def check_email(email: str, db: AsyncSession) -> dict:
     result = await db.execute(select(User).where(User.email == email))
     user = result.scalar_one_or_none()
     return {"exists": user is not None}
+
+
+async def refresh_token(body: RefreshTokenRequest, db: AsyncSession) -> RefreshTokenResponse:
+    from jose import JWTError, jwt
+    from fastapi import status
+    from typing import Optional
+
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+    try:
+        payload = jwt.decode(body.refresh_token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        user_id: str = payload.get("sub")
+        token_type: Optional[str] = payload.get("type")
+        if user_id is None or token_type != "refresh":
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+
+    user = await db.scalar(select(User).where(User.id == user_id))
+    if user is None:
+        raise credentials_exception
+
+    new_access_token = create_access_token({"sub": user.id})
+    new_refresh_token = create_refresh_token({"sub": user.id})
+    return RefreshTokenResponse(
+        access_token=new_access_token,
+        refresh_token=new_refresh_token
+    )

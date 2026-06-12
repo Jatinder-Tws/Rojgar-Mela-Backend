@@ -162,6 +162,8 @@ class ApplicationOut(BaseModel):
     candidate_journey: Optional[str] = None
     candidate_date_of_birth: Optional[str] = None
     candidate_gender: Optional[str] = None
+    candidate_year_of_passing: Optional[str] = None
+    candidate_skills: Optional[str] = None
 
     class Config:
         from_attributes = True

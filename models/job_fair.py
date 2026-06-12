@@ -42,6 +42,21 @@ class JobFairCompany(Base):
     vacancy = Column(String(100), nullable=True)
     registered_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
+    # Complete company details Snapshot
+    company_name = Column(String(200), nullable=True)
+    email = Column(String(200), nullable=True)
+    phone = Column(String(50), nullable=True)
+    website = Column(String(200), nullable=True)
+    company_size = Column(String(100), nullable=True)
+    company_address = Column(Text, nullable=True)
+    contact_person_name = Column(String(200), nullable=True)
+    contact_person_designation = Column(String(200), nullable=True)
+    contact_person_phone = Column(String(50), nullable=True)
+    openings = Column(JSON, nullable=True)
+    logo_url = Column(String(500), nullable=True)
+    state = Column(String(100), nullable=True)
+    city = Column(String(100), nullable=True)
+
     # Relationships
     job_fair = relationship("JobFair", back_populates="companies")
     provider = relationship("User")

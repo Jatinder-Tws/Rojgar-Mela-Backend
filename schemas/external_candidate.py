@@ -16,6 +16,9 @@ class ExternalCandidateBase(BaseModel):
     total_experience: Optional[str] = None
     current_ctc: Optional[str] = None
     current_designation: Optional[str] = None
+    year_of_passing: Optional[str] = None
+    skills: Optional[str] = None
+    agreed: Optional[bool] = None
     
     source: Optional[str] = None
     resume_url: Optional[str] = None

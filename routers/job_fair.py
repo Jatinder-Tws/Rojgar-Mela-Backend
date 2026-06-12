@@ -501,6 +501,19 @@ async def register_company_to_job_fair(
             sector=sector,
             vacancy=vacancy,
             registered_at=datetime.utcnow(),
+            company_name=company_name,
+            email=email,
+            phone=phone,
+            website=website,
+            company_size=company_size,
+            company_address=company_address,
+            contact_person_name=contact_person_name,
+            contact_person_designation=contact_person_designation,
+            contact_person_phone=contact_person_phone,
+            openings=parsed_openings,
+            logo_url=logo_url,
+            state=state,
+            city=city,
         )
         db.add(jfc)
     else:
@@ -508,6 +521,19 @@ async def register_company_to_job_fair(
         jfc.department = department or jfc.department
         jfc.sector = sector or jfc.sector
         jfc.vacancy = vacancy or jfc.vacancy
+        jfc.company_name = company_name or jfc.company_name
+        jfc.email = email or jfc.email
+        jfc.phone = phone or jfc.phone
+        jfc.website = website or jfc.website
+        jfc.company_size = company_size or jfc.company_size
+        jfc.company_address = company_address or jfc.company_address
+        jfc.contact_person_name = contact_person_name or jfc.contact_person_name
+        jfc.contact_person_designation = contact_person_designation or jfc.contact_person_designation
+        jfc.contact_person_phone = contact_person_phone or jfc.contact_person_phone
+        jfc.openings = parsed_openings if parsed_openings else jfc.openings
+        jfc.logo_url = logo_url or jfc.logo_url
+        jfc.state = state or jfc.state
+        jfc.city = city or jfc.city
 
     await db.commit()
     return {"status": "success", "message": "Company registered successfully"}
@@ -580,8 +606,8 @@ async def get_job_fair_companies_public(
     items = [
         JobFairCompanyPublicOut(
             id=jfc.id,
-            company_name=provider.company_name or provider.first_name,
-            profile_pic_url=provider.profile_pic_url,
+            company_name=jfc.company_name or provider.company_name or provider.first_name,
+            profile_pic_url=jfc.logo_url or provider.profile_pic_url,
             sector=jfc.sector,
             vacancy=jfc.vacancy,
         )
@@ -673,10 +699,19 @@ async def get_job_fair_companies(
                 sector=jfc.sector,
                 vacancy=jfc.vacancy,
                 registered_at=jfc.registered_at,
-                company_name=provider.company_name or provider.first_name,
-                email=provider.email,
-                phone=provider.phone,
-                profile_pic_url=provider.profile_pic_url,
+                company_name=jfc.company_name or provider.company_name or provider.first_name,
+                email=jfc.email or provider.email,
+                phone=jfc.phone or provider.phone,
+                profile_pic_url=jfc.logo_url or provider.profile_pic_url,
+                website=jfc.website,
+                company_size=jfc.company_size,
+                company_address=jfc.company_address,
+                contact_person_name=jfc.contact_person_name,
+                contact_person_designation=jfc.contact_person_designation,
+                contact_person_phone=jfc.contact_person_phone,
+                openings=jfc.openings,
+                state=jfc.state,
+                city=jfc.city,
             )
         )
     return JobFairCompanyListResponse(items=out, total=total, page=page, page_size=page_size)

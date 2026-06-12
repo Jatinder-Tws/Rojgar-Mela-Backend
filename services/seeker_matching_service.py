@@ -7,7 +7,7 @@ import json
 import logging
 from typing import List, Optional
 
-from sqlalchemy import select, and_, text
+from sqlalchemy import select, and_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.user import User
@@ -43,10 +43,8 @@ async def embed_and_store_resume(resume: Resume, db: AsyncSession) -> None:
         return
     ai = get_ai()
     embedding = await ai.embed(text_content)
-    # Store using raw SQL to avoid ORM vector cast issues
     await db.execute(
-        text("UPDATE resumes SET embedding = CAST(:emb AS vector) WHERE id = :id"),
-        {"emb": str(embedding), "id": resume.id},
+        update(Resume).where(Resume.id == resume.id).values(embedding=embedding)
     )
     await db.commit()
 
@@ -60,8 +58,7 @@ async def embed_and_store_job(job: JobPosting, db: AsyncSession) -> None:
     ai = get_ai()
     embedding = await ai.embed(text_content[:6000])
     await db.execute(
-        text("UPDATE job_postings SET embedding = CAST(:emb AS vector) WHERE id = :id"),
-        {"emb": str(embedding), "id": job.id},
+        update(JobPosting).where(JobPosting.id == job.id).values(embedding=embedding)
     )
     await db.commit()
 
@@ -224,27 +221,34 @@ async def match_jobs_for_seeker(seeker: User, db: AsyncSession) -> List[dict]:
         if not resume_emb:
             return []
 
-    emb_str = str(resume_emb)
-
     # pgvector similarity query
-    rows = await db.execute(
-        text(
-            f"""
-            SELECT jp.id, jp.provider_id, jp.title, jp.description, jp.required_skills,
-                   jp.salary_range, jp.job_type, jp.industry, jp.posted_by_name,
-                   jp.experience_required, jp.created_at, jp.is_active,
-                   1 - (jp.embedding <=> CAST(:emb AS vector)) AS similarity
-            FROM job_postings jp
-            WHERE jp.is_active = true
-              AND jp.embedding IS NOT NULL
-              AND (1 - (jp.embedding <=> CAST(:emb AS vector))) > {SIMILARITY_THRESHOLD}
-            ORDER BY jp.embedding <=> CAST(:emb AS vector)
-            LIMIT {SEEKER_TOP_N}
-            """
-        ),
-        {"emb": emb_str},
+    similarity = (1 - JobPosting.embedding.cosine_distance(resume_emb)).label("similarity")
+    stmt = (
+        select(
+            JobPosting.id,
+            JobPosting.provider_id,
+            JobPosting.title,
+            JobPosting.description,
+            JobPosting.required_skills,
+            JobPosting.salary_range,
+            JobPosting.job_type,
+            JobPosting.industry,
+            JobPosting.posted_by_name,
+            JobPosting.experience_required,
+            JobPosting.created_at,
+            JobPosting.is_active,
+            similarity
+        )
+        .where(
+            JobPosting.is_active == True,
+            JobPosting.embedding.isnot(None),
+            similarity > SIMILARITY_THRESHOLD
+        )
+        .order_by(JobPosting.embedding.cosine_distance(resume_emb))
+        .limit(SEEKER_TOP_N)
     )
-    jobs_raw = rows.fetchall()
+    rows = await db.execute(stmt)
+    jobs_raw = rows.all()
     if not jobs_raw:
         return []
 
@@ -365,27 +369,32 @@ async def match_candidates_for_job(job: JobPosting, db: AsyncSession) -> List[di
         if not job_emb:
             return []
 
-    emb_str = str(job_emb)
-
-    rows = await db.execute(
-        text(
-            f"""
-            SELECT r.id as resume_id, r.parsed_text, r.parsed_json, r.filename,
-                   u.id as user_id, u.first_name, u.last_name, u.email,
-                   1 - (r.embedding <=> CAST(:emb AS vector)) AS similarity
-            FROM resumes r
-            JOIN users u ON u.id = r.user_id
-            WHERE r.embedding IS NOT NULL
-              AND u.role = 'seeker'
-              AND u.is_verified = true
-              AND (1 - (r.embedding <=> CAST(:emb AS vector))) > {SIMILARITY_THRESHOLD}
-            ORDER BY r.embedding <=> CAST(:emb AS vector)
-            LIMIT {PROVIDER_TOP_N}
-            """
-        ),
-        {"emb": emb_str},
+    similarity = (1 - Resume.embedding.cosine_distance(job_emb)).label("similarity")
+    stmt = (
+        select(
+            Resume.id.label("resume_id"),
+            Resume.parsed_text,
+            Resume.parsed_json,
+            Resume.filename,
+            User.id.label("user_id"),
+            User.first_name,
+            User.last_name,
+            User.email,
+            similarity
+        )
+        .select_from(Resume)
+        .join(User, User.id == Resume.user_id)
+        .where(
+            Resume.embedding.isnot(None),
+            User.role == 'seeker',
+            User.is_verified == True,
+            similarity > SIMILARITY_THRESHOLD
+        )
+        .order_by(Resume.embedding.cosine_distance(job_emb))
+        .limit(PROVIDER_TOP_N)
     )
-    candidates_raw = rows.fetchall()
+    rows = await db.execute(stmt)
+    candidates_raw = rows.all()
     if not candidates_raw:
         return []
 
@@ -495,10 +504,10 @@ async def invalidate_seeker_matches(seeker_id: str) -> None:
 
     async with AsyncSessionLocal() as db:
         try:
+            from sqlalchemy import delete
             # Delete all existing matches for this seeker
             await db.execute(
-                text("DELETE FROM matches WHERE seeker_id = :sid"),
-                {"sid": seeker_id},
+                delete(Match).where(Match.seeker_id == seeker_id)
             )
             await db.commit()
             logger.info(f"[REMATCH] Cleared all matches for seeker {seeker_id}")
@@ -513,10 +522,7 @@ async def invalidate_seeker_matches(seeker_id: str) -> None:
                 return
 
             # Clear stale embedding and re-embed
-            await db.execute(
-                text("UPDATE resumes SET embedding = NULL WHERE id = :id"),
-                {"id": resume.id},
-            )
+            resume.embedding = None
             await db.commit()
             await db.refresh(resume)
 
@@ -540,10 +546,10 @@ async def invalidate_job_matches(job_id: str) -> None:
 
     async with AsyncSessionLocal() as db:
         try:
+            from sqlalchemy import delete
             # Delete all existing matches for this job
             await db.execute(
-                text("DELETE FROM matches WHERE job_id = :jid"),
-                {"jid": job_id},
+                delete(Match).where(Match.job_id == job_id)
             )
             await db.commit()
             logger.info(f"[REMATCH] Cleared all matches for job {job_id}")
@@ -555,10 +561,7 @@ async def invalidate_job_matches(job_id: str) -> None:
                 return
 
             # Clear stale embedding and re-embed
-            await db.execute(
-                text("UPDATE job_postings SET embedding = NULL WHERE id = :id"),
-                {"id": job_id},
-            )
+            job.embedding = None
             await db.commit()
             await db.refresh(job)
 
@@ -605,27 +608,34 @@ async def proactive_match_resume_to_jobs(resume_id: str) -> None:
                     logger.warning(f"[PROACTIVE_MATCH] Could not generate embedding for resume {resume_id}")
                     return
             
-            emb_str = str(resume_emb)
-            
             # Find all active jobs with similarity above threshold
-            rows = await db.execute(
-                text(
-                    f"""
-                    SELECT jp.id, jp.provider_id, jp.title, jp.description, jp.required_skills,
-                           jp.salary_range, jp.job_type, jp.industry, jp.posted_by_name,
-                           jp.experience_required, jp.created_at, jp.is_active,
-                           1 - (jp.embedding <=> CAST(:emb AS vector)) AS similarity
-                    FROM job_postings jp
-                    WHERE jp.is_active = true
-                      AND jp.embedding IS NOT NULL
-                      AND (1 - (jp.embedding <=> CAST(:emb AS vector))) > {SIMILARITY_THRESHOLD}
-                    ORDER BY jp.embedding <=> CAST(:emb AS vector)
-                    LIMIT {SEEKER_TOP_N * 2}
-                    """
-                ),
-                {"emb": emb_str},
+            similarity = (1 - JobPosting.embedding.cosine_distance(resume_emb)).label("similarity")
+            stmt = (
+                select(
+                    JobPosting.id,
+                    JobPosting.provider_id,
+                    JobPosting.title,
+                    JobPosting.description,
+                    JobPosting.required_skills,
+                    JobPosting.salary_range,
+                    JobPosting.job_type,
+                    JobPosting.industry,
+                    JobPosting.posted_by_name,
+                    JobPosting.experience_required,
+                    JobPosting.created_at,
+                    JobPosting.is_active,
+                    similarity
+                )
+                .where(
+                    JobPosting.is_active == True,
+                    JobPosting.embedding.isnot(None),
+                    similarity > SIMILARITY_THRESHOLD
+                )
+                .order_by(JobPosting.embedding.cosine_distance(resume_emb))
+                .limit(SEEKER_TOP_N * 2)
             )
-            jobs_raw = rows.fetchall()
+            rows = await db.execute(stmt)
+            jobs_raw = rows.all()
             
             if not jobs_raw:
                 logger.info(f"[PROACTIVE_MATCH] No matching jobs found for resume {resume_id}")
@@ -764,29 +774,33 @@ async def proactive_match_job_to_candidates(job_id: str) -> None:
                     logger.warning(f"[PROACTIVE_MATCH] Could not generate embedding for job {job_id}")
                     return
             
-            emb_str = str(job_emb)
-
-            
             # Find all matching candidates
-            rows = await db.execute(
-                text(
-                    f"""
-                    SELECT r.id as resume_id, r.parsed_text, r.parsed_json, r.filename,
-                           u.id as user_id, u.first_name, u.last_name, u.email,
-                           1 - (r.embedding <=> CAST(:emb AS vector)) AS similarity
-                    FROM resumes r
-                    JOIN users u ON u.id = r.user_id
-                    WHERE r.embedding IS NOT NULL
-                      AND u.role = 'seeker'
-                      AND u.is_verified = true
-                      AND (1 - (r.embedding <=> CAST(:emb AS vector))) > {SIMILARITY_THRESHOLD}
-                    ORDER BY r.embedding <=> CAST(:emb AS vector)
-                    LIMIT {PROVIDER_TOP_N}
-                    """
-                ),
-                {"emb": emb_str},
+            similarity = (1 - Resume.embedding.cosine_distance(job_emb)).label("similarity")
+            stmt = (
+                select(
+                    Resume.id.label("resume_id"),
+                    Resume.parsed_text,
+                    Resume.parsed_json,
+                    Resume.filename,
+                    User.id.label("user_id"),
+                    User.first_name,
+                    User.last_name,
+                    User.email,
+                    similarity
+                )
+                .select_from(Resume)
+                .join(User, User.id == Resume.user_id)
+                .where(
+                    Resume.embedding.isnot(None),
+                    User.role == 'seeker',
+                    User.is_verified == True,
+                    similarity > SIMILARITY_THRESHOLD
+                )
+                .order_by(Resume.embedding.cosine_distance(job_emb))
+                .limit(PROVIDER_TOP_N)
             )
-            candidates_raw = rows.fetchall()
+            rows = await db.execute(stmt)
+            candidates_raw = rows.all()
             
             if not candidates_raw:
                 logger.info(f"[PROACTIVE_MATCH] No matching candidates found for job {job_id}")
@@ -912,10 +926,10 @@ async def _cleanup_job_matches_and_notify(job_id: str, job_title: str) -> None:
             matches = matches_result.scalars().all()
             seeker_ids = [str(m.seeker_id) for m in matches]
 
+            from sqlalchemy import delete
             # Delete matches
             await db.execute(
-                text("DELETE FROM matches WHERE job_id = :jid"),
-                {"jid": job_id},
+                delete(Match).where(Match.job_id == job_id)
             )
             await db.commit()
             logger.info(f"[CLEANUP] Deleted {len(seeker_ids)} matches for closed job {job_id}")

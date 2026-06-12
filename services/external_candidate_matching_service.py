@@ -5,7 +5,7 @@ unregistered/external candidates against active job postings.
 from __future__ import annotations
 import logging
 
-from sqlalchemy import text
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.job import JobPosting
@@ -39,9 +39,9 @@ async def embed_and_store_external_candidate(candidate, db: AsyncSession) -> Non
     ai = get_ai()
     embedding = await ai.embed(text_content)
     cid = str(candidate.id)
+    from models.external_candidate import ExternalCandidate
     await db.execute(
-        text("UPDATE external_candidates SET embedding = CAST(:emb AS vector) WHERE id = :id"),
-        {"emb": str(embedding), "id": cid},
+        update(ExternalCandidate).where(ExternalCandidate.id == cid).values(embedding=embedding)
     )
     await db.commit()
     logger.info(f"[EXT_MATCH] Embedded external candidate {cid}")
@@ -71,6 +71,8 @@ def _build_external_candidate_text(candidate) -> str:
 
     _add("Experience", getattr(candidate, "total_experience", None))
     _add("Available Shift", getattr(candidate, "available_shift", None))
+    _add("Year of Passing", getattr(candidate, "year_of_passing", None))
+    _add("Skills", getattr(candidate, "skills", None))
     _add("Professional Journey", getattr(candidate, "professional_journey", None))
     return "\n".join(parts)
 
@@ -116,31 +118,33 @@ async def proactive_match_external_candidate_to_jobs(candidate_id: str) -> None:
             emb_str = str(cand_emb)
 
             # ── 2. pgvector cosine similarity → top N similar jobs ───────
-            rows = await db.execute(
-                text(
-                    f"""
-                    SELECT jp.id, jp.provider_id, jp.title, jp.description,
-                           jp.required_skills, jp.industry, jp.experience_required,
-                           1 - (jp.embedding <=> CAST(:emb AS vector)) AS similarity
-                    FROM job_postings jp
-                    WHERE jp.is_active = true
-                      AND jp.embedding IS NOT NULL
-                      AND (1 - (jp.embedding <=> CAST(:emb AS vector))) > {EXTERNAL_SIMILARITY_THRESHOLD}
-                    ORDER BY jp.embedding <=> CAST(:emb AS vector)
-                    LIMIT {EXTERNAL_TOP_N}
-                    """
-                ),
-                {"emb": emb_str},
+            similarity = (1 - JobPosting.embedding.cosine_distance(cand_emb)).label("similarity")
+            stmt = (
+                select(
+                    JobPosting.id,
+                    JobPosting.provider_id,
+                    JobPosting.title,
+                    JobPosting.description,
+                    JobPosting.required_skills,
+                    JobPosting.industry,
+                    JobPosting.experience_required,
+                    similarity
+                )
+                .where(
+                    JobPosting.is_active == True,
+                    JobPosting.embedding.isnot(None),
+                    similarity > EXTERNAL_SIMILARITY_THRESHOLD
+                )
+                .order_by(JobPosting.embedding.cosine_distance(cand_emb))
+                .limit(EXTERNAL_TOP_N)
             )
-            similar_jobs = rows.fetchall()
+            rows = await db.execute(stmt)
+            similar_jobs = rows.all()
 
             # ── 3. Also fetch jobs below threshold (for score=0 records) ──
             similar_ids = {str(r.id) for r in similar_jobs}
             all_rows = await db.execute(
-                text(
-                    "SELECT jp.id, jp.title FROM job_postings jp "
-                    "WHERE jp.is_active = true"
-                )
+                select(JobPosting.id, JobPosting.title).where(JobPosting.is_active == True)
             )
             all_jobs = all_rows.fetchall()
             below_threshold_jobs = [
@@ -150,11 +154,10 @@ async def proactive_match_external_candidate_to_jobs(candidate_id: str) -> None:
             # ── 4. Skip already-matched jobs ─────────────────────────────
             all_job_ids = [str(r.id) for r in all_jobs]
             existing = await db.execute(
-                text(
-                    "SELECT job_id FROM external_candidate_matches "
-                    "WHERE candidate_id = :cid AND job_id = ANY(:jids)"
-                ),
-                {"cid": candidate_id, "jids": all_job_ids},
+                select(ExternalCandidateMatch.job_id).where(
+                    ExternalCandidateMatch.candidate_id == candidate_id,
+                    ExternalCandidateMatch.job_id.in_(all_job_ids)
+                )
             )
             existing_ids = {str(row[0]) for row in existing.fetchall()}
 
@@ -232,14 +235,9 @@ async def proactive_match_external_candidate_to_jobs(candidate_id: str) -> None:
                 await db.commit()
 
                 # ── Mark candidate as matched ──────────────────────────
-                await db.execute(
-                    text(
-                        "UPDATE external_candidates SET is_matched = true "
-                        "WHERE id = :cid AND is_matched = false"
-                    ),
-                    {"cid": candidate_id},
-                )
-                await db.commit()
+                if not candidate.is_matched:
+                    candidate.is_matched = True
+                    await db.commit()
 
                 logger.info(
                     f"[EXT_MATCH] Stored best match for candidate {candidate_id}: "
@@ -288,34 +286,36 @@ async def proactive_match_job_to_external_candidates(job_id: str) -> None:
                 f"Skills: {', '.join(job.required_skills or [])}\n"
                 f"{job.description}"
             )
-            emb_str = str(job_emb)
-
             # ── pgvector cosine similarity → top N candidates ────────────
-            rows = await db.execute(
-                text(
-                    f"""
-                    SELECT ec.id, ec.full_name, ec.department, ec.sub_role,
-                           ec.industries, ec.total_experience, ec.available_shift,
-                           ec.professional_journey,
-                           1 - (ec.embedding <=> CAST(:emb AS vector)) AS similarity
-                    FROM external_candidates ec
-                    WHERE ec.embedding IS NOT NULL
-                      AND ec.status NOT IN ('rejected')
-                      AND (1 - (ec.embedding <=> CAST(:emb AS vector))) > {EXTERNAL_SIMILARITY_THRESHOLD}
-                    ORDER BY ec.embedding <=> CAST(:emb AS vector)
-                    LIMIT {EXTERNAL_TOP_N}
-                    """
-                ),
-                {"emb": emb_str},
+            similarity = (1 - ExternalCandidate.embedding.cosine_distance(job_emb)).label("similarity")
+            stmt = (
+                select(
+                    ExternalCandidate.id,
+                    ExternalCandidate.full_name,
+                    ExternalCandidate.department,
+                    ExternalCandidate.sub_role,
+                    ExternalCandidate.industries,
+                    ExternalCandidate.total_experience,
+                    ExternalCandidate.available_shift,
+                    ExternalCandidate.professional_journey,
+                    similarity
+                )
+                .where(
+                    ExternalCandidate.embedding.isnot(None),
+                    ExternalCandidate.status != 'rejected',
+                    similarity > EXTERNAL_SIMILARITY_THRESHOLD
+                )
+                .order_by(ExternalCandidate.embedding.cosine_distance(job_emb))
+                .limit(EXTERNAL_TOP_N)
             )
-            similar_candidates = rows.fetchall()
+            rows = await db.execute(stmt)
+            similar_candidates = rows.all()
 
             # ── Also fetch below-threshold candidates ────────────────────
             similar_ids = {str(r.id) for r in similar_candidates}
             all_rows = await db.execute(
-                text(
-                    "SELECT id, full_name FROM external_candidates "
-                    "WHERE status NOT IN ('rejected')"
+                select(ExternalCandidate.id, ExternalCandidate.full_name).where(
+                    ExternalCandidate.status != "rejected"
                 )
             )
             all_candidates = all_rows.fetchall()
@@ -326,11 +326,10 @@ async def proactive_match_job_to_external_candidates(job_id: str) -> None:
             # ── Skip already-matched ─────────────────────────────────────
             all_ids = [str(c.id) for c in all_candidates]
             existing = await db.execute(
-                text(
-                    "SELECT candidate_id FROM external_candidate_matches "
-                    "WHERE job_id = :jid AND candidate_id = ANY(:cids)"
-                ),
-                {"jid": job_id, "cids": all_ids},
+                select(ExternalCandidateMatch.candidate_id).where(
+                    ExternalCandidateMatch.job_id == job_id,
+                    ExternalCandidateMatch.candidate_id.in_(all_ids)
+                )
             )
             existing_ids = {str(row[0]) for row in existing.fetchall()}
 
@@ -428,12 +427,14 @@ async def proactive_match_job_to_external_candidates(job_id: str) -> None:
 
             # ── Mark all processed candidates as matched ───────────────
             if matches_created > 0:
+                from sqlalchemy import update
                 await db.execute(
-                    text(
-                        "UPDATE external_candidates SET is_matched = true "
-                        "WHERE id = ANY(:cids) AND is_matched = false"
-                    ),
-                    {"cids": [str(c.id) for c in similar_candidates]},
+                    update(ExternalCandidate)
+                    .where(
+                        ExternalCandidate.id.in_([str(c.id) for c in similar_candidates]),
+                        ExternalCandidate.is_matched == False
+                    )
+                    .values(is_matched=True)
                 )
                 await db.commit()
 

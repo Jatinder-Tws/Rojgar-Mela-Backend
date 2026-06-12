@@ -69,7 +69,7 @@ class AIRoadmapService:
             user_current_role = portfolio_role or headline
         
         if not user_industry:
-            user_industry = headline or (getattr(portfolio, 'bio', '')[:100] if hasattr(portfolio, 'bio') else '')
+            user_industry = headline or (getattr(portfolio, 'bio', None) or '')[:100]
         
         if hasattr(portfolio, 'total_experience_years') and portfolio.total_experience_years is not None:
             user_experience = str(portfolio.total_experience_years)
@@ -206,7 +206,7 @@ class AIRoadmapService:
                 user_current_role = portfolio_role or headline
             
             if not user_industry:
-                user_industry = headline or (getattr(portfolio, 'bio', '')[:100] if hasattr(portfolio, 'bio') else '')
+                user_industry = headline or (getattr(portfolio, 'bio', None) or '')[:100]
             
             if hasattr(portfolio, 'total_experience_years') and portfolio.total_experience_years is not None:
                 user_experience = str(portfolio.total_experience_years)

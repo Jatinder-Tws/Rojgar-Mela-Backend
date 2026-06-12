@@ -78,19 +78,15 @@ async def _check_duplicate(db: AsyncSession, email: str, phone: str, exclude_id:
 
 
 async def _seeker_job_fair_names(db: AsyncSession, seeker_id: str) -> List[str]:
-    """DB uses job_fairs.name (not ORM title column)."""
-    result = await db.execute(
-        text(
-            """
-            SELECT jf.name
-            FROM job_fair_seekers jfs
-            JOIN job_fairs jf ON jf.id = jfs.job_fair_id
-            WHERE jfs.seeker_id = :seeker_id
-            ORDER BY jfs.registered_at DESC
-            """
-        ),
-        {"seeker_id": seeker_id},
+    """DB uses job_fairs.title column."""
+    from models.job_fair import JobFair, JobFairSeeker
+    q = (
+        select(JobFair.title)
+        .join(JobFairSeeker, JobFairSeeker.job_fair_id == JobFair.id)
+        .where(JobFairSeeker.seeker_id == seeker_id)
+        .order_by(JobFairSeeker.registered_at.desc())
     )
+    result = await db.execute(q)
     return [row[0] for row in result.all() if row[0]]
 
 
