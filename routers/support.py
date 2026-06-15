@@ -10,6 +10,7 @@ from controllers.support_controller import (
     list_my_feedback as ctrl_list_my_feedback,
     list_my_tickets as ctrl_list_tickets,
     submit_feedback as ctrl_submit_feedback,
+    create_contact_inquiry as ctrl_create_inquiry,
 )
 from database import get_db
 from models.user import User
@@ -21,6 +22,8 @@ from schemas.support import (
     TicketMessageCreate,
     TicketMessageOut,
     TicketOut,
+    InquiryCreate,
+    InquiryOut,
 )
 from services.auth_service import require_seeker_or_provider
 
@@ -78,3 +81,11 @@ async def list_my_feedback(
     db: AsyncSession = Depends(get_db),
 ):
     return await ctrl_list_my_feedback(user, db)
+
+
+@router.post("/inquiries", response_model=InquiryOut, status_code=201)
+async def create_inquiry(
+    body: InquiryCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_create_inquiry(body, db)

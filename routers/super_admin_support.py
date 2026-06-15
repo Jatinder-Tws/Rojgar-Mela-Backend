@@ -9,6 +9,8 @@ from controllers.support_controller import (
     admin_list_tickets as ctrl_list_tickets,
     admin_reply_ticket as ctrl_reply,
     admin_update_ticket_status as ctrl_update_status,
+    admin_list_inquiries as ctrl_list_inquiries,
+    admin_reply_to_inquiry as ctrl_reply_to_inquiry,
 )
 from database import get_db
 from models.user import User
@@ -20,6 +22,8 @@ from schemas.support import (
     TicketMessageOut,
     TicketOut,
     TicketStatusUpdate,
+    InquiryListResponse,
+    InquiryReplyCreate,
 )
 from services.auth_service import require_super_admin
 
@@ -77,3 +81,25 @@ async def list_feedback(
     db: AsyncSession = Depends(get_db),
 ):
     return await ctrl_list_feedback(db, page=page, page_size=page_size, search=search, rating=rating)
+
+
+@router.get("/inquiries", response_model=InquiryListResponse)
+async def list_inquiries(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    search: Optional[str] = None,
+    _admin: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_list_inquiries(db, page=page, page_size=page_size, search=search)
+
+
+@router.post("/inquiries/{inquiry_id}/reply")
+async def reply_to_inquiry(
+    inquiry_id: str,
+    body: InquiryReplyCreate,
+    _admin: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_reply_to_inquiry(inquiry_id, body, db)
+

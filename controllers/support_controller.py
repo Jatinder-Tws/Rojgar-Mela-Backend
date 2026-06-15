@@ -17,6 +17,7 @@ from models.support_ticket import (
     TicketPriority,
     TicketStatus,
 )
+from models.contact_inquiry import ContactInquiry
 from models.user import User
 from schemas.support import (
     FeedbackCreate,
@@ -29,6 +30,10 @@ from schemas.support import (
     TicketMessageOut,
     TicketOut,
     TicketStatusUpdate,
+    InquiryCreate,
+    InquiryOut,
+    InquiryListResponse,
+    InquiryReplyCreate,
 )
 from services.notification_service import create_notification, notify_super_admins
 from services.support_realtime_service import broadcast_ticket_message, broadcast_ticket_update
@@ -564,3 +569,98 @@ async def admin_list_feedback(
         for fb, u in rows
     ]
     return FeedbackListResponse(items=items, total=total)
+
+
+async def create_contact_inquiry(body: InquiryCreate, db: AsyncSession) -> InquiryOut:
+    inquiry = ContactInquiry(
+        name=body.name.strip(),
+        email=body.email.strip(),
+        subject=body.subject.strip() if body.subject else None,
+        message=body.message.strip(),
+    )
+    db.add(inquiry)
+    await db.commit()
+    await db.refresh(inquiry)
+
+    # Notify super admins of the new contact inquiry
+    await notify_super_admins(
+        db=db,
+        title="New Contact Inquiry",
+        message=f"New inquiry from {inquiry.name} ({inquiry.email}): {inquiry.subject or '(No Subject)'}",
+        type=NotificationType.general,
+        related_user_id=str(inquiry.id),
+    )
+
+    return InquiryOut(
+        id=inquiry.id,
+        name=inquiry.name,
+        email=inquiry.email,
+        subject=inquiry.subject,
+        message=inquiry.message,
+        created_at=inquiry.created_at,
+    )
+
+
+async def admin_list_inquiries(
+    db: AsyncSession,
+    page: int = 1,
+    page_size: int = 20,
+    search: Optional[str] = None,
+) -> InquiryListResponse:
+    query = select(ContactInquiry)
+    count_query = select(func.count()).select_from(ContactInquiry)
+
+    if search:
+        term = f"%{search.strip()}%"
+        filt = or_(
+            ContactInquiry.name.ilike(term),
+            ContactInquiry.email.ilike(term),
+            ContactInquiry.subject.ilike(term),
+            ContactInquiry.message.ilike(term),
+        )
+        query = query.where(filt)
+        count_query = count_query.where(filt)
+
+    total_result = await db.execute(count_query)
+    total = total_result.scalar() or 0
+
+    offset = (page - 1) * page_size
+    result = await db.execute(
+        query.order_by(ContactInquiry.created_at.desc()).offset(offset).limit(page_size)
+    )
+    items = result.scalars().all()
+
+    return InquiryListResponse(
+        items=[
+            InquiryOut(
+                id=item.id,
+                name=item.name,
+                email=item.email,
+                subject=item.subject,
+                message=item.message,
+                created_at=item.created_at,
+            )
+            for item in items
+        ],
+        total=total,
+    )
+
+
+async def admin_reply_to_inquiry(
+    inquiry_id: str,
+    body: InquiryReplyCreate,
+    db: AsyncSession,
+) -> dict:
+    result = await db.execute(select(ContactInquiry).where(ContactInquiry.id == inquiry_id))
+    inquiry = result.scalar_one_or_none()
+    if not inquiry:
+        raise HTTPException(status_code=404, detail="Inquiry not found")
+
+    from services.celery_tasks import send_inquiry_reply_email
+    send_inquiry_reply_email.delay(
+        to_email=inquiry.email,
+        subject=body.subject.strip(),
+        message_body=body.message.strip(),
+    )
+    return {"message": "Email reply enqueued successfully"}
+

@@ -149,3 +149,34 @@ def _notify_provider_after_matching(job_id: str):
         asyncio.run(_push())
     except Exception as exc:
         logger.warning(f"[CELERY] WebSocket notification failed (non-critical): {exc}")
+
+
+@celery_app.task(name="send_inquiry_reply_email", max_retries=3, default_retry_delay=30)
+def send_inquiry_reply_email(to_email: str, subject: str, message_body: str):
+    """Send support inquiry reply email using SMTP service in background."""
+    from services.email_service import _send_email
+
+    async def _send():
+        html_content = f"""
+        <html>
+        <body style="font-family: sans-serif; line-height: 1.5; color: #333; margin: 0; padding: 20px; background-color: #f8fafc;">
+            <div style="max-width: 600px; margin: 0 auto; padding: 30px; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
+                <h2 style="color: #4f46e5; border-bottom: 2px solid #e2e8f0; padding-bottom: 15px; margin-top: 0;">Support Inquiry Response</h2>
+                <div style="font-size: 15px; color: #1e293b; white-space: pre-wrap; line-height: 1.6; margin-top: 20px; margin-bottom: 20px;">
+{message_body}
+                </div>
+                <hr style="border: 0; border-top: 1px solid #e2e8f0; margin-top: 30px; margin-bottom: 20px;">
+                <p style="font-size: 12px; color: #64748b; margin-bottom: 0;">This email is a response to the contact inquiry you submitted to the Mega Job Fair Organizing Committee on Rojgar Mela. Please do not reply to this automated email.</p>
+            </div>
+        </body>
+        </html>
+        """
+        await _send_email(to_email, subject, html_content, raise_on_error=True)
+
+    try:
+        _run_async(_send())
+        logger.info(f"[CELERY] Reply email sent successfully to {to_email}")
+    except Exception as exc:
+        logger.exception(f"[CELERY] Reply email delivery failed to {to_email}: {exc}")
+        raise celery_app.retry(exc=exc)
+
