@@ -67,8 +67,6 @@ async def submit_answer(session_id: str, body: AssessmentAnswer, db: AsyncSessio
     session.cost = (session.cost or 0) + tokens * COST_PER_TOKEN
     await db.commit()
     return {"question": question_json.get("question"), "options": question_json.get("options"), "is_complete": False}
-
-
 async def complete_assessment(session_id: str, body: AssessmentComplete, db: AsyncSession) -> LoginResponse:
     result = await db.execute(select(AssessmentSession).where(AssessmentSession.id == session_id))
     session = result.scalar_one_or_none()
@@ -97,21 +95,32 @@ async def complete_assessment(session_id: str, body: AssessmentComplete, db: Asy
             user.totp_secret = totp_service.generate_secret()
         secret = user.totp_secret
         user.is_assessment_done = True
-    eval_data = await generate_assessment_evaluation(session.qa_history, session.experience_level, session.domain_interest)
-    eval_tokens = eval_data.get("tokens_utilized", 0)
-    session.tokens_utilized = (session.tokens_utilized or 0) + eval_tokens
-    session.cost = (session.cost or 0) + eval_tokens * COST_PER_TOKEN
-    db.add(session)
-    assessment_result = AssessmentResult(
-        session_id=session.id, user_id=user.id,
-        personality_type=eval_data["personality_type"], iq_score=eval_data["iq_estimate"],
-        aptitude_score=eval_data.get("aptitude_score"), reasoning_score=eval_data.get("reasoning_score"),
-        emotional_intelligence_score=eval_data.get("emotional_intelligence_score"),
-        personality_score=eval_data.get("personality_score"),
-        recommended_domains=eval_data["recommended_domains"], detailed_evaluation=eval_data["detailed_evaluation"],
-        tokens_utilized=session.tokens_utilized, cost=session.cost
-    )
-    db.add(assessment_result)
+
+    # Check if AssessmentResult already exists
+    res_query = await db.execute(select(AssessmentResult).where(AssessmentResult.session_id == session_id))
+    assessment_result = res_query.scalar_one_or_none()
+    if assessment_result:
+        if assessment_result.user_id is None:
+            assessment_result.user_id = user.id
+        elif assessment_result.user_id != user.id:
+            raise HTTPException(status_code=403, detail="Assessment already linked to another user")
+        db.add(assessment_result)
+    else:
+        eval_data = await generate_assessment_evaluation(session.qa_history, session.experience_level, session.domain_interest)
+        eval_tokens = eval_data.get("tokens_utilized", 0)
+        session.tokens_utilized = (session.tokens_utilized or 0) + eval_tokens
+        session.cost = (session.cost or 0) + eval_tokens * COST_PER_TOKEN
+        db.add(session)
+        assessment_result = AssessmentResult(
+            session_id=session.id, user_id=user.id,
+            personality_type=eval_data["personality_type"], iq_score=eval_data["iq_estimate"],
+            aptitude_score=eval_data.get("aptitude_score"), reasoning_score=eval_data.get("reasoning_score"),
+            emotional_intelligence_score=eval_data.get("emotional_intelligence_score"),
+            personality_score=eval_data.get("personality_score"),
+            recommended_domains=eval_data["recommended_domains"], detailed_evaluation=eval_data["detailed_evaluation"],
+            tokens_utilized=session.tokens_utilized, cost=session.cost
+        )
+        db.add(assessment_result)
     await db.commit()
     await db.refresh(user)
     token = create_access_token(data={"sub": user.id})
@@ -128,7 +137,38 @@ async def get_result(session_id: str, db: AsyncSession) -> AssessmentResult:
     result = await db.execute(select(AssessmentResult).where(AssessmentResult.session_id == session_id))
     assessment_result = result.scalar_one_or_none()
     if not assessment_result:
-        raise HTTPException(status_code=404, detail="Result not found")
+        # Check if AssessmentSession exists and has history
+        sess_res = await db.execute(select(AssessmentSession).where(AssessmentSession.id == session_id))
+        session = sess_res.scalar_one_or_none()
+        if not session or not session.qa_history:
+            raise HTTPException(status_code=404, detail="Result not found")
+        
+        # Dynamically generate the result!
+        eval_data = await generate_assessment_evaluation(session.qa_history, session.experience_level, session.domain_interest)
+        eval_tokens = eval_data.get("tokens_utilized", 0)
+        session.tokens_utilized = (session.tokens_utilized or 0) + eval_tokens
+        session.cost = (session.cost or 0) + eval_tokens * COST_PER_TOKEN
+        session.status = "completed"
+        db.add(session)
+        
+        assessment_result = AssessmentResult(
+            session_id=session.id,
+            user_id=None,
+            personality_type=eval_data["personality_type"],
+            iq_score=eval_data["iq_estimate"],
+            aptitude_score=eval_data.get("aptitude_score"),
+            reasoning_score=eval_data.get("reasoning_score"),
+            emotional_intelligence_score=eval_data.get("emotional_intelligence_score"),
+            personality_score=eval_data.get("personality_score"),
+            recommended_domains=eval_data["recommended_domains"],
+            detailed_evaluation=eval_data["detailed_evaluation"],
+            tokens_utilized=session.tokens_utilized,
+            cost=session.cost
+        )
+        db.add(assessment_result)
+        await db.commit()
+        await db.refresh(assessment_result)
+        
     return assessment_result
 
 

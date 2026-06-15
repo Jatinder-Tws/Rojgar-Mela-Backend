@@ -156,6 +156,75 @@ class HybridAIAdapter:
             return await self._openai.chat_completion_with_usage(system, user)
 
 
+def get_default_questions(domain_interest: str) -> List[dict]:
+    # Professional defaults tailored by domain
+    domain = (domain_interest or "").lower()
+    if any(k in domain for k in ["software", "tech", "comput", "develop", "program"]):
+        return [
+            {
+                "question": "Which of the following data structures operates on a Last-In, First-Out (LIFO) basis?",
+                "options": ["Queue", "Stack", "Singly Linked List", "Binary Search Tree"]
+            },
+            {
+                "question": "In Object-Oriented Programming, what is the process of wrapping code and data together into a single unit called?",
+                "options": ["Inheritance", "Polymorphism", "Encapsulation", "Abstraction"]
+            }
+        ]
+    elif any(k in domain for k in ["data", "analy", "science"]):
+        return [
+            {
+                "question": "In statistics and machine learning, what does 'overfitting' refer to?",
+                "options": [
+                    "A model that performs poorly on both training and unseen test data.",
+                    "A model that learns the training data too well, including noise, and performs poorly on unseen test data.",
+                    "A model that has too few parameters to capture the underlying pattern of the data.",
+                    "A model that is trained on an extremely large dataset."
+                ]
+            },
+            {
+                "question": "Which SQL clause is used to filter the results of a GROUP BY query based on an aggregate condition?",
+                "options": ["WHERE", "HAVING", "ORDER BY", "FILTER"]
+            }
+        ]
+    elif any(k in domain for k in ["marketing", "business", "sales"]):
+        return [
+            {
+                "question": "What does the marketing metric 'CAC' stand for?",
+                "options": [
+                    "Customer Acquisition Cost",
+                    "Customer Lifetime Value",
+                    "Click‑Through Rate",
+                    "Cohort Analysis Cycle"
+                ]
+            },
+            {
+                "question": "Which of the following best describes the concept of a 'Value Proposition'?",
+                "options": [
+                    "The price point at which a product is sold.",
+                    "The summary of why a consumer should buy a product or service.",
+                    "A discount code offered to repeat buyers.",
+                    "The total cost to manufacture a product."
+                ]
+            }
+        ]
+    # Default high-quality general aptitude/reasoning/situational questions
+    return [
+        {
+            "question": "A team has a task that takes 6 hours to complete for one person. If two people work together at the same constant rate, how many hours will it take?",
+            "options": ["3 hours", "4 hours", "6 hours", "1.5 hours"]
+        },
+        {
+            "question": "Which of the following is the most effective way to resolve a disagreement with a team member on a project approach?",
+            "options": [
+                "Ignore the disagreement and proceed with your own plan.",
+                "Discuss the pros and cons of both approaches calmly and seek common ground or guidance.",
+                "Escalate the issue immediately to the department head without talking to the teammate.",
+                "Wait for the other person to concede their point."
+            ]
+        }
+    ]
+
+
 class MockAIAdapter:
     """Mock adapter for local dev – no API calls."""
 
@@ -169,15 +238,27 @@ class MockAIAdapter:
         return [v / magnitude for v in base]
 
     async def chat_completion(self, system: str, user: str) -> str:
-        # Return mock JSON that downstream parsers expect
-        return json.dumps(
-            {
-                "question": "If you have 8 apples and give away 3, then receive double the remaining amount, how many apples do you have now?",
-                "options": ["5", "10", "8", "12"],
-                "second_question": "A train travels 60 km/h for 2 hours and then 80 km/h for 1.5 hours. What is the average speed of the train?",
-                "second_options": ["70 km/h", "75 km/h", "80 km/h", "85 km/h"]
-            }
-        )
+        # If the request is for assessment evaluation
+        if "personality_type" in system or "evaluate" in system.lower():
+            return json.dumps({
+                "personality_type": "Analytical/Balanced",
+                "iq_estimate": 110,
+                "aptitude_score": 85,
+                "reasoning_score": 88,
+                "emotional_intelligence_score": 90,
+                "personality_score": 82,
+                "recommended_domains": ["Software Engineering", "System Architecture", "Web Development"],
+                "detailed_evaluation": "The candidate demonstrates clear logical thinking and structured problem‑solving. Answers show strong fundamental knowledge and pragmatic team collaboration mindset."
+            })
+
+        # Try to extract domain interest from system or user prompt
+        import re
+        domain = ""
+        match = re.search(r"interested in the '([^']+)' domain", system)
+        if match:
+            domain = match.group(1)
+
+        return json.dumps(get_default_questions(domain))
 
     async def chat_completion_with_usage(self, system: str, user: str) -> tuple[str, int]:
         text = await self.chat_completion(system, user)
@@ -186,9 +267,6 @@ class MockAIAdapter:
 
 def get_ai_provider() -> AIProvider:
     mode = settings.AI_MODE
-    print(
-        f"AI_MODE: {mode}, GOOGLE_API_KEY: {bool(settings.GOOGLE_API_KEY)}, OPENAI_API_KEY: {bool(settings.OPENAI_API_KEY)}"
-    )
     if mode == "mock":
         return MockAIAdapter()
     if settings.GOOGLE_API_KEY and settings.OPENAI_API_KEY:
@@ -213,23 +291,27 @@ def get_ai() -> AIProvider:
 
 async def generate_next_assessment_question(
     history: List[dict], experience_level: str, domain_interest: str
-) -> List[dict]:
+) -> tuple[List[dict], int]:
     ai = get_ai()
 
     print(ai)
     # Determine focus based on experience level and domain interest
-    if (
-        ("Student" in experience_level or "Fresher" in experience_level or "Entry" in experience_level)
-        and domain_interest == "Career Discovery"
-    ):
-        # Include reasoning and aptitude questions for freshers interested in career discovery
+    if domain_interest == "Career Discovery":
         focus = (
-            "Focus on social orientation, work style, creative expression, analytical thinking, helping orientation, achievements, basic domain knowledge, AND include reasoning/aptitude, personality trait, and emotional intelligence related questions such as logical puzzles, situational judgement, self-awareness scenarios, and basic quantitative reasoning. Do NOT ask highly technical or advanced interview questions."
+            "Focus on social orientation, work style, creative expression, analytical thinking, learning agility, and situational collaboration scenario questions. "
+            "Assess their core interests, workplace values, and cognitive problem-solving approaches to help determine suitable domains. "
+            "Do NOT ask highly technical interview questions."
         )
     elif ("Student" in experience_level or "Fresher" in experience_level or "Entry" in experience_level):
-        focus = "Focus primarily on social orientation, work style, creative expression, analytical thinking, helping orientation, achievements, basic domain knowledge, AND include reasoning/aptitude, logical puzzles, situational judgement, self-awareness scenarios, and basic quantitative reasoning. Do NOT ask highly technical or advanced interview questions."
+        focus = (
+            f"Focus on assessing basic {domain_interest} concepts, general analytical reasoning, and practical situational team dynamics. "
+            "Avoid advanced architecture or deep technical tools, but do NOT ask childish logical puzzles or simple math riddles. "
+            "Keep the questions professional, engaging, and relevant to an entry-level candidate in this field."
+        )
     else:
-        focus = "Focus strictly on advanced technical concepts, system design, architectural decisions, and in-depth domain knowledge appropriate for their experience level."
+        focus = (
+            f"Focus strictly on advanced {domain_interest} concepts, system design, architectural decisions, and in-depth domain knowledge appropriate for their experience level."
+        )
     # Build system prompt without raw JSON braces to avoid f-string formatting issues
     json_schema = '[ {"question": "The question text here", "options": ["Option A", "Option B", "Option C", "Option D"]}, {"question": "Second question", "options": ["Option A", "Option B", "Option C", "Option D"]} ]'
     system_prompt = f"""
@@ -252,8 +334,6 @@ async def generate_next_assessment_question(
     )
     user_prompt = f"History:\n{history_text}\n\nGenerate the next two questions as JSON."
 
-    print(user_prompt)
-
     try:
         response, tokens = await ai.chat_completion_with_usage(system_prompt, user_prompt)
         # Clean up markdown if included
@@ -268,101 +348,11 @@ async def generate_next_assessment_question(
         data = json.loads(response.strip())
         # Ensure we have exactly two questions; if not, pad with defaults
         if not isinstance(data, list) or len(data) < 2:
-            # fallback default questions
-            default_qs = [
-                {
-                    "question": "If you have 8 apples and give away 3, then receive double the remaining amount, how many apples do you have now?",
-                    "options": ["5", "10", "8", "12"]
-                },
-                {
-                    "question": "A train travels at 60 km/h for 2 hours and then 80 km/h for 1.5 hours. What is the average speed of the train?",
-                    "options": ["70 km/h", "75 km/h", "80 km/h", "85 km/h"]
-                }
-            ]
-            data = default_qs
+            data = get_default_questions(domain_interest)
         return data, tokens
     except Exception as e:
         print(f"Error generating question: {e}")
-        return [
-            {
-                "question": "If you have 8 apples and give away 3, then receive double the remaining amount, how many apples do you have now?",
-                "options": ["5", "10", "8", "12"]
-            },
-            {
-                "question": "A train travels at 60 km/h for 2 hours and then 80 km/h for 1.5 hours. What is the average speed of the train?",
-                "options": ["70 km/h", "75 km/h", "80 km/h", "85 km/h"]
-            }
-        ], 0
-    ai = get_ai()
-
-    print(ai)
-    # Determine focus based on experience level and domain interest
-    if (
-        ("Student" in experience_level or "Fresher" in experience_level or "Entry" in experience_level)
-        and domain_interest == "Career Discovery"
-    ):
-        # Include reasoning and aptitude questions for freshers interested in career discovery
-        focus = (
-            "Focus on social orientation, work style, creative expression, analytical thinking, helping orientation, achievements, basic domain knowledge, AND include reasoning/aptitude, personality trait, and emotional intelligence related questions such as logical puzzles, situational judgement, self-awareness scenarios, and basic quantitative reasoning. Do NOT ask highly technical or advanced interview questions."
-        )
-    elif ("Student" in experience_level or "Fresher" in experience_level or "Entry" in experience_level):
-        focus = "Focus primarily on social orientation, work style, creative expression, analytical thinking, helping orientation, achievements, basic domain knowledge, AND include reasoning/aptitude, logical puzzles, situational judgement, self-awareness scenarios, and basic quantitative reasoning. Do NOT ask highly technical or advanced interview questions."
-    else:
-        focus = "Focus strictly on advanced technical concepts, system design, architectural decisions, and in-depth domain knowledge appropriate for their experience level."
-    system_prompt = f"""
-    You are an expert technical interviewer and career counselor.
-    The candidate has an experience level of '{experience_level}' and is interested in the '{domain_interest}' domain.
-    {focus}
-    Based on the previous conversation history, generate the NEXT question to assess their fit.
-    ALL questions must be Multiple Choice Questions (MCQs) with exactly 4 options.
-    Ensure questions progressively adapt based on their previous answers.
-    
-    Return the response ONLY as a valid JSON object matching this schema exactly:
-    {{
-      "question": "The question text here",
-      "options": ["Option A", "Option B", "Option C", "Option D"]
-    }}
-    """
-
-    history_text = "\n".join(
-        [
-            f"Q: {item.get('question_text', item.get('question', ''))}\nA: {item.get('answer', '')}"
-            for item in history
-        ]
-    )
-    user_prompt = f"History:\n{history_text}\n\nGenerate the next question as JSON."
-
-    print(user_prompt)
-
-    try:
-        response, tokens = await ai.chat_completion_with_usage(system_prompt, user_prompt)
-        # Clean up markdown if included
-        response = response.strip()
-        print(response)
-        if response.startswith("```json"):
-            response = response[7:]
-        if response.startswith("```"):
-            response = response[3:]
-        if response.endswith("```"):
-            response = response[:-3]
-
-        data = json.loads(response.strip())
-        print(data)
-        return json.dumps(data), tokens
-    except Exception as e:
-        print(f"Error generating question: {e}")
-        return json.dumps(
-            [
-                {
-                    "question": "If you have 8 apples and give away 3, then receive double the remaining amount, how many apples do you have now?",
-                    "options": ["5", "10", "8", "12"]
-                },
-                {
-                    "question": "A train travels at 60 km/h for 2 hours and then 80 km/h for 1.5 hours. What is the average speed of the train?",
-                    "options": ["70 km/h", "75 km/h", "80 km/h", "85 km/h"]
-                }
-            ]
-        ), 0
+        return get_default_questions(domain_interest), 0
 
 
 async def generate_assessment_evaluation(
