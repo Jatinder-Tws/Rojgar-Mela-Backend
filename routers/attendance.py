@@ -1,4 +1,6 @@
 from datetime import date
+from typing import Optional
+
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,5 +20,16 @@ async def mark_attendance(request: MarkAttendanceRequest, db: AsyncSession = Dep
 
 
 @router.get("/daily", response_model=list[UserAttendanceResponse])
-async def get_daily_attendance(target_date: date = None, db: AsyncSession = Depends(get_db)):
-    return await ctrl_get_daily_attendance(target_date, db)
+async def get_daily_attendance(
+    target_date: date | None = None,
+    search: Optional[str] = None,
+    status: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Return daily attendance with optional search & status filters.
+
+    - search: matches name, email, or phone (handled in controller)
+    - status: 'Present' or 'Absent'
+    """
+    return await ctrl_get_daily_attendance(target_date, search, status, db)
