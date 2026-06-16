@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, BackgroundTasks
+from fastapi import APIRouter, Depends, BackgroundTasks, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
@@ -62,8 +62,14 @@ async def resend_otp(body: ResendOtpRequest, background_tasks: BackgroundTasks, 
 
 
 @router.post("/login", response_model=LoginResponse)
-async def login(body: LoginRequest, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db)):
-    return await ctrl_login(body, background_tasks, db)
+async def login(
+    body: LoginRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    referer = request.headers.get("referer")
+    return await ctrl_login(body, background_tasks, db, referer)
 
 
 @router.post("/verify-reset-otp", response_model=LoginResponse)

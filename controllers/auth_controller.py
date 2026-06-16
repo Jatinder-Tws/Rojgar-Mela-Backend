@@ -243,6 +243,7 @@ async def login(
     body: LoginRequest,
     background_tasks: BackgroundTasks,
     db: AsyncSession,
+    referer: str | None = None,
 ) -> LoginResponse:
     try:
         result = await db.execute(select(User).where(User.email == body.email))
@@ -258,6 +259,14 @@ async def login(
                 status_code=400,
                 detail={"general": "Password not set. Contact your administrator."},
             )
+        if getattr(user, "is_super_admin", False):
+            expected_referer = f"{settings.FRONTEND_URL.rstrip('/')}/super-admin/login"
+            if not referer or not referer.startswith(expected_referer):
+                raise HTTPException(
+                    status_code=400,
+                    detail={"general": "Invalid login source for superadmin."},
+                )
+
         if not verify_password(body.password, user.hashed_password):
             raise HTTPException(
                 status_code=400, detail={"general": "Incorrect password"}
