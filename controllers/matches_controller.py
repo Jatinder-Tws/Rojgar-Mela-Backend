@@ -1,3 +1,4 @@
+import asyncio
 from typing import List, Optional
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -13,24 +14,18 @@ from services.notification_service import create_notification
 
 
 async def get_matched_jobs(user: User, db: AsyncSession) -> List[JobWithMatch]:
-    matches_result = await db.execute(
-        select(Match).where(Match.seeker_id == user.id).order_by(Match.score.desc()).limit(50)
+    query = (
+        select(JobPosting, Match.score, Match.fit_reason, Match.highlights, Match.gaps)
+        .join(Match, JobPosting.id == Match.job_id)
+        .where(Match.seeker_id == user.id, JobPosting.is_active == True)
+        .order_by(Match.score.desc())
+        .limit(50)
     )
-    matches = matches_result.scalars().all()
-    if not matches:
-        return []
-
-    job_ids = [m.job_id for m in matches]
-    jobs_result = await db.execute(
-        select(JobPosting).where(JobPosting.id.in_(job_ids), JobPosting.is_active == True)  # noqa
-    )
-    jobs_map = {str(j.id): j for j in jobs_result.scalars().all()}
+    result = await db.execute(query)
+    rows = result.all()
 
     results = []
-    for match in matches:
-        job = jobs_map.get(str(match.job_id))
-        if not job:
-            continue
+    for job, score, fit_reason, highlights, gaps in rows:
         results.append(JobWithMatch(
             id=str(job.id),
             provider_id=str(job.provider_id),
@@ -46,10 +41,10 @@ async def get_matched_jobs(user: User, db: AsyncSession) -> List[JobWithMatch]:
             is_active=job.is_active,
             created_at=job.created_at,
             post_count=job.post_count,
-            match_score=match.score,
-            highlights=match.highlights,
-            gaps=match.gaps,
-            fit_reason=match.fit_reason,
+            match_score=score,
+            highlights=highlights,
+            gaps=gaps,
+            fit_reason=fit_reason,
             ai_interview_enabled=job.ai_interview_enabled,
             selection_threshold=job.selection_threshold,
         ))
@@ -58,16 +53,35 @@ async def get_matched_jobs(user: User, db: AsyncSession) -> List[JobWithMatch]:
 
 async def get_matched_candidates(
     job_id: Optional[str],
+    all_jobs: bool,
     user: User,
     db: AsyncSession,
 ) -> List[MatchedCandidateOut]:
-    if job_id:
+    if all_jobs:
+        # Fetch matches for all of the provider's active jobs
+        jobs_res = await db.execute(
+            select(JobPosting.id).where(JobPosting.provider_id == user.id, JobPosting.is_active == True)
+        )
+        job_ids = [row[0] for row in jobs_res.all()]
+        if not job_ids:
+            return []
+        
+        matches_result = await db.execute(
+            select(Match).where(Match.job_id.in_(job_ids)).order_by(Match.score.desc()).limit(100)
+        )
+        matches = matches_result.scalars().all()
+    elif job_id:
         result = await db.execute(
             select(JobPosting).where(JobPosting.id == job_id, JobPosting.provider_id == user.id)
         )
         job = result.scalar_one_or_none()
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
+        
+        matches_result = await db.execute(
+            select(Match).where(Match.job_id == job.id).order_by(Match.score.desc()).limit(100)
+        )
+        matches = matches_result.scalars().all()
     else:
         result = await db.execute(
             select(JobPosting)
@@ -78,23 +92,28 @@ async def get_matched_candidates(
         job = result.scalar_one_or_none()
         if not job:
             raise HTTPException(status_code=404, detail="No active job postings found")
+        
+        matches_result = await db.execute(
+            select(Match).where(Match.job_id == job.id).order_by(Match.score.desc()).limit(100)
+        )
+        matches = matches_result.scalars().all()
 
-    matches_result = await db.execute(
-        select(Match).where(Match.job_id == job.id).order_by(Match.score.desc()).limit(100)
-    )
-    matches = matches_result.scalars().all()
     if not matches:
         return []
 
     seeker_ids = [m.seeker_id for m in matches]
-    seekers_result = await db.execute(select(User).where(User.id.in_(seeker_ids)))
-    seekers_map = {str(u.id): u for u in seekers_result.scalars().all()}
 
-    resumes_result = await db.execute(
+    seekers_task = db.execute(select(User).where(User.id.in_(seeker_ids)))
+    resumes_task = db.execute(
         select(Resume).where(Resume.user_id.in_(seeker_ids)).order_by(Resume.created_at.desc())
     )
+
+    seekers_res, resumes_res = await asyncio.gather(seekers_task, resumes_task)
+
+    seekers_map = {str(u.id): u for u in seekers_res.scalars().all()}
+
     resumes_map = {}
-    for resume in resumes_result.scalars().all():
+    for resume in resumes_res.scalars().all():
         if str(resume.user_id) not in resumes_map:
             resumes_map[str(resume.user_id)] = resume
 
@@ -117,6 +136,7 @@ async def get_matched_candidates(
             resume_parsed_json=resume.parsed_json if resume else None,
             resume_filename=resume.filename if resume else None,
             profile_pic_url=seeker.profile_pic_url,
+            job_id=str(match.job_id),
         ))
     return results
 

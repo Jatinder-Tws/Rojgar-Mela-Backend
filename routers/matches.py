@@ -22,8 +22,13 @@ async def get_matched_jobs(user: User = Depends(require_seeker), db: AsyncSessio
 
 
 @router.get("/candidates", response_model=List[MatchedCandidateOut])
-async def get_matched_candidates(job_id: Optional[str] = Query(None), user: User = Depends(require_provider), db: AsyncSession = Depends(get_db)):
-    return await ctrl_get_matched_candidates(job_id, user, db)
+async def get_matched_candidates(
+    job_id: Optional[str] = Query(None),
+    all_jobs: bool = Query(False),
+    user: User = Depends(require_provider),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_get_matched_candidates(job_id, all_jobs, user, db)
 
 
 @router.get("/candidate/{match_id}", response_model=MatchedCandidateOut)
@@ -43,4 +48,4 @@ async def get_seeker_matches_alias(user: User = Depends(require_seeker), db: Asy
 
 @router.get("/job/{job_id}")
 async def get_job_matches_alias(job_id: str, user: User = Depends(require_provider), db: AsyncSession = Depends(get_db)):
-    return await ctrl_get_matched_candidates(job_id, user, db)
+    return await ctrl_get_matched_candidates(job_id, False, user, db)

@@ -215,27 +215,27 @@ async def get_user_interviews(
     db: AsyncSession,
     user: User,
 ) -> List[InterviewOut]:
-    query = select(Interview).where(or_(Interview.seeker_id == user.id, Interview.provider_id == user.id))
+    from sqlalchemy.orm import joinedload
+
+    query = (
+        select(Interview)
+        .options(
+            joinedload(Interview.job),
+            joinedload(Interview.seeker),
+            joinedload(Interview.provider),
+        )
+        .where(or_(Interview.seeker_id == user.id, Interview.provider_id == user.id))
+        .order_by(Interview.scheduled_at.desc())
+    )
     result = await db.execute(query)
     interviews = result.scalars().all()
     
     out = []
     for i in interviews:
-        job_res = await db.execute(select(JobPosting.title).where(JobPosting.id == i.job_id))
-        job_title = job_res.scalar()
-        
-        seeker_res = await db.execute(select(User.first_name, User.last_name).where(User.id == i.seeker_id))
-        seeker_data = seeker_res.first()
-        s_fn, s_ln = seeker_data if seeker_data else ("Unknown", "User")
-        
-        provider_res = await db.execute(select(User.first_name, User.last_name).where(User.id == i.provider_id))
-        provider_data = provider_res.first()
-        p_fn, p_ln = provider_data if provider_data else ("Unknown", "User")
-
         item = InterviewOut.model_validate(i)
-        item.job_title = job_title
-        item.seeker_name = f"{s_fn} {s_ln}"
-        item.provider_name = f"{p_fn} {p_ln}"
+        item.job_title = i.job.title if i.job else "Unknown Job"
+        item.seeker_name = f"{i.seeker.first_name} {i.seeker.last_name}" if i.seeker else "Unknown Seeker"
+        item.provider_name = f"{i.provider.first_name} {i.provider.last_name}" if i.provider else "Unknown Provider"
         out.append(item)
         
     return out

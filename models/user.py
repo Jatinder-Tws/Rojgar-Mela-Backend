@@ -48,7 +48,7 @@ class User(Base):
     profile_pic_url = Column(Text, nullable=True)
 
     # Auth state
-    is_super_admin = Column(Boolean, default=False, nullable=False)
+    is_super_admin = Column(Boolean, default=False, nullable=False, index=True)
     is_verified = Column(Boolean, default=False, nullable=False)
     onboarding_complete = Column(Boolean, default=False, nullable=False)
     is_assessment_done = Column(Boolean, default=False, nullable=False)
@@ -58,14 +58,14 @@ class User(Base):
     is_super_admin = Column(Boolean, default=False, nullable=False)
 
     # Role & profile
-    role = Column(Enum(UserRole), nullable=True)
+    role = Column(Enum(UserRole), nullable=True, index=True)
 
     # Seeker preferences
     industry = Column(String(100), nullable=True)
     job_role = Column(String(100), nullable=True)
     job_type = Column(Enum(JobType), nullable=True)
     salary_range = Column(String(50), nullable=True)
-    experience = Column(String(50), nullable=True)
+    experience = Column(String(50), nullable=True, index=True)
     auto_apply_enabled = Column(Boolean, default=False, nullable=False)
 
     # Provider info
@@ -97,7 +97,7 @@ class User(Base):
     if VECTOR_AVAILABLE:
         profile_embedding = Column(Vector(3072), nullable=True)
 
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     updated_at = Column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
     )

@@ -3,7 +3,7 @@ from collections import Counter
 from datetime import datetime, timedelta
 from typing import Optional
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, select, case
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -80,12 +80,87 @@ def _kpi_labels(period_start: datetime, period_end: datetime) -> dict[str, str]:
     }
 
 
+def _calculate_completion_raw(
+    first_name: str | None,
+    last_name: str | None,
+    email: str | None,
+    is_assessment_done: bool,
+    has_portfolio: bool,
+    headline: str | None,
+    bio: str | None,
+    city: str | None,
+    state: str | None,
+    linkedin_url: str | None,
+    github_url: str | None,
+    website_url: str | None,
+    skills: list | str | None,
+    work_experiences: list | str | None,
+    education: list | str | None,
+    certifications: list | str | None,
+    languages: list | str | None,
+    projects: list | str | None,
+    intro_video_path: str | None,
+    intro_audio_path: str | None,
+) -> int:
+    from services.portfolio_service import (
+        normalize_skills,
+        normalize_work_experiences,
+        normalize_education,
+        normalize_certifications,
+        normalize_languages,
+        normalize_projects
+    )
+
+    if not has_portfolio:
+        sections = {
+            "Personal Details": bool(first_name and last_name and email),
+            "Headline": False,
+            "Bio / About Me": False,
+            "Location": False,
+            "Skills": False,
+            "Work Experience": False,
+            "Education": False,
+            "Social Links": False,
+            "Certifications": False,
+            "Languages": False,
+            "Projects": False,
+            "Intro Video / Audio": False,
+            "AI Assessment": bool(is_assessment_done),
+        }
+    else:
+        norm_skills = normalize_skills(skills)
+        norm_work = normalize_work_experiences(work_experiences)
+        norm_edu = normalize_education(education)
+        norm_cert = normalize_certifications(certifications)
+        norm_lang = normalize_languages(languages)
+        norm_proj = normalize_projects(projects)
+
+        sections = {
+            "Personal Details": bool(first_name and last_name and email),
+            "Headline": bool(headline),
+            "Bio / About Me": bool(bio),
+            "Location": bool(city or state),
+            "Skills": bool(norm_skills),
+            "Work Experience": bool(norm_work),
+            "Education": bool(norm_edu),
+            "Social Links": bool(linkedin_url or github_url or website_url),
+            "Certifications": bool(norm_cert),
+            "Languages": bool(norm_lang),
+            "Projects": bool(norm_proj),
+            "Intro Video / Audio": bool(intro_video_path or intro_audio_path),
+            "AI Assessment": bool(is_assessment_done),
+        }
+    filled = sum(1 for v in sections.values() if v)
+    return int((filled / len(sections)) * 100) if sections else 0
+
+
 async def get_dashboard_analytics(
     db: AsyncSession,
     target_date: Optional[datetime] = None,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
 ) -> dict:
+    import asyncio
     now = end_date or target_date or datetime.utcnow()
     day_start, day_end, yesterday_start, yesterday_end = _resolve_period_bounds(
         target_date, start_date, end_date
@@ -94,106 +169,363 @@ async def get_dashboard_analytics(
     Seeker = aliased(User)
     Provider = aliased(User)
 
-    # ── Totals ───────────────────────────────────────────────────────────────
-    total_seekers = await db.scalar(
-        select(func.count(User.id)).where(User.role == UserRole.seeker, User.is_super_admin.is_(False))
-    ) or 0
-    total_providers = await db.scalar(
-        select(func.count(User.id)).where(User.role == UserRole.provider, User.is_super_admin.is_(False))
-    ) or 0
-    total_jobs = await db.scalar(select(func.count(JobPosting.id))) or 0
-    active_jobs = await db.scalar(select(func.count(JobPosting.id)).where(JobPosting.is_active.is_(True))) or 0
+    # ── 1. Define Consolidated Queries ─────────────────────────────────────────
+
+    # Query 1: Totals & Today/Yesterday KPIs (19 counts in a single query)
+    totals_query = select(
+        select(func.count(User.id)).where(User.role == UserRole.seeker, User.is_super_admin.is_(False)).scalar_subquery().label("total_seekers"),
+        select(func.count(User.id)).where(User.role == UserRole.provider, User.is_super_admin.is_(False)).scalar_subquery().label("total_providers"),
+        select(func.count(JobPosting.id)).scalar_subquery().label("total_jobs"),
+        select(func.count(JobPosting.id)).where(JobPosting.is_active.is_(True)).scalar_subquery().label("active_jobs"),
+        select(func.count(Application.id)).scalar_subquery().label("total_applications"),
+        select(func.count(Match.id)).scalar_subquery().label("total_matches"),
+        select(func.count(User.id)).where(User.is_super_admin.is_(False), User.created_at >= day_start, User.created_at < day_end).scalar_subquery().label("new_regs_today"),
+        select(func.count(User.id)).where(User.is_super_admin.is_(False), User.created_at >= yesterday_start, User.created_at < yesterday_end).scalar_subquery().label("new_regs_yesterday"),
+        select(func.count(Application.id)).where(Application.applied_at >= day_start, Application.applied_at < day_end).scalar_subquery().label("apps_today"),
+        select(func.count(Application.id)).where(Application.applied_at >= yesterday_start, Application.applied_at < yesterday_end).scalar_subquery().label("apps_yesterday"),
+        select(func.count(Interview.id)).where(Interview.scheduled_at >= day_start, Interview.scheduled_at < day_end).scalar_subquery().label("interviews_today"),
+        select(func.count(Interview.id)).where(Interview.scheduled_at >= yesterday_start, Interview.scheduled_at < yesterday_end).scalar_subquery().label("interviews_yesterday"),
+        select(func.count(Match.id)).where(Match.created_at >= day_start, Match.created_at < day_end).scalar_subquery().label("matches_today"),
+        select(func.count(Match.id)).where(Match.created_at >= yesterday_start, Match.created_at < yesterday_end).scalar_subquery().label("matches_yesterday"),
+        select(func.count(Application.id)).where(Application.status == ApplicationStatus.shortlisted, Application.updated_at >= day_start, Application.updated_at < day_end).scalar_subquery().label("selections_today"),
+        select(func.count(Application.id)).where(Application.status == ApplicationStatus.shortlisted, Application.updated_at >= yesterday_start, Application.updated_at < yesterday_end).scalar_subquery().label("selections_yesterday"),
+        select(func.count(func.distinct(JobPosting.provider_id))).where(JobPosting.is_active.is_(True)).scalar_subquery().label("companies_active"),
+        select(func.count(func.distinct(JobPosting.provider_id))).where(JobPosting.is_active.is_(True), JobPosting.updated_at < day_end).scalar_subquery().label("companies_active_yesterday"),
+        select(func.count(JobPosting.id)).where(JobPosting.is_active.is_(True), JobPosting.created_at < day_end).scalar_subquery().label("active_jobs_yesterday"),
+    )
+
+    # Query 2: Summary Columns & Funnel Stage Counts (21 counts in a single query)
+    thirty_days_ago = now - timedelta(days=30)
+    sixty_days_ago = now - timedelta(days=60)
+    week_start = now - timedelta(days=7)
+    prev_week_start = now - timedelta(days=14)
+
+    summary_counts_query = select(
+        select(func.count(User.id)).where(User.role == UserRole.seeker, User.is_super_admin.is_(False), User.onboarding_complete.is_(True)).scalar_subquery().label("active_seekers"),
+        select(func.count(User.id)).where(User.role == UserRole.seeker, User.is_super_admin.is_(False), User.created_at >= thirty_days_ago).scalar_subquery().label("seekers_30d"),
+        select(func.count(User.id)).where(User.role == UserRole.seeker, User.is_super_admin.is_(False), User.created_at >= sixty_days_ago, User.created_at < thirty_days_ago).scalar_subquery().label("seekers_prev_30d"),
+        select(func.count(User.id)).where(User.role == UserRole.provider, User.is_super_admin.is_(False), User.created_at >= thirty_days_ago).scalar_subquery().label("providers_30d"),
+        select(func.count(User.id)).where(User.role == UserRole.provider, User.is_super_admin.is_(False), User.created_at >= sixty_days_ago, User.created_at < thirty_days_ago).scalar_subquery().label("providers_prev_30d"),
+        select(func.count(func.distinct(JobPosting.provider_id))).select_from(Application).join(JobPosting, Application.job_id == JobPosting.id).scalar_subquery().label("hiring_companies"),
+        select(func.count(func.distinct(JobPosting.provider_id))).select_from(Application).join(JobPosting, Application.job_id == JobPosting.id).where(Application.applied_at < thirty_days_ago).scalar_subquery().label("hiring_companies_prev"),
+        select(func.count(JobPosting.id)).where(JobPosting.created_at >= thirty_days_ago).scalar_subquery().label("jobs_30d"),
+        select(func.count(JobPosting.id)).where(JobPosting.created_at >= sixty_days_ago, JobPosting.created_at < thirty_days_ago).scalar_subquery().label("jobs_prev_30d"),
+        select(func.count(JobPosting.id)).where(JobPosting.ai_interview_enabled.is_(True)).scalar_subquery().label("featured_jobs"),
+        select(func.count(JobPosting.id)).where(JobPosting.ai_interview_enabled.is_(True), JobPosting.created_at < thirty_days_ago).scalar_subquery().label("featured_prev"),
+        select(func.count(JobPosting.id)).where(JobPosting.is_active.is_(False), JobPosting.updated_at < thirty_days_ago).scalar_subquery().label("inactive_prev"),
+        select(func.count(Application.id)).where(Application.applied_at >= week_start).scalar_subquery().label("apps_week"),
+        select(func.count(Application.id)).where(Application.applied_at >= prev_week_start, Application.applied_at < week_start).scalar_subquery().label("apps_prev_week"),
+        select(func.count(Application.id)).where(Application.applied_at >= thirty_days_ago).scalar_subquery().label("apps_30d"),
+        select(func.count(Application.id)).where(Application.applied_at >= sixty_days_ago, Application.applied_at < thirty_days_ago).scalar_subquery().label("apps_prev_30d"),
+        # Funnel stages
+        select(func.count(Application.id)).where(Application.status.in_([ApplicationStatus.applied, ApplicationStatus.auto_applied])).scalar_subquery().label("applied"),
+        select(func.count(Application.id)).where(Application.status == ApplicationStatus.shortlisted).scalar_subquery().label("shortlisted"),
+        select(func.count(Application.id)).where(Application.status == ApplicationStatus.rejected).scalar_subquery().label("rejected"),
+        select(func.count(Interview.id)).scalar_subquery().label("total_interviews"),
+        select(func.count(AIInterviewSession.id)).where(AIInterviewSession.status == "completed").scalar_subquery().label("ai_interviews_done"),
+    )
+
+    # Query 3: Score Distribution (5 counts in a single query)
+    score_dist_query = select(
+        func.coalesce(func.sum(case((Match.score >= 90, 1), else_=0)), 0).label("above_90"),
+        func.coalesce(func.sum(case((and_(Match.score >= 80, Match.score < 90), 1), else_=0)), 0).label("range_80_90"),
+        func.coalesce(func.sum(case((and_(Match.score >= 70, Match.score < 80), 1), else_=0)), 0).label("range_70_80"),
+        func.coalesce(func.sum(case((and_(Match.score >= 60, Match.score < 70), 1), else_=0)), 0).label("range_60_70"),
+        func.coalesce(func.sum(case((Match.score < 60, 1), else_=0)), 0).label("below_60")
+    )
+
+    # Query 4: Match Trends and stats (10 counts/averages in a single query)
+    match_stats_query = select(
+        func.coalesce(func.avg(Match.score), 0).label("avg_score"),
+        func.coalesce(func.max(Match.score), 0).label("top_score"),
+        func.coalesce(func.sum(case((Match.score >= 90, 1), else_=0)), 0).label("above_90"),
+        func.coalesce(func.sum(case((Match.score >= 80, 1), else_=0)), 0).label("above_80"),
+        func.coalesce(func.sum(case((Match.score >= 70, 1), else_=0)), 0).label("above_70"),
+        # Last 30 days
+        func.coalesce(func.sum(case((Match.created_at >= thirty_days_ago, 1), else_=0)), 0).label("matches_last_30"),
+        func.coalesce(func.avg(case((Match.created_at >= thirty_days_ago, Match.score), else_=None)), 0).label("avg_last_30"),
+        func.coalesce(func.sum(case((and_(Match.created_at >= thirty_days_ago, Match.score >= 90), 1), else_=0)), 0).label("above_90_last"),
+        func.coalesce(func.sum(case((and_(Match.created_at >= thirty_days_ago, Match.score >= 80), 1), else_=0)), 0).label("above_80_last"),
+        func.coalesce(func.sum(case((and_(Match.created_at >= thirty_days_ago, Match.score >= 70), 1), else_=0)), 0).label("above_70_last"),
+        # Prev 30 days
+        func.coalesce(func.sum(case((and_(Match.created_at >= sixty_days_ago, Match.created_at < thirty_days_ago), 1), else_=0)), 0).label("matches_prev_30"),
+        func.coalesce(func.avg(case((and_(Match.created_at >= sixty_days_ago, Match.created_at < thirty_days_ago), Match.score), else_=None)), 0).label("avg_prev_30"),
+        func.coalesce(func.sum(case((and_(Match.created_at >= sixty_days_ago, Match.created_at < thirty_days_ago, Match.score >= 90), 1), else_=0)), 0).label("above_90_prev"),
+        func.coalesce(func.sum(case((and_(Match.created_at >= sixty_days_ago, Match.created_at < thirty_days_ago, Match.score >= 80), 1), else_=0)), 0).label("above_80_prev"),
+        func.coalesce(func.sum(case((and_(Match.created_at >= sixty_days_ago, Match.created_at < thirty_days_ago, Match.score >= 70), 1), else_=0)), 0).label("above_70_prev"),
+    )
+
+    # Query 5: Industry match analysis
+    industry_match_query = (
+        select(JobPosting.industry, func.avg(Match.score).label("avg_score"), func.count(Match.id).label("cnt"))
+        .select_from(Match)
+        .join(JobPosting, Match.job_id == JobPosting.id)
+        .where(JobPosting.industry.isnot(None), JobPosting.industry != "")
+        .group_by(JobPosting.industry)
+        .order_by(func.avg(Match.score).desc())
+        .limit(8)
+    )
+
+    # Query 6: Gaps limit 500
+    gap_query = select(Match.gaps).where(Match.gaps.isnot(None)).limit(500)
+
+    # Query 7, 8, 9: Candidate growth series
+    since_daily = now - timedelta(days=30)
+    growth_daily_query = (
+        select(func.date_trunc("day", User.created_at).label("period"), func.count(User.id))
+        .where(User.is_super_admin.is_(False), User.role == UserRole.seeker, User.created_at >= since_daily)
+        .group_by("period")
+        .order_by("period")
+    )
+
+    since_weekly = now - timedelta(days=84)
+    growth_weekly_query = (
+        select(func.date_trunc("week", User.created_at).label("period"), func.count(User.id))
+        .where(User.is_super_admin.is_(False), User.role == UserRole.seeker, User.created_at >= since_weekly)
+        .group_by("period")
+        .order_by("period")
+    )
+
+    since_monthly = now - timedelta(days=365)
+    growth_monthly_query = (
+        select(func.date_trunc("month", User.created_at).label("period"), func.count(User.id))
+        .where(User.is_super_admin.is_(False), User.role == UserRole.seeker, User.created_at >= since_monthly)
+        .group_by("period")
+        .order_by("period")
+    )
+
+    # Query 10: Seeker experience distribution (SQL group-by)
+    exp_query = (
+        select(User.experience, func.count(User.id))
+        .where(User.role == UserRole.seeker, User.is_super_admin.is_(False))
+        .group_by(User.experience)
+    )
+
+    # Query 11: Seeker industry distribution
+    industry_query = (
+        select(User.industry, func.count(User.id))
+        .where(User.role == UserRole.seeker, User.is_super_admin.is_(False), User.industry.isnot(None), User.industry != "")
+        .group_by(User.industry)
+        .order_by(func.count(User.id).desc())
+        .limit(10)
+    )
+
+    # Query 12: Skills count optimization (select only the skills field)
+    skills_query = select(Portfolio.skills).where(Portfolio.skills.isnot(None))
+
+    # Query 13: Recruiter active table
+    recruiter_query = (
+        select(
+            Provider.company_name,
+            Provider.first_name,
+            Provider.last_name,
+            func.count(Application.id).label("app_count"),
+        )
+        .select_from(Application)
+        .join(JobPosting, Application.job_id == JobPosting.id)
+        .join(Provider, JobPosting.provider_id == Provider.id)
+        .group_by(Provider.id, Provider.company_name, Provider.first_name, Provider.last_name)
+        .order_by(func.count(Application.id).desc())
+        .limit(8)
+    )
+
+    # Query 14: Latest seekers
+    latest_seeker_query = (
+        select(User.first_name, User.last_name, User.email, User.industry, User.created_at, User.is_verified)
+        .where(User.role == UserRole.seeker, User.is_super_admin.is_(False))
+        .order_by(User.created_at.desc())
+        .limit(6)
+    )
+
+    # Query 15: Recent jobs
+    recent_job_query = (
+        select(JobPosting.title, JobPosting.industry, JobPosting.is_active, JobPosting.created_at, Provider.company_name)
+        .join(Provider, JobPosting.provider_id == Provider.id)
+        .order_by(JobPosting.created_at.desc())
+        .limit(6)
+    )
+
+    # Query 16: Recent applications
+    recent_app_query = (
+        select(
+            Application.status,
+            Application.applied_at,
+            Seeker.first_name,
+            Seeker.last_name,
+            Seeker.email,
+            Application.candidate_name,
+            JobPosting.title,
+        )
+        .outerjoin(Seeker, Application.seeker_id == Seeker.id)
+        .join(JobPosting, Application.job_id == JobPosting.id)
+        .order_by(Application.applied_at.desc())
+        .limit(6)
+    )
+
+    # Query 17: Seeker profile completion details (fetch once, specific raw columns)
+    profile_query = (
+        select(
+            User.created_at,
+            User.first_name,
+            User.last_name,
+            User.email,
+            User.is_assessment_done,
+            Portfolio.headline,
+            Portfolio.bio,
+            Portfolio.city,
+            Portfolio.state,
+            Portfolio.linkedin_url,
+            Portfolio.github_url,
+            Portfolio.website_url,
+            Portfolio.skills,
+            Portfolio.work_experiences,
+            Portfolio.education,
+            Portfolio.certifications,
+            Portfolio.languages,
+            Portfolio.projects,
+            Portfolio.intro_video_path,
+            Portfolio.intro_audio_path,
+            Portfolio.user_id
+        )
+        .outerjoin(Portfolio, Portfolio.user_id == User.id)
+        .where(User.role == UserRole.seeker, User.is_super_admin.is_(False))
+    )
+
+    # ── 2. Run All Queries in Parallel using asyncio.gather ──────────────────
+    (
+        totals_res,
+        summary_counts_res,
+        score_dist_res,
+        match_stats_res,
+        industry_match_res,
+        gap_res,
+        growth_daily_res,
+        growth_weekly_res,
+        growth_monthly_res,
+        exp_res,
+        industry_res,
+        skills_res,
+        recruiter_res,
+        latest_seeker_res,
+        recent_job_res,
+        recent_app_res,
+        profile_res
+    ) = await asyncio.gather(
+        db.execute(totals_query),
+        db.execute(summary_counts_query),
+        db.execute(score_dist_query),
+        db.execute(match_stats_query),
+        db.execute(industry_match_query),
+        db.execute(gap_query),
+        db.execute(growth_daily_query),
+        db.execute(growth_weekly_query),
+        db.execute(growth_monthly_query),
+        db.execute(exp_query),
+        db.execute(industry_query),
+        db.execute(skills_query),
+        db.execute(recruiter_query),
+        db.execute(latest_seeker_query),
+        db.execute(recent_job_query),
+        db.execute(recent_app_query),
+        db.execute(profile_query)
+    )
+
+    # ── 3. Parse Consolidated Row Results ─────────────────────────────────────
+    tot_row = totals_res.one()
+    sum_row = summary_counts_res.one()
+    score_dist_row = score_dist_res.one()
+    match_stats_row = match_stats_res.one()
+
+    # Totals
+    total_seekers = tot_row.total_seekers
+    total_providers = tot_row.total_providers
+    total_jobs = tot_row.total_jobs
+    active_jobs = tot_row.active_jobs
     inactive_jobs = total_jobs - active_jobs
-    total_applications = await db.scalar(select(func.count(Application.id))) or 0
-    total_matches = await db.scalar(select(func.count(Match.id))) or 0
+    total_applications = tot_row.total_applications
+    total_matches = tot_row.total_matches
 
-    # ── Today vs yesterday KPIs ─────────────────────────────────────────────
-    new_regs_today = await db.scalar(
-        select(func.count(User.id)).where(
-            User.is_super_admin.is_(False),
-            User.created_at >= day_start,
-            User.created_at < day_end,
-        )
-    ) or 0
-    new_regs_yesterday = await db.scalar(
-        select(func.count(User.id)).where(
-            User.is_super_admin.is_(False),
-            User.created_at >= yesterday_start,
-            User.created_at < yesterday_end,
-        )
-    ) or 0
+    # Today vs yesterday KPIs
+    new_regs_today = tot_row.new_regs_today
+    new_regs_yesterday = tot_row.new_regs_yesterday
+    apps_today = tot_row.apps_today
+    apps_yesterday = tot_row.apps_yesterday
+    interviews_today = tot_row.interviews_today
+    interviews_yesterday = tot_row.interviews_yesterday
+    matches_today = tot_row.matches_today
+    matches_yesterday = tot_row.matches_yesterday
+    selections_today = tot_row.selections_today
+    selections_yesterday = tot_row.selections_yesterday
+    companies_active = tot_row.companies_active
+    companies_active_yesterday = tot_row.companies_active_yesterday or companies_active
+    active_jobs_yesterday = tot_row.active_jobs_yesterday or active_jobs
+    active_companies = companies_active
 
-    apps_today = await db.scalar(
-        select(func.count(Application.id)).where(
-            Application.applied_at >= day_start,
-            Application.applied_at < day_end,
-        )
-    ) or 0
-    apps_yesterday = await db.scalar(
-        select(func.count(Application.id)).where(
-            Application.applied_at >= yesterday_start,
-            Application.applied_at < yesterday_end,
-        )
-    ) or 0
 
-    interviews_today = await db.scalar(
-        select(func.count(Interview.id)).where(
-            Interview.scheduled_at >= day_start,
-            Interview.scheduled_at < day_end,
-        )
-    ) or 0
-    interviews_yesterday = await db.scalar(
-        select(func.count(Interview.id)).where(
-            Interview.scheduled_at >= yesterday_start,
-            Interview.scheduled_at < yesterday_end,
-        )
-    ) or 0
+    # Summary counts
+    active_seekers = sum_row.active_seekers
+    seekers_30d = sum_row.seekers_30d
+    seekers_prev_30d = sum_row.seekers_prev_30d
+    providers_30d = sum_row.providers_30d
+    providers_prev_30d = sum_row.providers_prev_30d
+    hiring_companies = sum_row.hiring_companies
+    hiring_companies_prev = sum_row.hiring_companies_prev
+    jobs_30d = sum_row.jobs_30d
+    jobs_prev_30d = sum_row.jobs_prev_30d
+    featured_jobs = sum_row.featured_jobs
+    featured_prev = sum_row.featured_prev
+    inactive_prev = sum_row.inactive_prev or inactive_jobs
+    apps_week = sum_row.apps_week
+    apps_prev_week = sum_row.apps_prev_week
+    apps_30d = sum_row.apps_30d
+    apps_prev_30d = sum_row.apps_prev_30d
 
-    matches_today = await db.scalar(
-        select(func.count(Match.id)).where(
-            Match.created_at >= day_start,
-            Match.created_at < day_end,
-        )
-    ) or 0
-    matches_yesterday = await db.scalar(
-        select(func.count(Match.id)).where(
-            Match.created_at >= yesterday_start,
-            Match.created_at < yesterday_end,
-        )
-    ) or 0
+    # Funnel
+    applied = sum_row.applied
+    shortlisted = sum_row.shortlisted
+    rejected = sum_row.rejected
+    total_interviews = sum_row.total_interviews
+    ai_interviews_done = sum_row.ai_interviews_done
 
-    selections_today = await db.scalar(
-        select(func.count(Application.id)).where(
-            Application.status == ApplicationStatus.shortlisted,
-            Application.updated_at >= day_start,
-            Application.updated_at < day_end,
-        )
-    ) or 0
-    selections_yesterday = await db.scalar(
-        select(func.count(Application.id)).where(
-            Application.status == ApplicationStatus.shortlisted,
-            Application.updated_at >= yesterday_start,
-            Application.updated_at < yesterday_end,
-        )
-    ) or 0
+    # ── 4. Process Profile Completion (Once, No Heavy ORM objects) ────────────
+    completion_pcts = []
+    established_pcts = []
+    incomplete_profiles = 0
 
-    companies_active = await db.scalar(
-        select(func.count(func.distinct(JobPosting.provider_id))).where(JobPosting.is_active.is_(True))
-    ) or 0
-    companies_active_yesterday = await db.scalar(
-        select(func.count(func.distinct(JobPosting.provider_id))).where(
-            JobPosting.is_active.is_(True),
-            JobPosting.updated_at < day_end,
+    for row in profile_res.all():
+        pct = _calculate_completion_raw(
+            first_name=row.first_name,
+            last_name=row.last_name,
+            email=row.email,
+            is_assessment_done=bool(row.is_assessment_done),
+            has_portfolio=row.user_id is not None,
+            headline=row.headline,
+            bio=row.bio,
+            city=row.city,
+            state=row.state,
+            linkedin_url=row.linkedin_url,
+            github_url=row.github_url,
+            website_url=row.website_url,
+            skills=row.skills,
+            work_experiences=row.work_experiences,
+            education=row.education,
+            certifications=row.certifications,
+            languages=row.languages,
+            projects=row.projects,
+            intro_video_path=row.intro_video_path,
+            intro_audio_path=row.intro_audio_path
         )
-    ) or companies_active
+        completion_pcts.append(pct)
+        if pct < 50:
+            incomplete_profiles += 1
+        if row.created_at and row.created_at < thirty_days_ago:
+            established_pcts.append(pct)
 
-    active_jobs_yesterday = await db.scalar(
-        select(func.count(JobPosting.id)).where(
-            JobPosting.is_active.is_(True),
-            JobPosting.created_at < day_end,
-        )
-    ) or active_jobs
+    profile_rate = round(sum(completion_pcts) / len(completion_pcts), 1) if completion_pcts else 0
+    established_rate = round(sum(established_pcts) / len(established_pcts), 1) if established_pcts else profile_rate
+    profile_rate_trend = round(profile_rate - established_rate, 1)
 
+    # ── 5. Build Final Response Structures ────────────────────────────────────
     kpi_labels = _kpi_labels(day_start, day_end)
     today_kpis = [
         {
@@ -240,130 +572,6 @@ async def get_dashboard_analytics(
         },
     ]
 
-    # ── Summary columns ─────────────────────────────────────────────────────
-    thirty_days_ago = now - timedelta(days=30)
-    sixty_days_ago = now - timedelta(days=60)
-    week_start = now - timedelta(days=7)
-    prev_week_start = now - timedelta(days=14)
-
-    active_seekers = await db.scalar(
-        select(func.count(User.id)).where(
-            User.role == UserRole.seeker,
-            User.is_super_admin.is_(False),
-            User.onboarding_complete.is_(True),
-        )
-    ) or 0
-
-    seekers_30d = await db.scalar(
-        select(func.count(User.id)).where(
-            User.role == UserRole.seeker,
-            User.is_super_admin.is_(False),
-            User.created_at >= thirty_days_ago,
-        )
-    ) or 0
-    seekers_prev_30d = await db.scalar(
-        select(func.count(User.id)).where(
-            User.role == UserRole.seeker,
-            User.is_super_admin.is_(False),
-            User.created_at >= sixty_days_ago,
-            User.created_at < thirty_days_ago,
-        )
-    ) or 0
-
-    profile_rows = await db.execute(
-        select(User, Portfolio)
-        .outerjoin(Portfolio, Portfolio.user_id == User.id)
-        .where(User.role == UserRole.seeker, User.is_super_admin.is_(False))
-    )
-    completion_pcts = []
-    established_pcts = []
-    for user, portfolio in profile_rows.all():
-        if not portfolio:
-            completion_pcts.append(0)
-            continue
-        pct, _, _ = calculate_completion(portfolio, user)
-        completion_pcts.append(pct)
-        if user.created_at and user.created_at < thirty_days_ago:
-            established_pcts.append(pct)
-    profile_rate = round(sum(completion_pcts) / len(completion_pcts), 1) if completion_pcts else 0
-    established_rate = round(sum(established_pcts) / len(established_pcts), 1) if established_pcts else profile_rate
-    profile_rate_trend = round(profile_rate - established_rate, 1)
-
-    active_companies = await db.scalar(
-        select(func.count(func.distinct(JobPosting.provider_id))).where(JobPosting.is_active.is_(True))
-    ) or 0
-    providers_30d = await db.scalar(
-        select(func.count(User.id)).where(
-            User.role == UserRole.provider,
-            User.is_super_admin.is_(False),
-            User.created_at >= thirty_days_ago,
-        )
-    ) or 0
-    providers_prev_30d = await db.scalar(
-        select(func.count(User.id)).where(
-            User.role == UserRole.provider,
-            User.is_super_admin.is_(False),
-            User.created_at >= sixty_days_ago,
-            User.created_at < thirty_days_ago,
-        )
-    ) or 0
-    hiring_companies = await db.scalar(
-        select(func.count(func.distinct(JobPosting.provider_id)))
-        .select_from(Application)
-        .join(JobPosting, Application.job_id == JobPosting.id)
-    ) or 0
-    hiring_companies_prev = await db.scalar(
-        select(func.count(func.distinct(JobPosting.provider_id)))
-        .select_from(Application)
-        .join(JobPosting, Application.job_id == JobPosting.id)
-        .where(Application.applied_at < thirty_days_ago)
-    ) or 0
-
-    jobs_30d = await db.scalar(
-        select(func.count(JobPosting.id)).where(JobPosting.created_at >= thirty_days_ago)
-    ) or 0
-    jobs_prev_30d = await db.scalar(
-        select(func.count(JobPosting.id)).where(
-            JobPosting.created_at >= sixty_days_ago,
-            JobPosting.created_at < thirty_days_ago,
-        )
-    ) or 0
-
-    featured_jobs = await db.scalar(
-        select(func.count(JobPosting.id)).where(JobPosting.ai_interview_enabled.is_(True))
-    ) or 0
-    featured_prev = await db.scalar(
-        select(func.count(JobPosting.id)).where(
-            JobPosting.ai_interview_enabled.is_(True),
-            JobPosting.created_at < thirty_days_ago,
-        )
-    ) or 0
-    inactive_prev = await db.scalar(
-        select(func.count(JobPosting.id)).where(
-            JobPosting.is_active.is_(False),
-            JobPosting.updated_at < thirty_days_ago,
-        )
-    ) or inactive_jobs
-
-    apps_week = await db.scalar(
-        select(func.count(Application.id)).where(Application.applied_at >= week_start)
-    ) or 0
-    apps_prev_week = await db.scalar(
-        select(func.count(Application.id)).where(
-            Application.applied_at >= prev_week_start,
-            Application.applied_at < week_start,
-        )
-    ) or 0
-    apps_30d = await db.scalar(
-        select(func.count(Application.id)).where(Application.applied_at >= thirty_days_ago)
-    ) or 0
-    apps_prev_30d = await db.scalar(
-        select(func.count(Application.id)).where(
-            Application.applied_at >= sixty_days_ago,
-            Application.applied_at < thirty_days_ago,
-        )
-    ) or 0
-
     def _fmt(n: int) -> str:
         return f"{n:,}"
 
@@ -394,23 +602,6 @@ async def get_dashboard_analytics(
         ],
     }
 
-    # ── Recruitment funnel ────────────────────────────────────────────────────
-    applied = await db.scalar(
-        select(func.count(Application.id)).where(
-            Application.status.in_([ApplicationStatus.applied, ApplicationStatus.auto_applied])
-        )
-    ) or 0
-    shortlisted = await db.scalar(
-        select(func.count(Application.id)).where(Application.status == ApplicationStatus.shortlisted)
-    ) or 0
-    rejected = await db.scalar(
-        select(func.count(Application.id)).where(Application.status == ApplicationStatus.rejected)
-    ) or 0
-    total_interviews = await db.scalar(select(func.count(Interview.id))) or 0
-    ai_interviews_done = await db.scalar(
-        select(func.count(AIInterviewSession.id)).where(AIInterviewSession.status == "completed")
-    ) or 0
-
     funnel_base = max(total_applications, 1)
     recruitment_funnel = [
         {"stage": "Applied", "count": total_applications, "pct": 100.0},
@@ -422,41 +613,39 @@ async def get_dashboard_analytics(
         {"stage": "Joined", "count": max(0, shortlisted - rejected), "pct": round((max(0, shortlisted - rejected) / funnel_base) * 100, 1)},
     ]
 
-    # ── AI matching analytics ─────────────────────────────────────────────────
-    avg_score = await db.scalar(select(func.avg(Match.score))) or 0
-    top_score = await db.scalar(select(func.max(Match.score))) or 0
-    above_90 = await db.scalar(select(func.count(Match.id)).where(Match.score >= 90)) or 0
-    above_80 = await db.scalar(select(func.count(Match.id)).where(Match.score >= 80)) or 0
-    above_70 = await db.scalar(select(func.count(Match.id)).where(Match.score >= 70)) or 0
+    # AI Matching stats and score distribution
+    total_scored = (
+        score_dist_row.above_90 +
+        score_dist_row.range_80_90 +
+        score_dist_row.range_70_80 +
+        score_dist_row.range_60_70 +
+        score_dist_row.below_60
+    ) or 1
 
     score_brackets = [
-        {"range": "90-100%", "count": await db.scalar(select(func.count(Match.id)).where(Match.score >= 90)) or 0},
-        {"range": "80-90%", "count": await db.scalar(select(func.count(Match.id)).where(and_(Match.score >= 80, Match.score < 90))) or 0},
-        {"range": "70-80%", "count": await db.scalar(select(func.count(Match.id)).where(and_(Match.score >= 70, Match.score < 80))) or 0},
-        {"range": "60-70%", "count": await db.scalar(select(func.count(Match.id)).where(and_(Match.score >= 60, Match.score < 70))) or 0},
-        {"range": "Below 60%", "count": await db.scalar(select(func.count(Match.id)).where(Match.score < 60)) or 0},
+        {"range": "90-100%", "count": score_dist_row.above_90, "pct": round((score_dist_row.above_90 / total_scored) * 100, 1)},
+        {"range": "80-90%", "count": score_dist_row.range_80_90, "pct": round((score_dist_row.range_80_90 / total_scored) * 100, 1)},
+        {"range": "70-80%", "count": score_dist_row.range_70_80, "pct": round((score_dist_row.range_70_80 / total_scored) * 100, 1)},
+        {"range": "60-70%", "count": score_dist_row.range_60_70, "pct": round((score_dist_row.range_60_70 / total_scored) * 100, 1)},
+        {"range": "Below 60%", "count": score_dist_row.below_60, "pct": round((score_dist_row.below_60 / total_scored) * 100, 1)},
     ]
-    total_scored = sum(b["count"] for b in score_brackets) or 1
-    for b in score_brackets:
-        b["pct"] = round((b["count"] / total_scored) * 100, 1)
 
-    industry_match_rows = await db.execute(
-        select(JobPosting.industry, func.avg(Match.score).label("avg_score"), func.count(Match.id).label("cnt"))
-        .select_from(Match)
-        .join(JobPosting, Match.job_id == JobPosting.id)
-        .where(JobPosting.industry.isnot(None), JobPosting.industry != "")
-        .group_by(JobPosting.industry)
-        .order_by(func.avg(Match.score).desc())
-        .limit(8)
-    )
+    stat_cards = [
+        {"key": "total_matches", "label": "Total AI Matches", "value": f"{total_matches:,}", "trend": _pct_change(match_stats_row.matches_last_30, match_stats_row.matches_prev_30)},
+        {"key": "avg_score", "label": "Average Match Score", "value": f"{round(float(match_stats_row.avg_score), 1)}%", "trend": _pct_change(round(float(match_stats_row.avg_last_30), 1), round(float(match_stats_row.avg_prev_30), 1))},
+        {"key": "top_score", "label": "Top Match Score", "value": f"{round(float(match_stats_row.top_score), 1)}%", "trend": None},
+        {"key": "above_90", "label": "Candidates > 90%", "value": f"{match_stats_row.above_90:,}", "trend": _pct_change(match_stats_row.above_90_last, match_stats_row.above_90_prev)},
+        {"key": "above_80", "label": "Candidates > 80%", "value": f"{match_stats_row.above_80:,}", "trend": _pct_change(match_stats_row.above_80_last, match_stats_row.above_80_prev)},
+        {"key": "above_70", "label": "Candidates > 70%", "value": f"{match_stats_row.above_70:,}", "trend": _pct_change(match_stats_row.above_70_last, match_stats_row.above_70_prev)},
+    ]
+
     industry_match_analysis = [
         {"industry": r.industry or "Other", "avg_score": round(float(r.avg_score or 0), 1), "count": r.cnt}
-        for r in industry_match_rows.all()
+        for r in industry_match_res.all()
     ]
 
     gap_counter: Counter = Counter()
-    gap_rows = await db.execute(select(Match.gaps).where(Match.gaps.isnot(None)).limit(500))
-    for (gaps,) in gap_rows.all():
+    for (gaps,) in gap_res.all():
         if isinstance(gaps, list):
             for g in gaps:
                 if isinstance(g, str) and g.strip():
@@ -467,83 +656,29 @@ async def get_dashboard_analytics(
         for k, v in gap_counter.most_common(6)
     ]
 
-    # AI matching trends — last 30 days vs previous 30 days
-    thirty_days_ago = now - timedelta(days=30)
-    sixty_days_ago = now - timedelta(days=60)
-
-    async def _match_count_since(since, until=None, min_score=None):
-        filters = [Match.created_at >= since]
-        if until:
-            filters.append(Match.created_at < until)
-        if min_score is not None:
-            filters.append(Match.score >= min_score)
-        return await db.scalar(select(func.count(Match.id)).where(*filters)) or 0
-
-    async def _avg_score_since(since, until=None):
-        filters = [Match.created_at >= since]
-        if until:
-            filters.append(Match.created_at < until)
-        val = await db.scalar(select(func.avg(Match.score)).where(*filters))
-        return float(val or 0)
-
-    matches_last_30 = await _match_count_since(thirty_days_ago)
-    matches_prev_30 = await _match_count_since(sixty_days_ago, thirty_days_ago)
-    avg_last_30 = await _avg_score_since(thirty_days_ago)
-    avg_prev_30 = await _avg_score_since(sixty_days_ago, thirty_days_ago)
-    above_90_last = await _match_count_since(thirty_days_ago, min_score=90)
-    above_90_prev = await _match_count_since(sixty_days_ago, thirty_days_ago, min_score=90)
-    above_80_last = await _match_count_since(thirty_days_ago, min_score=80)
-    above_80_prev = await _match_count_since(sixty_days_ago, thirty_days_ago, min_score=80)
-    above_70_last = await _match_count_since(thirty_days_ago, min_score=70)
-    above_70_prev = await _match_count_since(sixty_days_ago, thirty_days_ago, min_score=70)
-
-    stat_cards = [
-        {"key": "total_matches", "label": "Total AI Matches", "value": f"{total_matches:,}", "trend": _pct_change(matches_last_30, matches_prev_30)},
-        {"key": "avg_score", "label": "Average Match Score", "value": f"{round(float(avg_score), 1)}%", "trend": _pct_change(round(avg_last_30, 1), round(avg_prev_30, 1))},
-        {"key": "top_score", "label": "Top Match Score", "value": f"{round(float(top_score), 1)}%", "trend": None},
-        {"key": "above_90", "label": "Candidates > 90%", "value": f"{above_90:,}", "trend": _pct_change(above_90_last, above_90_prev)},
-        {"key": "above_80", "label": "Candidates > 80%", "value": f"{above_80:,}", "trend": _pct_change(above_80_last, above_80_prev)},
-        {"key": "above_70", "label": "Candidates > 70%", "value": f"{above_70:,}", "trend": _pct_change(above_70_last, above_70_prev)},
-    ]
-
     ai_matching = {
         "total_matches": total_matches,
-        "avg_score": round(float(avg_score), 1),
-        "top_score": round(float(top_score), 1),
-        "above_90": above_90,
-        "above_80": above_80,
-        "above_70": above_70,
+        "avg_score": round(float(match_stats_row.avg_score), 1),
+        "top_score": round(float(match_stats_row.top_score), 1),
+        "above_90": match_stats_row.above_90,
+        "above_80": match_stats_row.above_80,
+        "above_70": match_stats_row.above_70,
         "stat_cards": stat_cards,
         "score_distribution": score_brackets,
         "industry_analysis": industry_match_analysis,
         "skill_gaps": skill_gap_analysis,
     }
 
-    # ── Growth charts ─────────────────────────────────────────────────────────
-    async def _growth_series(days: int, trunc: str):
-        since = now - timedelta(days=days)
-        q = (
-            select(func.date_trunc(trunc, User.created_at).label("period"), func.count(User.id))
-            .where(User.is_super_admin.is_(False), User.role == UserRole.seeker, User.created_at >= since)
-            .group_by("period")
-            .order_by("period")
-        )
-        rows = (await db.execute(q)).all()
-        return [{"date": r[0].strftime("%Y-%m-%d") if r[0] else "", "count": r[1]} for r in rows]
-
+    # Growth charts
     candidate_growth = {
-        "daily": await _growth_series(30, "day"),
-        "weekly": await _growth_series(84, "week"),
-        "monthly": await _growth_series(365, "month"),
+        "daily": [{"date": r[0].strftime("%Y-%m-%d") if r[0] else "", "count": r[1]} for r in growth_daily_res.all()],
+        "weekly": [{"date": r[0].strftime("%Y-%m-%d") if r[0] else "", "count": r[1]} for r in growth_weekly_res.all()],
+        "monthly": [{"date": r[0].strftime("%Y-%m-%d") if r[0] else "", "count": r[1]} for r in growth_monthly_res.all()],
     }
 
-    # ── Experience breakdown ──────────────────────────────────────────────────
+    # Experience breakdown
     exp_counter: Counter = Counter()
-    seeker_rows = await db.execute(
-        select(User.experience)
-        .where(User.role == UserRole.seeker, User.is_super_admin.is_(False))
-    )
-    for (exp,) in seeker_rows.all():
+    for exp, count in exp_res.all():
         key = (exp or "Not specified").strip()
         if not key:
             key = "Not specified"
@@ -556,31 +691,23 @@ async def get_dashboard_analytics(
             bucket = "3-5 Yrs"
         else:
             bucket = "5+ Yrs"
-        exp_counter[bucket] += 1
+        exp_counter[bucket] += count
     exp_total = sum(exp_counter.values()) or 1
     experience_breakdown = [
         {"level": k, "count": v, "pct": round((v / exp_total) * 100, 1)}
         for k, v in exp_counter.most_common()
     ]
 
-    # ── Industry distribution (seekers) ───────────────────────────────────────
-    industry_rows = await db.execute(
-        select(User.industry, func.count(User.id))
-        .where(User.role == UserRole.seeker, User.is_super_admin.is_(False), User.industry.isnot(None), User.industry != "")
-        .group_by(User.industry)
-        .order_by(func.count(User.id).desc())
-        .limit(10)
-    )
+    # Industry distribution
     ind_total = total_seekers or 1
     industry_distribution = [
         {"industry": r[0] or "Other", "count": r[1], "pct": round((r[1] / ind_total) * 100, 1)}
-        for r in industry_rows.all()
+        for r in industry_res.all()
     ]
 
-    # ── Top skills from portfolios ────────────────────────────────────────────
+    # Top skills
     skill_counter: Counter = Counter()
-    portfolio_rows = await db.execute(select(Portfolio.skills).where(Portfolio.skills.isnot(None)))
-    for (skills,) in portfolio_rows.all():
+    for (skills,) in skills_res.all():
         if isinstance(skills, list):
             for s in skills:
                 name = s.get("name") if isinstance(s, dict) else str(s)
@@ -588,35 +715,16 @@ async def get_dashboard_analytics(
                     skill_counter[name.strip()] += 1
     top_skills = [{"skill": k, "count": v} for k, v in skill_counter.most_common(20)]
 
-    # ── Data tables ───────────────────────────────────────────────────────────
-    recruiter_rows = await db.execute(
-        select(
-            Provider.company_name,
-            Provider.first_name,
-            Provider.last_name,
-            func.count(Application.id).label("app_count"),
-        )
-        .select_from(Application)
-        .join(JobPosting, Application.job_id == JobPosting.id)
-        .join(Provider, JobPosting.provider_id == Provider.id)
-        .group_by(Provider.id, Provider.company_name, Provider.first_name, Provider.last_name)
-        .order_by(func.count(Application.id).desc())
-        .limit(8)
-    )
+    # Recruiter table
     active_recruiters = [
         {
             "name": r.company_name or f"{r.first_name or ''} {r.last_name or ''}".strip() or "Provider",
             "applications": r.app_count,
         }
-        for r in recruiter_rows.all()
+        for r in recruiter_res.all()
     ]
 
-    latest_seeker_rows = await db.execute(
-        select(User.first_name, User.last_name, User.email, User.industry, User.created_at, User.is_verified)
-        .where(User.role == UserRole.seeker, User.is_super_admin.is_(False))
-        .order_by(User.created_at.desc())
-        .limit(6)
-    )
+    # Latest seekers
     latest_seekers = [
         {
             "name": f"{r.first_name or ''} {r.last_name or ''}".strip() or r.email or "Seeker",
@@ -624,15 +732,10 @@ async def get_dashboard_analytics(
             "status": "Verified" if r.is_verified else "Pending",
             "created_at": r.created_at.isoformat() if r.created_at else None,
         }
-        for r in latest_seeker_rows.all()
+        for r in latest_seeker_res.all()
     ]
 
-    recent_job_rows = await db.execute(
-        select(JobPosting.title, JobPosting.industry, JobPosting.is_active, JobPosting.created_at, Provider.company_name)
-        .join(Provider, JobPosting.provider_id == Provider.id)
-        .order_by(JobPosting.created_at.desc())
-        .limit(6)
-    )
+    # Recent jobs
     recent_jobs = [
         {
             "title": r.title,
@@ -641,24 +744,10 @@ async def get_dashboard_analytics(
             "status": "Active" if r.is_active else "Inactive",
             "created_at": r.created_at.isoformat() if r.created_at else None,
         }
-        for r in recent_job_rows.all()
+        for r in recent_job_res.all()
     ]
 
-    recent_app_rows = await db.execute(
-        select(
-            Application.status,
-            Application.applied_at,
-            Seeker.first_name,
-            Seeker.last_name,
-            Seeker.email,
-            Application.candidate_name,
-            JobPosting.title,
-        )
-        .outerjoin(Seeker, Application.seeker_id == Seeker.id)
-        .join(JobPosting, Application.job_id == JobPosting.id)
-        .order_by(Application.applied_at.desc())
-        .limit(6)
-    )
+    # Recent applications
     recent_applications = [
         {
             "candidate": f"{r.first_name or ''} {r.last_name or ''}".strip() or r.candidate_name or r.email or "Guest",
@@ -666,10 +755,10 @@ async def get_dashboard_analytics(
             "status": r.status.value if hasattr(r.status, "value") else str(r.status),
             "applied_at": r.applied_at.isoformat() if r.applied_at else None,
         }
-        for r in recent_app_rows.all()
+        for r in recent_app_res.all()
     ]
 
-    # ── Activity feed ─────────────────────────────────────────────────────────
+    # Activity feed
     activity = []
     for s in latest_seekers[:4]:
         activity.append({"type": "registration", "message": f"New candidate {s['name']} registered", "time": s["created_at"]})
@@ -678,21 +767,7 @@ async def get_dashboard_analytics(
     activity.sort(key=lambda x: x.get("time") or "", reverse=True)
     activity = activity[:8]
 
-    # ── System alerts ─────────────────────────────────────────────────────────
-    incomplete_profiles = 0
-    profile_rows = await db.execute(
-        select(User, Portfolio)
-        .outerjoin(Portfolio, Portfolio.user_id == User.id)
-        .where(User.role == UserRole.seeker, User.is_super_admin.is_(False))
-    )
-    for user, portfolio in profile_rows.all():
-        if not portfolio:
-            incomplete_profiles += 1
-            continue
-        pct, _, _ = calculate_completion(portfolio, user)
-        if pct < 50:
-            incomplete_profiles += 1
-
+    # System alerts
     system_alerts = []
     if inactive_jobs > 0:
         system_alerts.append({"level": "error", "message": f"{inactive_jobs} jobs are inactive/expired"})
@@ -726,3 +801,4 @@ async def get_dashboard_analytics(
         "system_alerts": system_alerts,
         "platform_overview": platform_overview,
     }
+

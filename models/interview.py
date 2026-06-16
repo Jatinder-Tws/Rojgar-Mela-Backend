@@ -40,7 +40,7 @@ class Interview(Base):
     meeting_link = Column(Text, nullable=True)
     location = Column(Text, nullable=True)
     status = Column(Enum(InterviewStatus), default=InterviewStatus.scheduled, nullable=False)
-    scheduled_at = Column(DateTime, nullable=False)
+    scheduled_at = Column(DateTime, nullable=False, index=True)
     scheduled_period = Column(String(2), nullable=True)
     interviewer_name = Column(String(200), nullable=False)
     

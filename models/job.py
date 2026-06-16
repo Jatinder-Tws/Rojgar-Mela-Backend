@@ -55,7 +55,7 @@ class JobPosting(Base):
     industry = Column(String(100), nullable=True)
     posted_by_name = Column(String(200), nullable=True)  # recruiter display name
     location = Column(String(200), nullable=True)  # job location
-    is_active = Column(Boolean, default=True, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False, index=True)
     post_count = Column(Integer, default=0, nullable=False)
     ai_interview_enabled = Column(Boolean, default=False, nullable=False)
     selection_threshold = Column(Integer, default=70, nullable=False)
@@ -67,7 +67,7 @@ class JobPosting(Base):
     if VECTOR_AVAILABLE:
         embedding = Column(Vector(3072), nullable=True)
 
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     updated_at = Column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
     )

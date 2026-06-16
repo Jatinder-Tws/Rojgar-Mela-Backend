@@ -38,7 +38,7 @@ class Application(Base):
     rejection_reason = Column(Text, nullable=True)
     ai_feedback = Column(JSON, nullable=True)   # Structured improvement suggestions
 
-    applied_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    applied_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     seeker = relationship("User", foreign_keys=[seeker_id], back_populates="applications")

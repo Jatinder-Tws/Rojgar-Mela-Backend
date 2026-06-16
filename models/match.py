@@ -17,12 +17,12 @@ class Match(Base):
     seeker_id = Column(UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     job_id = Column(UUID(as_uuid=False), ForeignKey("job_postings.id", ondelete="CASCADE"), nullable=False, index=True)
 
-    score = Column(Float, nullable=False)            # 0–100
+    score = Column(Float, nullable=False, index=True)            # 0–100
     highlights = Column(JSON, nullable=True)         # list of matching strengths
     gaps = Column(JSON, nullable=True)               # list of gaps/missing skills
     fit_reason = Column(String(500), nullable=True)  # Short GPT summary
 
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
     seeker = relationship("User", foreign_keys=[seeker_id])
     job = relationship("JobPosting", back_populates="matches")

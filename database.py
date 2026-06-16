@@ -89,3 +89,28 @@ async def patch_email_admin_schema():
     async with engine.begin() as conn:
         for sql in statements:
             await conn.execute(text(sql))
+
+
+async def patch_dashboard_indexes():
+    """Create indexes for dashboard analytics optimization if they do not exist."""
+    from sqlalchemy import text
+
+    statements = [
+        "CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)",
+        "CREATE INDEX IF NOT EXISTS idx_users_created_at ON users(created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_users_is_super_admin ON users(is_super_admin)",
+        "CREATE INDEX IF NOT EXISTS idx_users_experience ON users(experience)",
+        "CREATE INDEX IF NOT EXISTS idx_matches_score ON matches(score)",
+        "CREATE INDEX IF NOT EXISTS idx_matches_created_at ON matches(created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_job_postings_is_active ON job_postings(is_active)",
+        "CREATE INDEX IF NOT EXISTS idx_job_postings_created_at ON job_postings(created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_applications_applied_at ON applications(applied_at)",
+        "CREATE INDEX IF NOT EXISTS idx_interviews_scheduled_at ON interviews(scheduled_at)",
+    ]
+    async with engine.begin() as conn:
+        for sql in statements:
+            try:
+                await conn.execute(text(sql))
+            except Exception:
+                pass
+

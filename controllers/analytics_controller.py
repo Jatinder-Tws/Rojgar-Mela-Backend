@@ -1,6 +1,7 @@
 """
 Analytics controller – aggregated stats for Seeker and Provider dashboards.
 """
+import asyncio
 from typing import List
 from sqlalchemy import select, func, case, and_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,12 +18,56 @@ from models.external_candidate import ExternalCandidate
 
 async def seeker_stats(user: User, db: AsyncSession) -> dict:
     """Aggregated analytics for a job seeker dashboard."""
+    from models.portfolio import Portfolio
+    from services.portfolio_service import calculate_completion
+
     uid = user.id
     now = datetime.utcnow()
     thirty_days_ago = now - timedelta(days=30)
 
-    matches_result = await db.execute(select(Match.score).where(Match.seeker_id == uid))
-    scores = [row[0] for row in matches_result.fetchall()]
+    # Perform all independent database operations in parallel
+    (
+        matches_res,
+        apps_res,
+        matches_time_res,
+        matched_jobs_res,
+        portfolio_res,
+        interviews_res,
+        resume_res,
+    ) = await asyncio.gather(
+        db.execute(select(Match.score).where(Match.seeker_id == uid)),
+        db.execute(
+            select(Application.status, func.count(Application.id))
+            .where(Application.seeker_id == uid)
+            .group_by(Application.status)
+        ),
+        db.execute(
+            select(
+                func.date_trunc('day', Match.created_at).label('day'),
+                func.count(Match.id),
+            )
+            .where(and_(Match.seeker_id == uid, Match.created_at >= thirty_days_ago))
+            .group_by('day')
+            .order_by('day')
+        ),
+        db.execute(
+            select(JobPosting.required_skills)
+            .join(Match, Match.job_id == JobPosting.id)
+            .where(Match.seeker_id == uid)
+        ),
+        db.execute(select(Portfolio).where(Portfolio.user_id == uid)),
+        db.execute(
+            select(Interview)
+            .where(and_(Interview.seeker_id == uid, Interview.scheduled_at >= now))
+            .order_by(Interview.scheduled_at)
+            .limit(5)
+        ),
+        db.execute(
+            select(Resume).where(Resume.user_id == uid).order_by(Resume.created_at.desc()).limit(1)
+        )
+    )
+
+    scores = [row[0] for row in matches_res.fetchall()]
     score_dist = {"0-25": 0, "25-50": 0, "50-75": 0, "75-100": 0}
     for s in scores:
         if s < 25:
@@ -34,54 +79,26 @@ async def seeker_stats(user: User, db: AsyncSession) -> dict:
         else:
             score_dist["75-100"] += 1
 
-    apps_result = await db.execute(
-        select(Application.status, func.count(Application.id))
-        .where(Application.seeker_id == uid)
-        .group_by(Application.status)
-    )
-    apps_by_status = {row[0]: row[1] for row in apps_result.fetchall()}
+    apps_by_status = {row[0]: row[1] for row in apps_res.fetchall()}
 
-    matches_time_result = await db.execute(
-        select(
-            func.date_trunc('day', Match.created_at).label('day'),
-            func.count(Match.id),
-        )
-        .where(and_(Match.seeker_id == uid, Match.created_at >= thirty_days_ago))
-        .group_by('day')
-        .order_by('day')
-    )
     matches_over_time = [
         {"date": row[0].isoformat() if row[0] else "", "count": row[1]}
-        for row in matches_time_result.fetchall()
+        for row in matches_time_res.fetchall()
     ]
 
-    matched_jobs_result = await db.execute(
-        select(JobPosting.required_skills)
-        .join(Match, Match.job_id == JobPosting.id)
-        .where(Match.seeker_id == uid)
-    )
     skill_counts: dict = {}
-    for row in matched_jobs_result.fetchall():
+    for row in matched_jobs_res.fetchall():
         for skill in (row[0] or []):
             skill_counts[skill] = skill_counts.get(skill, 0) + 1
     top_skills = sorted(skill_counts.items(), key=lambda x: x[1], reverse=True)[:10]
 
-    from models.portfolio import Portfolio
-    from services.portfolio_service import calculate_completion
-    portfolio_result = await db.execute(select(Portfolio).where(Portfolio.user_id == uid))
-    portfolio = portfolio_result.scalar_one_or_none()
+    portfolio = portfolio_res.scalar_one_or_none()
     profile_completion = 0
     if portfolio:
         profile_completion, _, _ = calculate_completion(portfolio, user)
 
-    interviews_result = await db.execute(
-        select(Interview)
-        .where(and_(Interview.seeker_id == uid, Interview.scheduled_at >= now))
-        .order_by(Interview.scheduled_at)
-        .limit(5)
-    )
     upcoming_interviews = []
-    for i in interviews_result.scalars().all():
+    for i in interviews_res.scalars().all():
         sat = i.scheduled_at
         if sat:
             dt = sat.replace(tzinfo=timezone.utc) if sat.tzinfo is None else sat.astimezone(timezone.utc)
@@ -94,10 +111,7 @@ async def seeker_stats(user: User, db: AsyncSession) -> dict:
             "scheduled_at": sat_str,
         })
 
-    resume_result = await db.execute(
-        select(Resume).where(Resume.user_id == uid).order_by(Resume.created_at.desc()).limit(1)
-    )
-    resume = resume_result.scalar_one_or_none()
+    resume = resume_res.scalar_one_or_none()
 
     return {
         "total_matches": len(scores),
@@ -118,10 +132,12 @@ async def seeker_stats(user: User, db: AsyncSession) -> dict:
 async def provider_stats(user: User, db: AsyncSession) -> dict:
     """Aggregated analytics for a job provider dashboard."""
     uid = user.id
-    now = datetime.utcnow()
 
-    jobs_result = await db.execute(select(JobPosting).where(JobPosting.provider_id == uid))
-    jobs = jobs_result.scalars().all()
+    jobs_result = await db.execute(
+        select(JobPosting.id, JobPosting.title, JobPosting.is_active, JobPosting.created_at)
+        .where(JobPosting.provider_id == uid)
+    )
+    jobs = jobs_result.all()
     job_ids = [j.id for j in jobs]
 
     if not job_ids:
@@ -138,10 +154,55 @@ async def provider_stats(user: User, db: AsyncSession) -> dict:
 
     active_jobs = sum(1 for j in jobs if j.is_active)
 
-    matches_result = await db.execute(
+    # Perform all independent database operations in parallel
+    matches_task = db.execute(
         select(Match.score, Match.job_id).where(Match.job_id.in_(job_ids))
     )
-    all_matches = matches_result.fetchall()
+    ext_matches_task = db.execute(
+        select(ExternalCandidateMatch.score, ExternalCandidateMatch.job_id)
+        .where(ExternalCandidateMatch.job_id.in_(job_ids))
+    )
+    pending_task = db.execute(
+        select(func.count())
+        .select_from(ExternalCandidate)
+        .where(
+            ExternalCandidate.is_matched == False,
+            ExternalCandidate.status != "rejected"
+        )
+    )
+    apps_task = db.execute(
+        select(Application.job_id, Application.status, func.count(Application.id))
+        .where(Application.job_id.in_(job_ids))
+        .group_by(Application.job_id, Application.status)
+    )
+    interviews_task = db.execute(
+        select(func.count(Interview.id)).where(Interview.job_id.in_(job_ids))
+    )
+    resumes_task = db.execute(
+        select(Resume.parsed_json).where(
+            Resume.user_id.in_(
+                select(Match.seeker_id).where(Match.job_id.in_(job_ids))
+            )
+        )
+    )
+
+    (
+        matches_res,
+        ext_matches_res,
+        pending_res,
+        apps_res,
+        interviews_res,
+        resumes_res,
+    ) = await asyncio.gather(
+        matches_task,
+        ext_matches_task,
+        pending_task,
+        apps_task,
+        interviews_task,
+        resumes_task,
+    )
+
+    all_matches = matches_res.fetchall()
     scores = [row[0] for row in all_matches]
     score_dist = {"0-25": 0, "25-50": 0, "50-75": 0, "75-100": 0}
     for s in scores:
@@ -150,11 +211,7 @@ async def provider_stats(user: User, db: AsyncSession) -> dict:
         elif s < 75: score_dist["50-75"] += 1
         else: score_dist["75-100"] += 1
 
-    ext_matches_result = await db.execute(
-        select(ExternalCandidateMatch.score, ExternalCandidateMatch.job_id)
-        .where(ExternalCandidateMatch.job_id.in_(job_ids))
-    )
-    all_ext_matches = ext_matches_result.fetchall()
+    all_ext_matches = ext_matches_res.fetchall()
     ext_scores = [row[0] for row in all_ext_matches]
     ext_score_dist = {"0-25": 0, "25-50": 0, "50-75": 0, "75-100": 0}
     for s in ext_scores:
@@ -172,23 +229,9 @@ async def provider_stats(user: User, db: AsyncSession) -> dict:
         jid = str(row[1])
         ext_matches_per_job[jid] = ext_matches_per_job.get(jid, 0) + 1
 
-    pending_result = await db.execute(
-        select(func.count())
-        .select_from(ExternalCandidate)
-        .where(
-            ExternalCandidate.is_matched == False,
-            ExternalCandidate.status != "rejected"
-        )
-    )
-    pending_external_count = pending_result.scalar() or 0
+    pending_external_count = pending_res.scalar() or 0
 
-    apps_result = await db.execute(
-        select(Application.job_id, Application.status, func.count(Application.id))
-        .where(Application.job_id.in_(job_ids))
-        .group_by(Application.job_id, Application.status)
-    )
-    apps_by_job_raw = apps_result.fetchall()
-
+    apps_by_job_raw = apps_res.fetchall()
     job_app_map: dict = {}
     total_apps = 0
     total_shortlisted = 0
@@ -206,10 +249,7 @@ async def provider_stats(user: User, db: AsyncSession) -> dict:
         jid = str(row[1])
         matches_per_job[jid] = matches_per_job.get(jid, 0) + 1
 
-    interviews_result = await db.execute(
-        select(func.count(Interview.id)).where(Interview.job_id.in_(job_ids))
-    )
-    total_interviews = interviews_result.scalar() or 0
+    total_interviews = interviews_res.scalar() or 0
 
     hiring_funnel = {
         "matched": len(scores),
@@ -219,21 +259,13 @@ async def provider_stats(user: User, db: AsyncSession) -> dict:
         "interviewed": total_interviews,
     }
 
-    matched_seeker_ids = await db.execute(
-        select(Match.seeker_id).where(Match.job_id.in_(job_ids)).distinct()
-    )
-    seeker_ids = [str(row[0]) for row in matched_seeker_ids.fetchall()]
-
     skill_counts: dict = {}
-    if seeker_ids:
-        resumes_result = await db.execute(
-            select(Resume.parsed_json).where(Resume.user_id.in_(seeker_ids))
-        )
-        for row in resumes_result.fetchall():
-            pj = row[0] or {}
-            for skill in (pj.get("skills", []) or []):
-                s = skill if isinstance(skill, str) else skill.get("name", str(skill))
-                skill_counts[s] = skill_counts.get(s, 0) + 1
+    resumes_raw = resumes_res.fetchall()
+    for row in resumes_raw:
+        pj = row[0] or {}
+        for skill in (pj.get("skills", []) or []):
+            s = skill if isinstance(skill, str) else skill.get("name", str(skill))
+            skill_counts[s] = skill_counts.get(s, 0) + 1
     top_skills = sorted(skill_counts.items(), key=lambda x: x[1], reverse=True)[:10]
 
     jobs_performance = []

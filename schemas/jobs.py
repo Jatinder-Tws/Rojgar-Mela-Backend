@@ -116,6 +116,7 @@ class MatchedCandidateOut(BaseModel):
     resume_parsed_json: Optional[Any] = None
     resume_filename: Optional[str] = None
     profile_pic_url: Optional[str] = None
+    job_id: Optional[str] = None
 
 
 class ApplicationCreate(BaseModel):
