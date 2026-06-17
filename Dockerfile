@@ -17,12 +17,17 @@ RUN apt-get update && apt-get install -y \
     libffi-dev \
     libssl-dev \
     fonts-dejavu-core \
+    antiword \
+    libreoffice-writer-nogui \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
+# Install Python dependencies (remove legacy broken `docx` pkg; use python-docx)
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+    pip uninstall -y docx 2>/dev/null || true && \
+    pip install --no-cache-dir -r requirements.txt && \
+    pip uninstall -y docx 2>/dev/null || true && \
+    python -c "from docx import Document; print('python-docx OK')"
 
 # Copy the current directory contents into the container at /app
 COPY . .

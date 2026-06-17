@@ -6,6 +6,8 @@ import json
 import logging
 import re
 import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -80,22 +82,100 @@ def extract_text_from_pdf(file_path: str) -> str:
         raise ValueError(f"Failed to parse PDF: {e}")
 
 
-def extract_text_from_doc(file_path: str) -> str:
-    """Fallback: read plain text from .txt or .doc files."""
+def extract_text_from_txt(file_path: str) -> str:
+    """Read plain-text resume files."""
     try:
         with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
             return f.read().strip()
     except Exception as e:
-        raise ValueError(f"Failed to read file: {e}")
+        raise ValueError(f"Failed to read text file: {e}")
+
+
+def _extract_doc_with_antiword(file_path: str) -> str:
+    if not shutil.which("antiword"):
+        return ""
+    try:
+        result = subprocess.run(
+            ["antiword", "-w", "0", file_path],
+            capture_output=True,
+            text=True,
+            timeout=45,
+            check=False,
+        )
+        if result.returncode == 0:
+            return (result.stdout or "").strip()
+        logger.warning("antiword failed for %s: %s", file_path, (result.stderr or "").strip())
+    except Exception as e:
+        logger.warning("antiword error for %s: %s", file_path, e)
+    return ""
+
+
+def _extract_doc_with_libreoffice(file_path: str) -> str:
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if not soffice:
+        return ""
+    out_dir = tempfile.mkdtemp(prefix="resume-doc-")
+    try:
+        result = subprocess.run(
+            [
+                soffice,
+                "--headless",
+                "--norestore",
+                "--convert-to",
+                "txt:Text",
+                "--outdir",
+                out_dir,
+                file_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=False,
+        )
+        if result.returncode != 0:
+            logger.warning("LibreOffice failed for %s: %s", file_path, (result.stderr or "").strip())
+            return ""
+        txt_path = Path(out_dir) / f"{Path(file_path).stem}.txt"
+        if txt_path.is_file():
+            return txt_path.read_text(encoding="utf-8", errors="ignore").strip()
+    except Exception as e:
+        logger.warning("LibreOffice error for %s: %s", file_path, e)
+    finally:
+        shutil.rmtree(out_dir, ignore_errors=True)
+    return ""
+
+
+def extract_text_from_doc(file_path: str) -> str:
+    """Extract text from legacy Microsoft Word .doc (binary) files."""
+    text = _extract_doc_with_antiword(file_path)
+    if text:
+        return text
+    text = _extract_doc_with_libreoffice(file_path)
+    if text:
+        return text
+    raise ValueError(
+        "Could not read this .doc file. Save it as .docx or PDF in Word and upload again."
+    )
 
 
 def extract_text_from_docx(file_path: str) -> str:
     """Extract text from .docx documents."""
     try:
-        import docx
+        from docx import Document
 
-        document = docx.Document(file_path)
-        lines = [paragraph.text.strip() for paragraph in document.paragraphs if paragraph.text.strip()]
+        document = Document(file_path)
+        lines: list[str] = []
+        for paragraph in document.paragraphs:
+            text = paragraph.text.strip()
+            if text:
+                lines.append(text)
+        for table in document.tables:
+            for row in table.rows:
+                row_text = " | ".join(
+                    cell.text.strip() for cell in row.cells if cell.text and cell.text.strip()
+                )
+                if row_text:
+                    lines.append(row_text)
         return "\n".join(lines).strip()
     except Exception as e:
         raise ValueError(f"Failed to parse DOCX: {e}")
@@ -203,10 +283,14 @@ def parse_resume(file_path: str, filename: str) -> tuple[str, dict]:
         raw_text = extract_text_from_pdf(file_path)
     elif ext == ".docx":
         raw_text = extract_text_from_docx(file_path)
+    elif ext == ".doc":
+        raw_text = extract_text_from_doc(file_path)
     elif ext in {".jpg", ".jpeg", ".png"}:
         raw_text = _ocr_image_with_tesseract(file_path)
+    elif ext == ".txt":
+        raw_text = extract_text_from_txt(file_path)
     else:
-        raw_text = extract_text_from_doc(file_path)
+        raw_text = extract_text_from_txt(file_path)
 
     structured = parse_resume_to_json(raw_text)
     return raw_text, structured

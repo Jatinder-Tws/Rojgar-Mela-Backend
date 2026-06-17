@@ -14,6 +14,7 @@ from models.user import User, UserRole
 from schemas.email_admin import (
     AudienceEstimateRequest,
     AudienceEstimateResponse,
+    AudienceUserIdsResponse,
     AudienceUserListResponse,
     AudienceUserOut,
     CampaignJobStarted,
@@ -41,6 +42,8 @@ from services.email_campaign_job_store import get_job
 from services.email_campaign_service import (
     count_audience,
     get_audience_users,
+    get_picker_user_ids,
+    list_picker_users,
     resend_all_failed,
     resend_to_recipient,
     run_campaign_send_job,
@@ -353,35 +356,9 @@ async def list_audience_users(
     db: AsyncSession = Depends(get_db),
     _admin: User = Depends(require_super_admin),
 ):
-    q = select(User).where(
-        User.is_super_admin.is_(False),
-        User.email.isnot(None),
-        User.email != "",
-        User.role.in_([UserRole.seeker, UserRole.provider]),
+    users, total = await list_picker_users(
+        db, page=page, page_size=page_size, search=search, role=role
     )
-    if role == "seeker":
-        q = q.where(User.role == UserRole.seeker)
-    elif role == "provider":
-        q = q.where(User.role == UserRole.provider)
-
-    if search and search.strip():
-        term = f"%{search.strip()}%"
-        full_name = func.concat(func.coalesce(User.first_name, ""), " ", func.coalesce(User.last_name, ""))
-        q = q.where(
-            or_(
-                User.first_name.ilike(term),
-                User.last_name.ilike(term),
-                full_name.ilike(term),
-                User.email.ilike(term),
-                User.company_name.ilike(term),
-            )
-        )
-
-    count_q = select(func.count()).select_from(q.subquery())
-    total = (await db.execute(count_q)).scalar() or 0
-    q = q.order_by(User.created_at.desc()).offset((page - 1) * page_size).limit(page_size)
-    users = (await db.execute(q)).scalars().all()
-
     items = [
         AudienceUserOut(
             id=u.id,
@@ -395,6 +372,18 @@ async def list_audience_users(
         for u in users
     ]
     return AudienceUserListResponse(items=items, total=total, page=page, page_size=page_size)
+
+
+@router.get("/email-campaigns/audience-user-ids", response_model=AudienceUserIdsResponse)
+async def list_audience_user_ids(
+    search: Optional[str] = None,
+    role: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    _admin: User = Depends(require_super_admin),
+):
+    """Return all user IDs matching picker filters (for select-all across pages)."""
+    ids, total = await get_picker_user_ids(db, search=search, role=role)
+    return AudienceUserIdsResponse(ids=ids, total=total)
 
 
 @router.get("/email-campaigns/jobs/{job_id}", response_model=CampaignJobStatus)

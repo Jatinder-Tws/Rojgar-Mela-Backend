@@ -34,7 +34,7 @@ from services.auth_service import (
     generate_secure_password,
 )
 from services.totp_service import totp_service
-from services.email_service import send_password_email
+from services.email_service import send_job_fair_welcome_email
 from services.job_fair_db import (
     get_job_fair_db,
     list_job_fairs_db,
@@ -454,11 +454,13 @@ async def register_company_to_job_fair(
         await db.flush()
 
         background_tasks.add_task(
-            send_password_email,
-            to_email=email,
-            first_name=company_name,
-            password=temp_pwd,
-            role="provider"
+            send_job_fair_welcome_email,
+            email,
+            (contact_person_name or company_name).strip(),
+            temp_pwd,
+            f"{settings.FRONTEND_URL.rstrip('/')}/login",
+            job_fair=jf,
+            role="provider",
         )
     else:
         # Update details if missing

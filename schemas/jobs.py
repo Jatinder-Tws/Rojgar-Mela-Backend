@@ -1,6 +1,46 @@
 from datetime import datetime
 from typing import Any, List, Optional
-from pydantic import BaseModel, field_validator
+import re
+from pydantic import BaseModel, field_validator, model_validator
+
+_EXPERIENCE_RANGE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)")
+_SALARY_RANGE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)")
+EXPERIENCE_MAX_YEARS = 50
+SALARY_MAX_LPA = 500
+
+
+def _validate_experience_range(value: Optional[str]) -> Optional[str]:
+    if value is None or not str(value).strip():
+        return value
+    text = str(value).strip()
+    match = _EXPERIENCE_RANGE_RE.search(text)
+    if not match:
+        return value
+    lo, hi = float(match.group(1)), float(match.group(2))
+    if lo < 0 or hi < 0:
+        raise ValueError("Experience cannot be negative")
+    if lo > EXPERIENCE_MAX_YEARS or hi > EXPERIENCE_MAX_YEARS:
+        raise ValueError(f"Experience cannot exceed {EXPERIENCE_MAX_YEARS} years")
+    if lo > hi:
+        raise ValueError("Minimum experience cannot be greater than maximum")
+    return value
+
+
+def _validate_salary_range(value: Optional[str]) -> Optional[str]:
+    if value is None or not str(value).strip():
+        return value
+    text = str(value).strip()
+    match = _SALARY_RANGE_RE.search(text)
+    if not match:
+        return value
+    lo, hi = float(match.group(1)), float(match.group(2))
+    if lo < 0 or hi < 0:
+        raise ValueError("Salary cannot be negative")
+    if lo > SALARY_MAX_LPA or hi > SALARY_MAX_LPA:
+        raise ValueError(f"Salary cannot exceed {SALARY_MAX_LPA} LPA")
+    if lo > hi:
+        raise ValueError("Minimum salary cannot be greater than maximum")
+    return value
 
 
 class JobCreate(BaseModel):
@@ -20,6 +60,41 @@ class JobCreate(BaseModel):
     employment_type: Optional[str] = None
     perks: Optional[List[str]] = []
 
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Job title is required")
+        if len(v) > 200:
+            raise ValueError("Job title cannot exceed 200 characters")
+        return v
+
+    @field_validator("experience_required")
+    @classmethod
+    def validate_experience(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_experience_range(v)
+
+    @field_validator("salary_range")
+    @classmethod
+    def validate_salary(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_salary_range(v)
+
+    @field_validator("post_count")
+    @classmethod
+    def validate_post_count(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or str(v).strip() == "":
+            return v
+        try:
+            count = int(str(v).strip())
+        except ValueError as exc:
+            raise ValueError("Total openings must be a whole number") from exc
+        if count < 1:
+            raise ValueError("Total openings must be at least 1")
+        if count > 9999:
+            raise ValueError("Total openings cannot exceed 9999")
+        return str(count)
+
 
 class JobUpdate(BaseModel):
     title: Optional[str] = None
@@ -36,6 +111,39 @@ class JobUpdate(BaseModel):
     shift: Optional[str] = None
     employment_type: Optional[str] = None
     perks: Optional[List[str]] = None
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        v = v.strip()
+        if not v:
+            raise ValueError("Job title cannot be empty")
+        if len(v) > 200:
+            raise ValueError("Job title cannot exceed 200 characters")
+        return v
+
+    @field_validator("experience_required")
+    @classmethod
+    def validate_experience(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_experience_range(v)
+
+    @field_validator("salary_range")
+    @classmethod
+    def validate_salary(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_salary_range(v)
+
+    @field_validator("post_count")
+    @classmethod
+    def validate_post_count(cls, v: Optional[int]) -> Optional[int]:
+        if v is None:
+            return v
+        if v < 1:
+            raise ValueError("Total openings must be at least 1")
+        if v > 9999:
+            raise ValueError("Total openings cannot exceed 9999")
+        return v
 
 
 class JobOut(BaseModel):
@@ -224,11 +332,66 @@ class JobDescriptionRequest(BaseModel):
     required_skills: Optional[List[str]] = []
     perks: Optional[List[str]] = []
 
+    @field_validator("exp_min", "exp_max", "sal_min", "sal_max")
+    @classmethod
+    def validate_numeric_fields(cls, v: Optional[str], info) -> Optional[str]:
+        if v is None or str(v).strip() == "":
+            return v
+        try:
+            num = float(str(v).strip())
+        except ValueError as exc:
+            raise ValueError(f"{info.field_name} must be a number") from exc
+        if info.field_name.startswith("exp"):
+            if num < 0:
+                raise ValueError("Experience cannot be negative")
+            if num > EXPERIENCE_MAX_YEARS:
+                raise ValueError(f"Experience cannot exceed {EXPERIENCE_MAX_YEARS} years")
+        else:
+            if num < 0:
+                raise ValueError("Salary cannot be negative")
+            if num > SALARY_MAX_LPA:
+                raise ValueError(f"Salary cannot exceed {SALARY_MAX_LPA} LPA")
+        return str(v).strip()
+
+    @field_validator("salary_range")
+    @classmethod
+    def validate_salary_range_field(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_salary_range(v)
+
+    @model_validator(mode="after")
+    def validate_min_max_ranges(self):
+        if self.exp_min and self.exp_max and float(self.exp_min) > float(self.exp_max):
+            raise ValueError("Minimum experience cannot be greater than maximum")
+        if self.sal_min and self.sal_max and float(self.sal_min) > float(self.sal_max):
+            raise ValueError("Minimum salary cannot be greater than maximum")
+        return self
+
 
 class JobTitleRequest(BaseModel):
     title: str
     exp_min: Optional[str] = None
     exp_max: Optional[str] = None
+
+    @field_validator("exp_min", "exp_max")
+    @classmethod
+    def validate_experience_fields(cls, v: Optional[str], info) -> Optional[str]:
+        if v is None or str(v).strip() == "":
+            return v
+        try:
+            num = float(str(v).strip())
+        except ValueError as exc:
+            raise ValueError(f"{info.field_name} must be a number") from exc
+        if num < 0:
+            raise ValueError("Experience cannot be negative")
+        if num > EXPERIENCE_MAX_YEARS:
+            raise ValueError(f"Experience cannot exceed {EXPERIENCE_MAX_YEARS} years")
+        return str(v).strip()
+
+    @model_validator(mode="after")
+    def validate_experience_order(self):
+        if self.exp_min and self.exp_max and float(self.exp_min) > float(self.exp_max):
+            raise ValueError("Minimum experience cannot be greater than maximum")
+        return self
 
 
 class JobDescriptionOnlyResponse(BaseModel):

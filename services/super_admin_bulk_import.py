@@ -202,9 +202,10 @@ async def _run_bulk_import_job_inner(job_id: str, content: bytes, role: UserRole
                         profile_link = f"{settings.FRONTEND_URL}/login"
                         await send_job_fair_welcome_email(
                             to_email=email,
-                            seeker_name=seeker_name,
+                            recipient_name=seeker_name,
                             password=effective_password,
                             profile_link=profile_link,
+                            role="seeker",
                         )
                         user.welcome_email_status = "sent"
                         user.welcome_email_error = None

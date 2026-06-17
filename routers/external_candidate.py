@@ -12,7 +12,7 @@ from models.user import User, UserRole
 from models.imported_user_password import ImportedUserPassword
 from schemas.external_candidate import ExternalCandidateCreate, ExternalCandidateOut, ExternalCandidateMatchOut
 from services.auth_service import hash_password, generate_secure_password
-from services.email_service import send_job_fair_welcome_email, send_password_email
+from services.email_service import send_job_fair_welcome_email, send_welcome_email
 from config import settings
 from typing import List
 
@@ -164,11 +164,15 @@ async def apply_for_job(
         
         # Link to Job Fair if job_fair_id or job_fair_slug is provided
         job_fair_id_to_link = candidate_in.job_fair_id
+        jf_out = None
         if not job_fair_id_to_link and candidate_in.job_fair_slug:
             from services.job_fair_db import get_job_fair_db
             jf_out = await get_job_fair_db(db, candidate_in.job_fair_slug)
             if jf_out:
                 job_fair_id_to_link = jf_out.id
+        elif job_fair_id_to_link:
+            from services.job_fair_db import get_job_fair_db
+            jf_out = await get_job_fair_db(db, job_fair_id_to_link)
         
         if job_fair_id_to_link:
             from models.job_fair import JobFairSeeker
@@ -194,22 +198,24 @@ async def apply_for_job(
 
         # Trigger welcome/credentials email for newly registered seekers
         if is_new_user:
-            profile_link = f"{settings.FRONTEND_URL}/login"
+            profile_link = f"{settings.FRONTEND_URL.rstrip('/')}/login"
             if job_fair_id_to_link:
                 background_tasks.add_task(
                     send_job_fair_welcome_email,
-                    to_email=candidate_in.email,
-                    seeker_name=candidate_in.full_name,
-                    password=dummy_password,
-                    profile_link=profile_link
+                    candidate_in.email,
+                    candidate_in.full_name,
+                    dummy_password,
+                    profile_link,
+                    job_fair=jf_out,
+                    role="seeker",
                 )
             else:
                 background_tasks.add_task(
-                    send_password_email,
-                    to_email=candidate_in.email,
-                    first_name=candidate_in.full_name,
+                    send_welcome_email,
+                    candidate_in.email,
+                    first_name,
+                    "seeker",
                     password=dummy_password,
-                    role="seeker"
                 )
 
         # Trigger AI matching in background:

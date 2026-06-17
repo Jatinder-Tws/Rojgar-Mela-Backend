@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     SMTP_FROM: str = "Rojgar Mela <noreply@rojgarmela.ai>"
     SMTP_TLS: bool = True
 
+    # Platform support (used in transactional emails)
+    SUPPORT_EMAIL: str = "support@rojgarmela.com"
+    SUPPORT_PHONES: str = "+91-9915137531, +91-9915130531"
+
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
 

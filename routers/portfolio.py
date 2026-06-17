@@ -1,10 +1,16 @@
-from typing import Optional
+from typing import Optional, List
+
 from fastapi import APIRouter, BackgroundTasks, Depends, File, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 from models.user import User
-from schemas.portfolio import PortfolioUpdate, PortfolioOut, PortfolioCompletionOut
+from schemas.portfolio import (
+    PortfolioUpdate,
+    PortfolioOut,
+    PortfolioCompletionOut,
+    CandidateSearchListResponse,
+)
 from services.auth_service import require_verified, require_seeker, require_provider
 from controllers.portfolio_controller import (
     get_my_portfolio as ctrl_get_my_portfolio,
@@ -36,9 +42,22 @@ async def get_completion(user: User = Depends(require_seeker), db: AsyncSession 
     return await ctrl_get_completion(user, db)
 
 
-@router.get("/search", response_model=list[PortfolioOut])
-async def search_candidates(q: Optional[str] = None, title: Optional[str] = None, skills: Optional[str] = None, provider: User = Depends(require_provider), db: AsyncSession = Depends(get_db)):
-    return await ctrl_search_candidates(q, title, skills, provider, db)
+@router.get("/search", response_model=CandidateSearchListResponse)
+async def search_candidates(
+    q: Optional[str] = None,
+    title: Optional[str] = None,
+    skills: Optional[str] = None,
+    status: Optional[str] = None,
+    gender: Optional[str] = None,
+    industry: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 15,
+    provider: User = Depends(require_provider),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_search_candidates(
+        q, title, skills, status, gender, industry, page, page_size, provider, db
+    )
 
 
 @router.post("/me/media/{media_type}", response_model=PortfolioOut)

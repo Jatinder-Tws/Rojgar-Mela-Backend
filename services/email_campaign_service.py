@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, false, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import AsyncSessionLocal
@@ -60,11 +60,11 @@ async def build_audience_query(
     elif audience_type == AudienceType.specific_users.value:
         user_ids = filt.get("user_ids") or []
         if not user_ids:
-            q = q.where(User.id == "none")
+            q = q.where(false())
         else:
             q = q.where(User.id.in_(user_ids))
     else:
-        q = q.where(User.id == "none")
+        q = q.where(false())
 
     if filt.get("is_verified") is True:
         q = q.where(User.is_verified.is_(True))
@@ -80,6 +80,71 @@ async def count_audience(
     q = await build_audience_query(audience_type, audience_filter)
     count_q = select(func.count()).select_from(q.subquery())
     return (await db.execute(count_q)).scalar() or 0
+
+
+def build_picker_users_query(
+    search: Optional[str] = None,
+    role: Optional[str] = None,
+):
+    """Base query for the campaign user picker (seekers + providers with email)."""
+    q = select(User).where(
+        User.is_super_admin.is_(False),
+        User.email.isnot(None),
+        User.email != "",
+        User.role.in_([UserRole.seeker, UserRole.provider]),
+    )
+    if role == "seeker":
+        q = q.where(User.role == UserRole.seeker)
+    elif role == "provider":
+        q = q.where(User.role == UserRole.provider)
+
+    if search and search.strip():
+        term = f"%{search.strip()}%"
+        full_name = func.concat(
+            func.coalesce(User.first_name, ""),
+            " ",
+            func.coalesce(User.last_name, ""),
+        )
+        q = q.where(
+            or_(
+                User.first_name.ilike(term),
+                User.last_name.ilike(term),
+                full_name.ilike(term),
+                User.email.ilike(term),
+                User.company_name.ilike(term),
+            )
+        )
+    return q
+
+
+async def list_picker_users(
+    db: AsyncSession,
+    *,
+    page: int = 1,
+    page_size: int = 20,
+    search: Optional[str] = None,
+    role: Optional[str] = None,
+):
+    q = build_picker_users_query(search, role)
+    count_q = select(func.count()).select_from(q.subquery())
+    total = (await db.execute(count_q)).scalar() or 0
+    q = q.order_by(User.created_at.desc()).offset((page - 1) * page_size).limit(page_size)
+    users = (await db.execute(q)).scalars().all()
+    return users, total
+
+
+async def get_picker_user_ids(
+    db: AsyncSession,
+    *,
+    search: Optional[str] = None,
+    role: Optional[str] = None,
+) -> tuple[list[str], int]:
+    q = build_picker_users_query(search, role)
+    count_q = select(func.count()).select_from(q.subquery())
+    total = (await db.execute(count_q)).scalar() or 0
+    id_q = q.order_by(User.created_at.desc()).with_only_columns(User.id)
+    ids = list((await db.execute(id_q)).scalars().all())
+    return ids, int(total)
 
 
 async def get_audience_users(

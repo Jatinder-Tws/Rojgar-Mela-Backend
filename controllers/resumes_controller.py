@@ -3,6 +3,7 @@ import uuid
 import re
 import logging
 from datetime import datetime
+from pathlib import Path
 from fastapi import BackgroundTasks, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy import select
@@ -218,7 +219,13 @@ async def _process_resume(resume_id: str, file_path: str, filename: str) -> None
                 await _update_resume_processing(resume_id, "failed", "Resume record not found.")
                 return
             if not res.parsed_text:
-                await _update_resume_processing(resume_id, "failed", "Could not extract text from resume. Try a clearer PDF or DOCX.")
+                ext = Path(filename).suffix.lower()
+                msg = (
+                    "Could not read this .doc file. Save it as .docx or PDF and upload again."
+                    if ext == ".doc"
+                    else "Could not extract text from resume. Try a clearer PDF or DOCX."
+                )
+                await _update_resume_processing(resume_id, "failed", msg)
                 return
             from models.match import Match
             from sqlalchemy import delete
@@ -236,11 +243,24 @@ async def _process_resume(resume_id: str, file_path: str, filename: str) -> None
 
 async def upload_resume(background_tasks: BackgroundTasks, file: UploadFile, user: User, db: AsyncSession) -> ResumeOut:
     file_path, filename, size_bytes = await save_upload(file, str(user.id))
+    parse_error: str | None = None
     try:
         raw_text, parsed_json = parse_resume(file_path, filename)
     except Exception as e:
         logger.warning(f"[RESUME] Parse failed for {filename}: {e}")
+        parse_error = str(e).strip()
         raw_text, parsed_json = "", {}
+
+    if not (raw_text or "").strip():
+        ext = Path(filename).suffix.lower()
+        if not parse_error:
+            if ext == ".doc":
+                parse_error = (
+                    "Could not read this .doc file. Save it as .docx or PDF in Word and upload again."
+                )
+            else:
+                parse_error = "Could not extract text from resume. Try a clearer PDF or DOCX."
+        raise HTTPException(status_code=400, detail=parse_error)
     ocr_used = bool(raw_text) and len(raw_text.strip()) < 300 and filename.lower().endswith(".pdf")
 
     ai_profile_data = {}

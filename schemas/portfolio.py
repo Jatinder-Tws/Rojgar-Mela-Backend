@@ -63,6 +63,8 @@ class PortfolioUpdate(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     email: Optional[str] = None
+    industry: Optional[str] = None
+    job_role: Optional[str] = None
 
     skills: Optional[List[SkillItem]] = None
     work_experiences: Optional[List[WorkExperienceItem]] = None
@@ -94,7 +96,11 @@ class PortfolioOut(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     email: Optional[str] = None
+    phone: Optional[str] = None
     profile_pic_url: Optional[str] = None
+    industry: Optional[str] = None
+    job_role: Optional[str] = None
+    onboarding_complete: bool = False
 
     skills: Optional[List[SkillItem]] = None
     work_experiences: Optional[List[WorkExperienceItem]] = None
@@ -121,3 +127,35 @@ class PortfolioCompletionOut(BaseModel):
     percentage: int
     filled_sections: List[str]
     missing_sections: List[str]
+
+
+class CandidateSearchItemOut(BaseModel):
+    id: str
+    user_id: str
+    first_name: str = ""
+    last_name: str = ""
+    headline: Optional[str] = None
+    current_role: Optional[str] = None
+    city: Optional[str] = None
+    total_experience_years: Optional[float] = None
+    is_active: bool = True
+    profile_pic_url: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    date_of_birth: Optional[str] = None
+    gender: Optional[str] = None
+    skills: Optional[List[str]] = None
+    source: str = "registered"
+    resume_url: Optional[str] = None
+    completion_percentage: int = 0
+    created_at: Optional[datetime] = None
+    industry: Optional[str] = None
+    application_status: Optional[str] = None
+    is_shortlisted: bool = False
+
+
+class CandidateSearchListResponse(BaseModel):
+    items: List[CandidateSearchItemOut]
+    total: int
+    page: int
+    page_size: int

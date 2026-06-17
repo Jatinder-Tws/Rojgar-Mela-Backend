@@ -1,6 +1,6 @@
-from datetime import datetime, date
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 import re
 import uuid
 
@@ -19,6 +19,126 @@ _env = Environment(loader=FileSystemLoader(str(_template_dir)), autoescape=True)
 
 _UPLOADS_DIR = Path(__file__).parent.parent / "uploads"
 
+
+IST_TZ = timezone(timedelta(hours=5, minutes=30))
+
+
+def _to_ist(fair_date: datetime) -> datetime:
+    """Normalize datetime to IST for user-facing emails."""
+    if fair_date.tzinfo is None:
+        # Job fair datetimes are persisted as UTC wall-time without tzinfo.
+        fair_date = fair_date.replace(tzinfo=timezone.utc)
+    return fair_date.astimezone(IST_TZ)
+
+
+def _ordinal_day(day: int) -> str:
+    if 10 <= day % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+    return f"{day}{suffix}"
+
+
+def _format_job_fair_datetime(fair_date: datetime) -> tuple[str, str]:
+    """Return (date_display, time_display) in IST for email templates."""
+    ist_date = _to_ist(fair_date)
+    date_display = (
+        f"{ist_date.strftime('%A')}, {_ordinal_day(ist_date.day)} "
+        f"{ist_date.strftime('%B')}, {ist_date.year}"
+    )
+    hour = ist_date.hour % 12 or 12
+    minute = ist_date.minute
+    am_pm = "AM" if ist_date.hour < 12 else "PM"
+    if ist_date.hour or ist_date.minute:
+        time_display = f"{hour}:{minute:02d} {am_pm} IST Onwards"
+    else:
+        time_display = "IST Onwards"
+    return date_display, time_display
+
+
+def _absolute_public_url(path: Optional[str]) -> Optional[str]:
+    if not path:
+        return None
+    if path.startswith("http://") or path.startswith("https://"):
+        return path
+    base = settings.FRONTEND_URL.rstrip("/")
+    return f"{base}/{path.lstrip('/')}"
+
+
+def _banner_src_for_email(banner: Optional[str]) -> Optional[str]:
+    """Return cid: or public URL for job fair banner images in email HTML."""
+    if not banner:
+        return None
+    from services.email_template_service import uploads_root, _upload_rel_to_cid
+
+    rel: Optional[str] = None
+    if banner.startswith("/uploads/"):
+        rel = banner.removeprefix("/uploads/").lstrip("/")
+    else:
+        frontend = settings.FRONTEND_URL.rstrip("/")
+        if banner.startswith(f"{frontend}/uploads/"):
+            rel = banner[len(f"{frontend}/uploads/"):].lstrip("/")
+
+    if rel:
+        file_path = uploads_root() / rel
+        if file_path.is_file():
+            return f"cid:{_upload_rel_to_cid(rel)}"
+    return _absolute_public_url(banner)
+
+
+def _support_context() -> dict[str, str]:
+    return {
+        "support_email": settings.SUPPORT_EMAIL,
+        "support_phones": settings.SUPPORT_PHONES,
+    }
+
+
+def build_job_fair_email_context(job_fair: Any = None) -> dict[str, Any]:
+    """Build template variables from a JobFair record (or sensible defaults)."""
+    ctx: dict[str, Any] = {
+        "job_fair_title": "Job Fair",
+        "job_fair_slug": "",
+        "job_fair_location": "",
+        "job_fair_description": "",
+        "collaboration_text": "",
+        "job_fair_date_display": "",
+        "job_fair_time_display": "",
+        "banner_image_url": None,
+        "event_helpline": "",
+        "host_organization": "",
+    }
+    if not job_fair:
+        return ctx
+
+    title = getattr(job_fair, "title", None) or "Job Fair"
+    ctx["job_fair_title"] = title
+    ctx["job_fair_slug"] = getattr(job_fair, "slug", "") or ""
+    ctx["job_fair_location"] = getattr(job_fair, "location", "") or ""
+    description = (getattr(job_fair, "description", None) or "").strip()
+    ctx["job_fair_description"] = description
+
+    # First line of description can carry collaboration / host notes from admin.
+    if description:
+        lines = [line.strip() for line in description.splitlines() if line.strip()]
+        if lines:
+            first = lines[0]
+            if first.lower().startswith("in collaboration") or first.lower().startswith("hosted by"):
+                ctx["collaboration_text"] = first
+                ctx["job_fair_description"] = "\n".join(lines[1:]).strip()
+            for line in lines:
+                lower = line.lower()
+                if lower.startswith("helpline:") or lower.startswith("helpline number:"):
+                    ctx["event_helpline"] = line.split(":", 1)[-1].strip()
+                elif lower.startswith("host:"):
+                    ctx["host_organization"] = line.split(":", 1)[-1].strip()
+
+    fair_date = getattr(job_fair, "date", None)
+    if fair_date:
+        ctx["job_fair_date_display"], ctx["job_fair_time_display"] = _format_job_fair_datetime(fair_date)
+
+    banner = getattr(job_fair, "banner_image_url", None)
+    ctx["banner_image_url"] = _banner_src_for_email(banner)
+    return ctx
 
 
 def _sender_domain() -> str:
@@ -129,6 +249,20 @@ async def send_campaign_email(
     await _deliver_message(msg, to_email, raise_on_error=raise_on_error)
 
 
+async def _send_branded_email(
+    to_email: str,
+    subject: str,
+    html_body: str,
+    *,
+    raise_on_error: bool = False,
+) -> None:
+    """Send HTML email with inline cid: images (logos, banners, uploads)."""
+    from services.email_template_service import prepare_html_for_delivery
+
+    html = prepare_html_for_delivery(html_body)
+    await send_campaign_email(to_email, subject, html, raise_on_error=raise_on_error)
+
+
 async def send_otp_email(to_email: str, otp: str, first_name: str) -> None:
     """Send a styled OTP verification email."""
     template = _env.get_template("otp_email.html")
@@ -137,20 +271,37 @@ async def send_otp_email(to_email: str, otp: str, first_name: str) -> None:
         otp=otp,
         year=datetime.utcnow().year,
         expires_minutes=10,
+        login_url=f"{settings.FRONTEND_URL.rstrip('/')}/login",
+        **_support_context(),
     )
-    await _send_email(to_email, "Verify Your Rojgar Mela Account", html)
+    await _send_branded_email(to_email, "Verify Your RojgarMela.AI Account", html)
 
 
-async def send_welcome_email(to_email: str, first_name: str, role: str) -> None:
-    """Send a welcome email after onboarding completes."""
+async def send_welcome_email(
+    to_email: str,
+    first_name: str,
+    role: str,
+    *,
+    password: Optional[str] = None,
+) -> None:
+    """Send a welcome email after normal account registration / onboarding."""
     template = _env.get_template("welcome_email.html")
-    role_label = "Job Seeker" if role == "seeker" else "Job Provider"
+    is_seeker = role == "seeker"
+    role_label = "Job Seeker" if is_seeker else "Job Provider"
     html = template.render(
         first_name=first_name,
+        name=first_name,
+        email=to_email,
+        password=password or "",
+        role=role,
         role_label=role_label,
+        is_seeker=is_seeker,
+        is_provider=not is_seeker,
+        login_url=f"{settings.FRONTEND_URL.rstrip('/')}/login",
         year=datetime.utcnow().year,
+        **_support_context(),
     )
-    await _send_email(to_email, f"Welcome to Rojgar Mela, {first_name}!", html)
+    await _send_branded_email(to_email, f"Welcome to RojgarMela.AI, {first_name}!", html)
 
 
 async def send_notification_email(to_email: str, first_name: str, title: str, message: str) -> None:
@@ -264,27 +415,35 @@ async def send_password_email(to_email: str, first_name: str, password: str, rol
 
 async def send_job_fair_welcome_email(
     to_email: str,
-    seeker_name: str,
+    recipient_name: str,
     password: str,
-    profile_link: str
+    profile_link: str,
+    *,
+    job_fair: Any = None,
+    role: str = "seeker",
 ) -> None:
-    """Send a welcome email for Job Fair 2026 to imported seekers."""
+    """Send registration email for users signing up via a Job Fair form."""
     template = _env.get_template("job_fair_email.html")
-    
+    fair_ctx = build_job_fair_email_context(job_fair)
+    is_seeker = role == "seeker"
+    role_label = "Job Seeker" if is_seeker else "Job Provider"
+    fair_title = fair_ctx.get("job_fair_title") or "Job Fair"
+    subject = f"{fair_title} – Login & Complete Your Profile"
+
     html = template.render(
-        seeker_name=seeker_name,
+        seeker_name=recipient_name,
+        recipient_name=recipient_name,
         email=to_email,
         password=password,
         profile_link=profile_link,
+        role=role,
+        role_label=role_label,
+        is_seeker=is_seeker,
+        is_provider=not is_seeker,
         year=datetime.utcnow().year,
+        login_url=f"{settings.FRONTEND_URL.rstrip('/')}/login",
+        **_support_context(),
+        **fair_ctx,
     )
 
-    from services.email_template_service import prepare_html_for_delivery
-
-    html = prepare_html_for_delivery(html)
-    await send_campaign_email(
-        to_email,
-        "The Job Carnival 2026 (19 June) – Login & Complete Your Profile",
-        html,
-        raise_on_error=True,
-    )
+    await _send_branded_email(to_email, subject, html, raise_on_error=True)

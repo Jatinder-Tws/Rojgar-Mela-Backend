@@ -10,12 +10,23 @@ from models.email_template import EmailTemplate
 from models.user import User, UserRole
 
 _EMAIL_ASSETS_SUBDIR = "email_assets"
-_UPLOADS_ROOT = Path(settings.UPLOAD_DIR)
+_BACKEND_ROOT = Path(__file__).parent.parent
+_STATIC_EMAIL_DIR = _BACKEND_ROOT / "static" / "email"
 
 _BRAND_LOGO_FILES: dict[str, tuple[str, ...]] = {
     "cicu_logo": ("cicu_logo.jpg", "cicu_logo.png"),
     "lgc_logo": ("lgc_logo.png", "lgc_logo.jpg", "lgc_logo.jpeg"),
     "rojgar_logo": ("rojgar_logo.png",),
+    "job_carnival_flyer": (
+        "email_assets/job_carnival_flyer.png",
+        "email_assets/job_carnival_flyer.jpg",
+        "email_assets/job_carnival_flyer.jpeg",
+    ),
+}
+
+# Bundled logos shipped with the backend (fallback when uploads/ is empty).
+_STATIC_BRAND_LOGOS: dict[str, Path] = {
+    "rojgar_logo": _STATIC_EMAIL_DIR / "rojgar_logo.png",
 }
 
 DEFAULT_IMG_STYLE = "max-width:100%;height:auto;display:block;"
@@ -38,15 +49,50 @@ SAMPLE_CONTEXT = {
     "last_name": "Sharma",
     "name": "Rahul Sharma",
     "seeker_name": "Rahul Sharma",
+    "recipient_name": "Rahul Sharma",
     "email": "rahul@example.com",
     "password": "",
     "profile_link": f"{settings.FRONTEND_URL.rstrip('/')}/login",
+    "login_url": f"{settings.FRONTEND_URL.rstrip('/')}/login",
     "industry": "Information Technology",
     "company_name": "Tech Solutions Pvt Ltd",
+    "role": "seeker",
     "role_label": "Job Seeker",
+    "is_seeker": True,
+    "is_provider": False,
     "phone": "9876543210",
     "year": datetime.utcnow().year,
+    "support_email": settings.SUPPORT_EMAIL,
+    "support_phones": settings.SUPPORT_PHONES,
+    "job_fair_title": "The Job Carnival 2026",
+    "job_fair_slug": "job-carnival-2026",
+    "job_fair_location": "Chaukimann, Ferozepur Road, Ludhiana",
+    "job_fair_description": "",
+    "collaboration_text": "In Collaboration with District Bureau of Employment & Enterprises (DBEE)",
+    "job_fair_date_display": "Friday, 19th June, 2026",
+    "job_fair_time_display": "9:30 AM Onwards",
+    "banner_image_url": None,
+    "event_helpline": "81464-07200",
+    "host_organization": "",
 }
+
+
+def uploads_root() -> Path:
+    """Absolute path to the uploads directory (works in Docker and local dev)."""
+    root = Path(settings.UPLOAD_DIR)
+    if not root.is_absolute():
+        root = _BACKEND_ROOT / root
+    return root
+
+
+def _upload_rel_to_cid(relative_path: str) -> str:
+    return "u__" + relative_path.replace("/", "__")
+
+
+def _cid_to_upload_rel(content_id: str) -> Optional[str]:
+    if content_id.startswith("u__"):
+        return content_id[3:].replace("__", "/")
+    return None
 
 
 def slugify(text: str) -> str:
@@ -79,13 +125,24 @@ def build_user_context(user: User) -> dict[str, Any]:
 
 
 def cid_to_file_path(content_id: str) -> Optional[Path]:
-    """Resolve a cid: content id to a file under uploads/."""
+    """Resolve a cid: content id to a local image file."""
+    static_path = _STATIC_BRAND_LOGOS.get(content_id)
+    if static_path and static_path.is_file():
+        return static_path
+
+    uploads = uploads_root()
     for filename in _BRAND_LOGO_FILES.get(content_id, ()):
-        path = _UPLOADS_ROOT / filename
+        path = uploads / filename
         if path.is_file():
             return path
 
-    assets_dir = _UPLOADS_ROOT / _EMAIL_ASSETS_SUBDIR
+    upload_rel = _cid_to_upload_rel(content_id)
+    if upload_rel:
+        path = uploads / upload_rel
+        if path.is_file():
+            return path
+
+    assets_dir = uploads / _EMAIL_ASSETS_SUBDIR
     if assets_dir.is_dir():
         for path in assets_dir.glob(f"{content_id}.*"):
             if path.is_file():
@@ -97,8 +154,43 @@ def cid_to_public_url(content_id: str) -> Optional[str]:
     path = cid_to_file_path(content_id)
     if not path:
         return None
-    rel = path.relative_to(_UPLOADS_ROOT)
-    return f"/uploads/{rel.as_posix()}"
+    uploads = uploads_root()
+    try:
+        rel = path.relative_to(uploads)
+        return f"/uploads/{rel.as_posix()}"
+    except ValueError:
+        return None
+
+
+def _replace_external_logo_urls(html: str) -> str:
+    """Swap known external logo URLs for cid: only when the local file exists."""
+    if cid_to_file_path("cicu_logo"):
+        html = html.replace(CICU_LOGO_URL, "cid:cicu_logo")
+    if cid_to_file_path("rojgar_logo"):
+        html = html.replace(ROJGAR_LOGO_URL, "cid:rojgar_logo")
+    return html
+
+
+def _replace_upload_urls_with_cid(html: str) -> str:
+    """Convert local /uploads/... image URLs to cid: for MIME inline attachment."""
+    uploads = uploads_root()
+    frontend = settings.FRONTEND_URL.rstrip("/")
+
+    def _to_cid(match: re.Match[str]) -> str:
+        quote = match.group(1)
+        upload_path = match.group(2)
+        rel = upload_path.removeprefix("/uploads/").lstrip("/")
+        if (uploads / rel).is_file():
+            return f'src={quote}cid:{_upload_rel_to_cid(rel)}{quote}'
+        return match.group(0)
+
+    html = re.sub(r'src=(["\'])(/uploads/[^"\']+)\1', _to_cid, html)
+    html = re.sub(
+        rf'src=(["\']){re.escape(frontend)}(/uploads/[^"\']+)\1',
+        _to_cid,
+        html,
+    )
+    return html
 
 
 def resolve_cids_for_preview(html_body: str) -> str:
@@ -121,8 +213,8 @@ def resolve_cids_for_preview(html_body: str) -> str:
 def prepare_html_for_delivery(html_body: str) -> str:
     """Normalize campaign HTML: inline logos, uploaded assets, strip placeholders."""
     html = html_body
-    html = html.replace(CICU_LOGO_URL, "cid:cicu_logo")
-    html = html.replace(ROJGAR_LOGO_URL, "cid:rojgar_logo")
+    html = _replace_external_logo_urls(html)
+    html = _replace_upload_urls_with_cid(html)
     # Uploaded template images stored as /uploads/email_assets/email_img_*.ext → cid:
     html = re.sub(
         r'src=(["\'])/uploads/email_assets/(email_img_[^"\']+?)\.(?:png|jpe?g|gif|webp)\1',
@@ -141,7 +233,7 @@ def build_image_html_snippet(content_id: str, *, alt: str = "", logo: bool = Fal
 
 
 def email_assets_dir() -> Path:
-    path = _UPLOADS_ROOT / _EMAIL_ASSETS_SUBDIR
+    path = uploads_root() / _EMAIL_ASSETS_SUBDIR
     path.mkdir(parents=True, exist_ok=True)
     return path
 

@@ -223,3 +223,8 @@ class AudienceUserListResponse(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class AudienceUserIdsResponse(BaseModel):
+    ids: list[str]
+    total: int
