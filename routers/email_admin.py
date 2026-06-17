@@ -91,6 +91,7 @@ async def list_email_templates(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     search: Optional[str] = None,
+    status: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
     _admin: User = Depends(require_super_admin),
 ):
@@ -104,6 +105,11 @@ async def list_email_templates(
                 EmailTemplate.subject.ilike(term),
             )
         )
+    if status and status != "all":
+        if status == "active":
+            q = q.where(EmailTemplate.is_active.is_(True))
+        elif status == "inactive":
+            q = q.where(EmailTemplate.is_active.is_(False))
     count_q = select(func.count()).select_from(q.subquery())
     total = (await db.execute(count_q)).scalar() or 0
     q = q.order_by(EmailTemplate.updated_at.desc()).offset((page - 1) * page_size).limit(page_size)
@@ -271,6 +277,7 @@ async def list_email_campaigns(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     search: Optional[str] = None,
+    status: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
     _admin: User = Depends(require_super_admin),
 ):
@@ -280,6 +287,8 @@ async def list_email_campaigns(
     if search and search.strip():
         term = f"%{search.strip()}%"
         q = q.where(EmailCampaign.name.ilike(term))
+    if status and status != "all":
+        q = q.where(EmailCampaign.status == status)
     count_q = select(func.count()).select_from(q.subquery())
     total = (await db.execute(count_q)).scalar() or 0
     q = q.order_by(EmailCampaign.created_at.desc()).offset((page - 1) * page_size).limit(page_size)

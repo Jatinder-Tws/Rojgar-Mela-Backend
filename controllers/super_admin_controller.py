@@ -199,19 +199,25 @@ async def upload_super_admin_profile_pic(file: UploadFile, admin: User, db: Asyn
 
 
 async def list_platform_jobs(
-    db: AsyncSession, page: int, page_size: int, search: Optional[str] = None
+    db: AsyncSession, page: int, page_size: int, search: Optional[str] = None, industry: Optional[str] = None
 ) -> AdminJobListResponse:
     base = (
         select(JobPosting, User)
         .join(User, JobPosting.provider_id == User.id)
     )
-    if search:
-        term = f"%{search.strip()}%"
-        base = base.where(or_(JobPosting.title.ilike(term), User.company_name.ilike(term)))
     count_q = select(func.count(JobPosting.id)).select_from(JobPosting).join(User, JobPosting.provider_id == User.id)
+
+    filters = []
     if search:
         term = f"%{search.strip()}%"
-        count_q = count_q.where(or_(JobPosting.title.ilike(term), User.company_name.ilike(term)))
+        filters.append(or_(JobPosting.title.ilike(term), User.company_name.ilike(term)))
+    if industry:
+        filters.append(JobPosting.industry.ilike(f"%{industry.strip()}%"))
+
+    if filters:
+        base = base.where(and_(*filters))
+        count_q = count_q.where(and_(*filters))
+
     total = await db.scalar(count_q) or 0
     offset = (page - 1) * page_size
     rows = (await db.execute(base.order_by(JobPosting.created_at.desc()).offset(offset).limit(page_size))).all()
@@ -268,7 +274,7 @@ async def list_platform_matches(
 
 
 async def list_platform_applications(
-    db: AsyncSession, page: int, page_size: int, search: Optional[str] = None
+    db: AsyncSession, page: int, page_size: int, search: Optional[str] = None, status: Optional[str] = None
 ) -> AdminApplicationListResponse:
     from sqlalchemy.orm import aliased
     Seeker = aliased(User)
@@ -288,6 +294,8 @@ async def list_platform_applications(
                 JobPosting.title.ilike(term),
             )
         )
+    if status and status != "all":
+        base = base.where(Application.status == status)
     count_q = select(func.count(Application.id)).select_from(Application).join(JobPosting, Application.job_id == JobPosting.id)
     if search:
         term = f"%{search.strip()}%"
@@ -298,6 +306,8 @@ async def list_platform_applications(
                 JobPosting.title.ilike(term),
             )
         )
+    if status and status != "all":
+        count_q = count_q.where(Application.status == status)
     total = await db.scalar(count_q) or 0
     offset = (page - 1) * page_size
     rows = (await db.execute(base.order_by(Application.applied_at.desc()).offset(offset).limit(page_size))).all()
@@ -436,16 +446,41 @@ def get_import_job_status(job_id: str) -> ImportJobStatus:
     return ImportJobStatus(**job)
 
 
-async def list_seekers(db: AsyncSession, page: int, page_size: int, search: Optional[str], industry: Optional[str]) -> AdminUserListResponse:
+async def list_seekers(
+    db: AsyncSession, page: int, page_size: int, search: Optional[str],
+    industry: Optional[str], status: Optional[str] = None, job_fair_id: Optional[str] = None
+) -> AdminUserListResponse:
+    from models.job_fair import JobFairSeeker
     seeker_filters = [User.role == UserRole.seeker, User.is_super_admin.is_(False)]
     if industry:
         seeker_filters.append(User.industry.ilike(f"%{industry.strip()}%"))
     if search:
         seeker_filters.append(_build_user_search_filter(search.strip()))
-    total = await db.scalar(select(func.count(User.id)).where(*seeker_filters))
+
+    if status:
+        has_pwd = and_(User.hashed_password.isnot(None), User.hashed_password != "")
+        no_pwd = or_(User.hashed_password.is_(None), User.hashed_password == "")
+        if status == "no_password":
+            seeker_filters.append(no_pwd)
+        elif status == "active":
+            seeker_filters.append(and_(has_pwd, User.is_verified.is_(True), User.onboarding_complete.is_(True)))
+        elif status == "verified":
+            seeker_filters.append(and_(has_pwd, User.is_verified.is_(True), User.onboarding_complete.is_(False)))
+        elif status == "onboarded":
+            seeker_filters.append(and_(has_pwd, User.is_verified.is_(False), User.onboarding_complete.is_(True)))
+        elif status == "pending":
+            seeker_filters.append(and_(has_pwd, User.is_verified.is_(False), User.onboarding_complete.is_(False)))
+
+    count_q = select(func.count(User.id)).where(*seeker_filters)
+    select_q = select(User, Portfolio).outerjoin(Portfolio, Portfolio.user_id == User.id).where(*seeker_filters)
+
+    if job_fair_id:
+        count_q = count_q.join(JobFairSeeker, JobFairSeeker.seeker_id == User.id).where(JobFairSeeker.job_fair_id == job_fair_id)
+        select_q = select_q.join(JobFairSeeker, JobFairSeeker.seeker_id == User.id).where(JobFairSeeker.job_fair_id == job_fair_id)
+
+    total = await db.scalar(count_q)
     result = await db.execute(
-        select(User, Portfolio).outerjoin(Portfolio, Portfolio.user_id == User.id)
-        .where(*seeker_filters).order_by(User.created_at.desc(), User.id.desc())
+        select_q.order_by(User.created_at.desc(), User.id.desc())
         .offset((page - 1) * page_size).limit(page_size)
     )
     items = []
@@ -519,10 +554,28 @@ async def bulk_import_seekers(content: bytes, filename: str) -> BulkImportJobSta
     return BulkImportJobStarted(job_id=job_id)
 
 
-async def list_providers(db: AsyncSession, page: int, page_size: int, search: Optional[str]) -> AdminUserListResponse:
+async def list_providers(
+    db: AsyncSession, page: int, page_size: int, search: Optional[str], status: Optional[str] = None
+) -> AdminUserListResponse:
     provider_filters = [User.role == UserRole.provider, User.is_super_admin.is_(False)]
     if search:
         provider_filters.append(_build_user_search_filter(search.strip(), include_company=True))
+
+    if status:
+        has_pwd = and_(User.hashed_password.isnot(None), User.hashed_password != "")
+        no_pwd = or_(User.hashed_password.is_(None), User.hashed_password == "")
+
+        if status == "no_password":
+            provider_filters.append(no_pwd)
+        elif status == "active":
+            provider_filters.append(and_(has_pwd, User.is_verified.is_(True), User.onboarding_complete.is_(True)))
+        elif status == "verified":
+            provider_filters.append(and_(has_pwd, User.is_verified.is_(True), User.onboarding_complete.is_(False)))
+        elif status == "onboarded":
+            provider_filters.append(and_(has_pwd, User.is_verified.is_(False), User.onboarding_complete.is_(True)))
+        elif status == "pending":
+            provider_filters.append(and_(has_pwd, User.is_verified.is_(False), User.onboarding_complete.is_(False)))
+
     total = await db.scalar(select(func.count(User.id)).where(*provider_filters))
     result = await db.execute(
         select(User).where(*provider_filters).order_by(User.created_at.desc(), User.id.desc())

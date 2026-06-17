@@ -96,8 +96,9 @@ async def list_jobs(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     search: Optional[str] = None,
+    industry: Optional[str] = Query(None),
 ):
-    return await ctrl_list_jobs(db, page, page_size, search)
+    return await ctrl_list_jobs(db, page, page_size, search, industry)
 
 
 @router.get("/matches", response_model=AdminMatchListResponse)
@@ -118,8 +119,9 @@ async def list_applications(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     search: Optional[str] = None,
+    status: Optional[str] = Query(None),
 ):
-    return await ctrl_list_applications(db, page, page_size, search)
+    return await ctrl_list_applications(db, page, page_size, search, status)
 
 
 @router.get("/interviews", response_model=AdminInterviewListResponse)
@@ -180,8 +182,9 @@ async def list_seekers(
     admin: User = Depends(require_super_admin), db: AsyncSession = Depends(get_db),
     page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
     search: Optional[str] = None, industry: Optional[str] = Query(None),
+    status: Optional[str] = Query(None), job_fair_id: Optional[str] = Query(None),
 ):
-    return await ctrl_list_seekers(db, page, page_size, search, industry)
+    return await ctrl_list_seekers(db, page, page_size, search, industry, status, job_fair_id)
 
 
 @router.post("/seekers", response_model=AdminUserOut, status_code=201)
@@ -220,9 +223,10 @@ async def bulk_import_seekers(admin: User = Depends(require_super_admin), file: 
 @router.get("/providers", response_model=AdminUserListResponse)
 async def list_providers(
     admin: User = Depends(require_super_admin), db: AsyncSession = Depends(get_db),
-    page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100), search: Optional[str] = None,
+    page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
+    search: Optional[str] = None, status: Optional[str] = Query(None),
 ):
-    return await ctrl_list_providers(db, page, page_size, search)
+    return await ctrl_list_providers(db, page, page_size, search, status)
 
 
 @router.post("/providers", response_model=AdminUserOut, status_code=201)
