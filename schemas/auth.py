@@ -279,8 +279,10 @@ class UpdateSettingsRequest(BaseModel):
     job_type: Optional[str] = None
     salary_range: Optional[str] = None
     company_name: Optional[str] = None
+    company_type: Optional[str] = None
     company_location: Optional[str] = None
     company_address: Optional[str] = None
+    company_size: Optional[str] = None
     preferred_locations: Optional[List[str]] = None
 
     @field_validator("phone")

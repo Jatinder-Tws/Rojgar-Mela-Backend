@@ -1,5 +1,6 @@
 import os
 import uuid
+import asyncio
 from fastapi import BackgroundTasks, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -85,15 +86,31 @@ async def update_settings(
     user: User,
     db: AsyncSession,
 ) -> UpdateSettingsResponse:
+    uniqueness_checks = []
     if body.email and body.email != user.email:
-        exist_email = await db.execute(select(User).where(User.email == body.email))
-        if exist_email.scalar_one_or_none():
-            raise HTTPException(status_code=400, detail="Email already in use")
-
+        uniqueness_checks.append(
+            db.execute(select(User.id).where(User.email == body.email).limit(1))
+        )
     if body.phone and body.phone != user.phone:
-        exist_phone = await db.execute(select(User).where(User.phone == body.phone))
-        if exist_phone.scalar_one_or_none():
-            raise HTTPException(status_code=400, detail="Phone number already in use")
+        uniqueness_checks.append(
+            db.execute(select(User.id).where(User.phone == body.phone).limit(1))
+        )
+
+    if uniqueness_checks:
+        results = await asyncio.gather(*uniqueness_checks)
+        check_idx = 0
+        if body.email and body.email != user.email:
+            if results[check_idx].scalar_one_or_none():
+                raise HTTPException(status_code=400, detail="Email already in use")
+            check_idx += 1
+        if body.phone and body.phone != user.phone:
+            if results[check_idx].scalar_one_or_none():
+                raise HTTPException(status_code=400, detail="Phone number already in use")
+
+    seeker_match_fields_changed = user.role == UserRole.seeker and any(
+        getattr(body, field) is not None
+        for field in ("industry", "job_role", "salary_range", "job_type", "preferred_locations")
+    )
 
     if body.first_name is not None:
         user.first_name = body.first_name
@@ -124,6 +141,13 @@ async def update_settings(
         user.company_location = body.company_location
     if body.company_address is not None:
         user.company_address = body.company_address
+    if body.company_type is not None:
+        try:
+            user.company_type = CompanyType(body.company_type) if body.company_type else None
+        except ValueError:
+            pass
+    if body.company_size is not None:
+        user.company_size = body.company_size or None
     if body.preferred_locations is not None:
         user.preferred_locations = body.preferred_locations[:5]
     if body.job_type is not None:
@@ -133,19 +157,10 @@ async def update_settings(
             pass
 
     await db.commit()
-    await db.refresh(user)
 
-    if user.role == UserRole.seeker:
+    if user.role == UserRole.seeker and seeker_match_fields_changed:
         from services.seeker_matching_service import invalidate_seeker_matches
         background_tasks.add_task(invalidate_seeker_matches, str(user.id))
-    elif user.role == UserRole.provider:
-        from models.job import JobPosting
-        from services.seeker_matching_service import invalidate_job_matches
-        jobs_result = await db.execute(
-            select(JobPosting).where(JobPosting.provider_id == user.id, JobPosting.is_active == True)  # noqa
-        )
-        for job in jobs_result.scalars().all():
-            background_tasks.add_task(invalidate_job_matches, str(job.id))
 
     response_data = UpdateSettingsResponse.model_validate(user)
     if new_qr_code:

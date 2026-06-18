@@ -310,8 +310,13 @@ async def get_dashboard_analytics(
         .limit(10)
     )
 
-    # Query 12: Skills count optimization (select only the skills field)
-    skills_query = select(Portfolio.skills).where(Portfolio.skills.isnot(None))
+    # Query 12: Skills count optimization (sample recent portfolios only)
+    skills_query = (
+        select(Portfolio.skills)
+        .where(Portfolio.skills.isnot(None))
+        .order_by(Portfolio.updated_at.desc().nullslast(), Portfolio.user_id.desc())
+        .limit(500)
+    )
 
     # Query 13: Recruiter active table
     recruiter_query = (
@@ -389,6 +394,8 @@ async def get_dashboard_analytics(
         )
         .outerjoin(Portfolio, Portfolio.user_id == User.id)
         .where(User.role == UserRole.seeker, User.is_super_admin.is_(False))
+        .order_by(User.created_at.desc())
+        .limit(1000)
     )
 
     # ── 2. Run All Queries in Parallel using asyncio.gather ──────────────────

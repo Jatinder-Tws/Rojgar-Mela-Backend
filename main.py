@@ -64,7 +64,7 @@ app.add_middleware(
 )
 
 # ── Routers ─────────────────────────────────────────────────────────────────
-from routers import auth, users, jobs, resumes, matches, applications, notifications, interviews, assessment, portfolio, analytics, resume_builder, onboarding, master, ai_interview, roadmap, external_candidate, master_data, ai_coach ,interview_scheduling, import_users, superadmin, super_admin, super_admin_support, support, attendance, job_fair, email_admin # noqa
+from routers import auth, users, jobs, resumes, matches, applications, notifications, interviews, assessment, portfolio, analytics, resume_builder, onboarding, master, ai_interview, roadmap, external_candidate, master_data, ai_coach ,interview_scheduling, import_users, superadmin, super_admin, super_admin_support, support, attendance, job_fair, email_admin, dashboard # noqa
 
 
 API_PREFIX = ""
@@ -80,6 +80,7 @@ routers = [
     assessment.router,
     portfolio.router,
     analytics.router,
+    dashboard.router,
     resume_builder.router,
     onboarding.router,
     master.router,
@@ -119,7 +120,7 @@ from services.websocket_manager import manager
 async def _validate_ws_token(token: str, user_id: str) -> bool:
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
-        return payload.get("sub") == user_id
+        return str(payload.get("sub")) == str(user_id)
     except JWTError:
         return False
 
@@ -127,7 +128,7 @@ async def _validate_ws_token(token: str, user_id: str) -> bool:
 @app.websocket("/ws/{user_id}")
 async def websocket_endpoint(websocket: WebSocket, user_id: str, token: str = Query(...)):
     if not await _validate_ws_token(token, user_id):
-        await websocket.close(code=4001)
+        await websocket.close(code=4001, reason="Unauthorized")
         return
 
     await manager.connect(user_id, websocket)
