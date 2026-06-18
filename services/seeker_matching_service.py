@@ -5,7 +5,8 @@ Optimized for minimum GPT calls: embeddings cached, GPT ranks in one batch.
 from __future__ import annotations
 import json
 import logging
-from typing import List, Optional
+import re
+from typing import Any, List, Optional
 
 from sqlalchemy import select, and_, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,14 +15,393 @@ from models.user import User
 from models.job import JobPosting
 from models.resume import Resume
 from models.match import Match
+from models.portfolio import Portfolio
 from services.ai_service import get_ai
 
 logger = logging.getLogger(__name__)
 
+# How many candidates to pull from the vector index before any GPT re-ranking.
 SEEKER_TOP_N = 10
 PROVIDER_TOP_N = 50
+
+# Vector similarity and final match thresholds.
 SIMILARITY_THRESHOLD = 0.55
 MATCH_SCORE_THRESHOLD = 60  # Only store/return matches with score >= this
+
+# Skip GPT when vector + skills signal is already very strong or clearly weak.
+HIGH_CONFIDENCE_SIMILARITY = 0.78
+HIGH_CONFIDENCE_SKILLS_OVERLAP = 0.55
+LOW_CONFIDENCE_SIMILARITY = 0.58
+
+
+def _norm_skill(value: str) -> str:
+    return re.sub(r"\s+", " ", (value or "").strip().lower())
+
+
+def _skills_from_json(skills_data: Any) -> List[str]:
+    if not skills_data:
+        return []
+    if not isinstance(skills_data, list):
+        return []
+    skills: List[str] = []
+    for item in skills_data:
+        if isinstance(item, str) and item.strip():
+            skills.append(item.strip())
+        elif isinstance(item, dict):
+            name = item.get("name") or item.get("skill")
+            if name and str(name).strip():
+                skills.append(str(name).strip())
+    return skills
+
+
+def _collect_resume_skills(
+    resume: Resume,
+    user: User | None = None,
+    portfolio: Portfolio | None = None,
+    parsed_json: dict | None = None,
+) -> List[str]:
+    parsed = parsed_json if parsed_json is not None else (resume.parsed_json if isinstance(resume.parsed_json, dict) else {})
+    skills = _skills_from_json(parsed.get("skills"))
+    skills.extend(_skills_from_json(portfolio.skills if portfolio else None))
+    return list(dict.fromkeys(skills))
+
+
+def _parse_min_experience_years(text: str | None) -> float | None:
+    if not text:
+        return None
+    lowered = text.lower().strip()
+    if any(token in lowered for token in ("fresher", "fresh graduate", "no experience", "0 year")):
+        return 0.0
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(?:\+|plus)?\s*(?:to|-)?\s*(\d+(?:\.\d+)?)?\s*year", lowered)
+    if match:
+        return float(match.group(1))
+    plus_match = re.search(r"(\d+(?:\.\d+)?)\+", lowered)
+    if plus_match:
+        return float(plus_match.group(1))
+    return None
+
+
+def _candidate_experience_years(
+    resume: Resume,
+    user: User | None = None,
+    portfolio: Portfolio | None = None,
+    parsed_json: dict | None = None,
+) -> float | None:
+    parsed = parsed_json if parsed_json is not None else (resume.parsed_json if isinstance(resume.parsed_json, dict) else {})
+    if parsed.get("experience_years") is not None:
+        try:
+            return float(parsed["experience_years"])
+        except (TypeError, ValueError):
+            pass
+    if portfolio and portfolio.total_experience_years is not None:
+        return float(portfolio.total_experience_years)
+    if user and user.experience:
+        parsed_exp = _parse_min_experience_years(user.experience)
+        if parsed_exp is not None:
+            return parsed_exp
+    return None
+
+
+def _skills_overlap_ratio(resume_skills: List[str], required_skills: List[str]) -> float:
+    required = [_norm_skill(skill) for skill in (required_skills or []) if skill]
+    if not required:
+        return 0.65
+    resume_norm = {_norm_skill(skill) for skill in resume_skills if skill}
+    if not resume_norm:
+        return 0.0
+    matched = 0
+    for req in required:
+        if req in resume_norm or any(req in skill or skill in req for skill in resume_norm):
+            matched += 1
+    return matched / len(required)
+
+
+def _experience_fit_score(candidate_years: float | None, required_text: str | None) -> float:
+    required_years = _parse_min_experience_years(required_text)
+    if required_years is None or candidate_years is None:
+        return 0.7
+    if candidate_years >= required_years:
+        return 1.0
+    if candidate_years >= required_years * 0.7:
+        return 0.6
+    return 0.25
+
+
+def _hybrid_match_score(similarity: float, skills_overlap: float, experience_fit: float) -> float:
+    return round((similarity * 100 * 0.50) + (skills_overlap * 100 * 0.35) + (experience_fit * 100 * 0.15), 1)
+
+
+def _matched_and_missing_skills(required_skills: List[str], resume_skills: List[str]) -> tuple[List[str], List[str]]:
+    required = [skill for skill in (required_skills or []) if skill]
+    resume_norm = {_norm_skill(skill) for skill in resume_skills if skill}
+    matched: List[str] = []
+    missing: List[str] = []
+    for skill in required:
+        norm = _norm_skill(skill)
+        if norm in resume_norm or any(norm in rs or rs in norm for rs in resume_norm):
+            matched.append(skill)
+        else:
+            missing.append(skill)
+    return matched[:4], missing[:4]
+
+
+def _rule_based_ranking(
+    similarity: float,
+    skills_overlap: float,
+    experience_fit: float,
+    required_skills: List[str],
+    resume_skills: List[str],
+) -> dict | None:
+    """Return a ranking dict, {'reject': True}, or None if GPT should decide."""
+    if required_skills and skills_overlap == 0 and similarity < LOW_CONFIDENCE_SIMILARITY:
+        return {"reject": True}
+
+    hybrid_score = _hybrid_match_score(similarity, skills_overlap, experience_fit)
+    matched, missing = _matched_and_missing_skills(required_skills, resume_skills)
+
+    if similarity >= HIGH_CONFIDENCE_SIMILARITY or (
+        similarity >= 0.68 and skills_overlap >= HIGH_CONFIDENCE_SKILLS_OVERLAP
+    ):
+        return {
+            "score": min(hybrid_score, 95.0),
+            "highlights": matched or ["Strong profile alignment"],
+            "gaps": missing,
+            "fit_reason": "High-confidence match based on skills and profile similarity",
+        }
+
+    if hybrid_score < MATCH_SCORE_THRESHOLD and skills_overlap < 0.2 and similarity < 0.62:
+        return {"reject": True}
+
+    return None
+
+
+def _fallback_ranking(
+    similarity: float,
+    skills_overlap: float,
+    experience_fit: float,
+    required_skills: List[str],
+    resume_skills: List[str],
+) -> dict:
+    matched, missing = _matched_and_missing_skills(required_skills, resume_skills)
+    return {
+        "score": _hybrid_match_score(similarity, skills_overlap, experience_fit),
+        "highlights": matched,
+        "gaps": missing,
+        "fit_reason": "Score based on profile similarity and skill alignment",
+    }
+
+
+def _build_resume_embedding_text(resume: Resume, user: User | None, portfolio: Portfolio | None) -> str:
+    parts: List[str] = []
+    skills = _collect_resume_skills(resume, user, portfolio)
+    if skills:
+        parts.append(f"Skills: {', '.join(skills[:40])}")
+    experience_years = _candidate_experience_years(resume, user, portfolio)
+    if experience_years is not None:
+        parts.append(f"Experience: {experience_years} years")
+    if user:
+        if user.industry:
+            parts.append(f"Industry: {user.industry}")
+        if user.job_role:
+            parts.append(f"Role: {user.job_role}")
+    if portfolio:
+        if portfolio.headline:
+            parts.append(f"Headline: {portfolio.headline}")
+        if portfolio.current_role:
+            parts.append(f"Current Role: {portfolio.current_role}")
+        location = ", ".join(part for part in [portfolio.city, portfolio.state] if part)
+        if location:
+            parts.append(f"Location: {location}")
+    if resume.parsed_text:
+        parts.append(resume.parsed_text[:4500])
+    return "\n".join(parts)[:6000]
+
+
+def _build_job_embedding_text(job: JobPosting) -> str:
+    skills_text = ", ".join(job.required_skills or [])
+    job_type = str(job.job_type.value) if hasattr(job.job_type, "value") else (job.job_type or "")
+    return (
+        f"Job Title: {job.title}\n"
+        f"Industry: {job.industry or ''}\n"
+        f"Location: {job.location or ''}\n"
+        f"Experience Required: {job.experience_required or ''}\n"
+        f"Job Type: {job_type}\n"
+        f"Salary: {job.salary_range or ''}\n"
+        f"Skills: {skills_text}\n"
+        f"Description: {job.description or ''}"
+    )[:6000]
+
+
+def _build_resume_gpt_summary(resume: Resume, user: User | None = None, portfolio: Portfolio | None = None) -> str:
+    parsed = resume.parsed_json if isinstance(resume.parsed_json, dict) else {}
+    lines: List[str] = []
+    skills = _collect_resume_skills(resume, user, portfolio)
+    if skills:
+        lines.append(f"Skills: {', '.join(skills[:25])}")
+    experience_years = _candidate_experience_years(resume, user, portfolio)
+    if experience_years is not None:
+        lines.append(f"Experience: {experience_years} years")
+    if user and user.job_role:
+        lines.append(f"Target Role: {user.job_role}")
+    if user and user.industry:
+        lines.append(f"Industry: {user.industry}")
+    if portfolio and portfolio.headline:
+        lines.append(f"Headline: {portfolio.headline[:180]}")
+    if resume.parsed_text:
+        lines.append(resume.parsed_text[:900])
+    return "\n".join(lines)[:1500]
+
+
+def _build_job_gpt_summary(job: JobPosting) -> str:
+    return (
+        f"Title: {job.title}\n"
+        f"Skills: {', '.join(job.required_skills or [])}\n"
+        f"Experience: {job.experience_required or ''}\n"
+        f"Industry: {job.industry or ''}\n"
+        f"{(job.description or '')[:700]}"
+    )[:1500]
+
+
+async def _rank_seeker_jobs(
+    resume: Resume,
+    seeker: User,
+    jobs_to_process: List[tuple[int, Any]],
+    portfolio: Portfolio | None = None,
+) -> dict[int, dict]:
+    resume_skills = _collect_resume_skills(resume, seeker, portfolio)
+    resume_summary = _build_resume_gpt_summary(resume, seeker, portfolio)
+    rankings: dict[int, dict] = {}
+    gpt_queue: List[tuple[int, Any, int]] = []
+
+    for original_idx, row in jobs_to_process:
+        similarity = float(getattr(row, "similarity", SIMILARITY_THRESHOLD))
+        required_skills = getattr(row, "required_skills", None) or []
+        overlap = _skills_overlap_ratio(resume_skills, required_skills)
+        experience_fit = _experience_fit_score(
+            _candidate_experience_years(resume, seeker, portfolio),
+            getattr(row, "experience_required", None),
+        )
+        rule_result = _rule_based_ranking(similarity, overlap, experience_fit, required_skills, resume_skills)
+        if rule_result is None:
+            gpt_queue.append((original_idx, row, len(gpt_queue)))
+        elif not rule_result.get("reject"):
+            rankings[original_idx] = rule_result
+
+    if gpt_queue:
+        candidates = [
+            {
+                "index": gpt_index,
+                "title": getattr(row, "title", ""),
+                "description": getattr(row, "description", "") or "",
+            }
+            for _, row, gpt_index in gpt_queue
+        ]
+        gpt_rankings = await _batch_rerank_gpt(resume_summary, candidates, mode="jobs")
+        for ranking in gpt_rankings or []:
+            gpt_index = int(ranking.get("index", -1))
+            if 0 <= gpt_index < len(gpt_queue):
+                original_idx = gpt_queue[gpt_index][0]
+                rankings[original_idx] = {
+                    "score": float(ranking.get("score", 70)),
+                    "highlights": ranking.get("highlights", []),
+                    "gaps": ranking.get("gaps", []),
+                    "fit_reason": ranking.get("fit_reason", ""),
+                }
+
+        for original_idx, row, _ in gpt_queue:
+            if original_idx in rankings:
+                continue
+            similarity = float(getattr(row, "similarity", SIMILARITY_THRESHOLD))
+            required_skills = getattr(row, "required_skills", None) or []
+            overlap = _skills_overlap_ratio(resume_skills, required_skills)
+            experience_fit = _experience_fit_score(
+                _candidate_experience_years(resume, seeker, portfolio),
+                getattr(row, "experience_required", None),
+            )
+            rankings[original_idx] = _fallback_ranking(
+                similarity, overlap, experience_fit, required_skills, resume_skills
+            )
+
+    return rankings
+
+
+async def _rank_provider_candidates(job: JobPosting, candidates_to_process: List[tuple[int, Any]]) -> dict[int, dict]:
+    job_summary = _build_job_gpt_summary(job)
+    required_skills = job.required_skills or []
+    rankings: dict[int, dict] = {}
+    gpt_queue: List[tuple[int, Any, int]] = []
+
+    for original_idx, row in candidates_to_process:
+        resume_skills = _skills_from_json(
+            (row.parsed_json or {}).get("skills") if isinstance(getattr(row, "parsed_json", None), dict) else None
+        )
+        similarity = float(getattr(row, "similarity", SIMILARITY_THRESHOLD))
+        overlap = _skills_overlap_ratio(resume_skills, required_skills)
+        parsed_json = row.parsed_json if isinstance(getattr(row, "parsed_json", None), dict) else {}
+        candidate_years = None
+        if parsed_json.get("experience_years") is not None:
+            try:
+                candidate_years = float(parsed_json["experience_years"])
+            except (TypeError, ValueError):
+                candidate_years = None
+        experience_fit = _experience_fit_score(candidate_years, job.experience_required)
+        rule_result = _rule_based_ranking(similarity, overlap, experience_fit, required_skills, resume_skills)
+        if rule_result is None:
+            gpt_queue.append((original_idx, row, len(gpt_queue)))
+        elif not rule_result.get("reject"):
+            rankings[original_idx] = rule_result
+
+    if gpt_queue:
+        batch_input = []
+        for _, row, gpt_index in gpt_queue:
+            parsed_json = row.parsed_json if isinstance(getattr(row, "parsed_json", None), dict) else {}
+            summary_lines = []
+            skills = _skills_from_json(parsed_json.get("skills"))
+            if skills:
+                summary_lines.append(f"Skills: {', '.join(skills[:25])}")
+            if parsed_json.get("experience_years") is not None:
+                summary_lines.append(f"Experience: {parsed_json['experience_years']} years")
+            if getattr(row, "parsed_text", None):
+                summary_lines.append((row.parsed_text or "")[:900])
+            batch_input.append({
+                "index": gpt_index,
+                "candidate_name": f"{getattr(row, 'first_name', '')} {getattr(row, 'last_name', '')}".strip(),
+                "resume_text": "\n".join(summary_lines)[:1200],
+            })
+
+        gpt_rankings = await _batch_rerank_gpt(job_summary, batch_input, mode="resumes")
+        for ranking in gpt_rankings or []:
+            gpt_index = int(ranking.get("index", -1))
+            if 0 <= gpt_index < len(gpt_queue):
+                original_idx = gpt_queue[gpt_index][0]
+                rankings[original_idx] = {
+                    "score": float(ranking.get("score", 70)),
+                    "highlights": ranking.get("highlights", []),
+                    "gaps": ranking.get("gaps", []),
+                    "fit_reason": ranking.get("fit_reason", ""),
+                }
+
+        for original_idx, row, _ in gpt_queue:
+            if original_idx in rankings:
+                continue
+            resume_skills = _skills_from_json(
+                (row.parsed_json or {}).get("skills") if isinstance(getattr(row, "parsed_json", None), dict) else None
+            )
+            similarity = float(getattr(row, "similarity", SIMILARITY_THRESHOLD))
+            overlap = _skills_overlap_ratio(resume_skills, required_skills)
+            parsed_json = row.parsed_json if isinstance(getattr(row, "parsed_json", None), dict) else {}
+            candidate_years = None
+            if parsed_json.get("experience_years") is not None:
+                try:
+                    candidate_years = float(parsed_json["experience_years"])
+                except (TypeError, ValueError):
+                    candidate_years = None
+            experience_fit = _experience_fit_score(candidate_years, job.experience_required)
+            rankings[original_idx] = _fallback_ranking(
+                similarity, overlap, experience_fit, required_skills, resume_skills
+            )
+
+    return rankings
 
 
 async def _get_embedding_from_db(obj) -> Optional[List[float]]:
@@ -38,7 +418,11 @@ async def embed_and_store_resume(resume: Resume, db: AsyncSession) -> None:
     """Compute and persist embedding for a resume. Skips if already embedded."""
     if await _get_embedding_from_db(resume):
         return
-    text_content = (resume.parsed_text or "")[:6000]
+
+    user = await db.get(User, resume.user_id)
+    portfolio_result = await db.execute(select(Portfolio).where(Portfolio.user_id == resume.user_id))
+    portfolio = portfolio_result.scalar_one_or_none()
+    text_content = _build_resume_embedding_text(resume, user, portfolio)
     if not text_content.strip():
         return
     ai = get_ai()
@@ -53,10 +437,9 @@ async def embed_and_store_job(job: JobPosting, db: AsyncSession) -> None:
     """Compute and persist embedding for a job posting."""
     if await _get_embedding_from_db(job):
         return
-    skills_text = ", ".join(job.required_skills or [])
-    text_content = f"Job Title: {job.title}\nIndustry: {job.industry or ''}\nSkills: {skills_text}\nDescription: {job.description}"
+    text_content = _build_job_embedding_text(job)
     ai = get_ai()
-    embedding = await ai.embed(text_content[:6000])
+    embedding = await ai.embed(text_content)
     await db.execute(
         update(JobPosting).where(JobPosting.id == job.id).values(embedding=embedding)
     )
@@ -89,14 +472,8 @@ async def _batch_rerank_gpt(resume_text: str, candidates: list, mode: str = "job
             f"Return a JSON object with a 'rankings' key containing an array. "
             f"Each array element must have: index (int), score (int 0-100), "
             f"highlights (list of strings), gaps (list of strings), fit_reason (string).\n"
-            f"IMPORTANT: Do NOT factor in location or geography when scoring. "
             f"Score purely on skills, experience, role alignment, and domain knowledge.\n"
-            f"Keep highlights/gaps as short bullet strings. Score 0-100.\n\n"
-            f'Example response:\n'
-            f'{{"rankings": ['
-            f'  {{"index":0,"score":85,"highlights":["Python experience","backend knowledge"],"gaps":["AWS required"],"fit_reason":"Strong technical match with relevant skills"}},'
-            f'  {{"index":1,"score":20,"highlights":[],"gaps":["Different domain","No relevant skills"],"fit_reason":"Poor fit — candidate profile does not align with this role"}}'
-            f']}}'
+            f"Keep highlights/gaps as short bullet strings. Score 0-100."
         )
     else:
         system = (
@@ -104,7 +481,7 @@ async def _batch_rerank_gpt(resume_text: str, candidates: list, mode: str = "job
             "score each candidate for fit (0–100). Return ONLY a JSON object, no prose."
         )
         candidates_text = "\n".join(
-            f"[{i}] {c.get('candidate_name', '')} – {c.get('resume_text', '')[:300]}"
+            f"[{i}] {c.get('candidate_name', '')} – {c.get('resume_text', '')[:220]}"
             for i, c in enumerate(candidates)
         )
         user_prompt = (
@@ -113,14 +490,8 @@ async def _batch_rerank_gpt(resume_text: str, candidates: list, mode: str = "job
             f"Return a JSON object with a 'rankings' key containing an array. "
             f"Each array element must have: index (int), score (int 0-100), "
             f"highlights (list of strings), gaps (list of strings), fit_reason (string).\n"
-            f"IMPORTANT: Do NOT factor in location or geography when scoring. "
             f"Score purely on skills, experience, role alignment, and domain knowledge.\n"
-            f"Keep highlights and gaps as short bullet-point strings. Score 0-100.\n\n"
-            f'Example response:\n'
-            f'{{"rankings": ['
-            f'  {{"index":0,"score":85,"highlights":["Python experience","project management"],"gaps":["AWS required"],"fit_reason":"Strong technical match with relevant experience"}},'
-            f'  {{"index":1,"score":40,"highlights":["Willing to learn"],"gaps":["No relevant skills","Wrong domain"],"fit_reason":"Entry level — lacks required experience"}}'
-            f']}}'
+            f"Keep highlights and gaps as short bullet-point strings. Score 0-100."
         )
 
     # ── Call GPT safely ──────────────────────────────────────────────
@@ -278,18 +649,15 @@ async def match_jobs_for_seeker(seeker: User, db: AsyncSession) -> List[dict]:
     # Only run GPT for jobs without cached matches
     rank_map = {}
     if jobs_needing_ranking:
-        candidates = [
-            {"index": i, "title": r.title, "description": r.description}
-            for i, r in jobs_needing_ranking
-        ]
-        rankings = await _batch_rerank_gpt(resume.parsed_text or "", candidates, mode="jobs")
-        
-        # Store new matches in DB (only >= threshold)
-        for ranking in rankings:
-            original_idx = jobs_needing_ranking[ranking["index"]][0]
-            job_row = jobs_needing_ranking[ranking["index"]][1]
-            score = float(ranking.get("score", 70))
+        portfolio_result = await db.execute(select(Portfolio).where(Portfolio.user_id == seeker.id))
+        portfolio = portfolio_result.scalar_one_or_none()
+        rankings_by_idx = await _rank_seeker_jobs(resume, seeker, jobs_needing_ranking, portfolio)
 
+        for original_idx, job_row in jobs_needing_ranking:
+            rank = rankings_by_idx.get(original_idx)
+            if not rank:
+                continue
+            score = float(rank.get("score", 70))
             if score < MATCH_SCORE_THRESHOLD:
                 continue
 
@@ -297,13 +665,13 @@ async def match_jobs_for_seeker(seeker: User, db: AsyncSession) -> List[dict]:
                 seeker_id=seeker.id,
                 job_id=str(job_row.id),
                 score=score,
-                highlights=ranking.get("highlights", []),
-                gaps=ranking.get("gaps", []),
-                fit_reason=ranking.get("fit_reason", "")
+                highlights=rank.get("highlights", []),
+                gaps=rank.get("gaps", []),
+                fit_reason=rank.get("fit_reason", "")
             )
             db.add(new_match)
-            rank_map[original_idx] = ranking
-        
+            rank_map[original_idx] = rank
+
         await db.commit()
 
     # Build results from both cached and new matches
@@ -424,30 +792,27 @@ async def match_candidates_for_job(job: JobPosting, db: AsyncSession) -> List[di
     # Only run GPT for candidates without cached matches
     rank_map = {}
     if candidates_needing_ranking:
-        jd_text = f"Title: {job.title}\nSkills: {', '.join(job.required_skills or [])}\n{job.description}"
-        
-        batch_input = [
-            {"index": i, "candidate_name": f"{r.first_name} {r.last_name}", "resume_text": r.parsed_text or ""}
-            for i, r in candidates_needing_ranking
-        ]
-        rankings = await _batch_rerank_gpt(jd_text, batch_input, mode="resumes")
-        
-        # Store new matches in DB
-        for ranking in rankings:
-            original_idx = candidates_needing_ranking[ranking["index"]][0]
-            candidate_row = candidates_needing_ranking[ranking["index"]][1]
-            
+        rankings_by_idx = await _rank_provider_candidates(job, candidates_needing_ranking)
+
+        for original_idx, candidate_row in candidates_needing_ranking:
+            rank = rankings_by_idx.get(original_idx)
+            if not rank:
+                continue
+            score = float(rank.get("score", 70))
+            if score < MATCH_SCORE_THRESHOLD:
+                continue
+
             new_match = Match(
                 seeker_id=str(candidate_row.user_id),
                 job_id=job.id,
-                score=float(ranking.get("score", 70)),
-                highlights=ranking.get("highlights", []),
-                gaps=ranking.get("gaps", []),
-                fit_reason=ranking.get("fit_reason", "")
+                score=score,
+                highlights=rank.get("highlights", []),
+                gaps=rank.get("gaps", []),
+                fit_reason=rank.get("fit_reason", "")
             )
             db.add(new_match)
-            rank_map[original_idx] = ranking
-        
+            rank_map[original_idx] = rank
+
         await db.commit()
 
     # Build results from both cached and new matches
@@ -458,6 +823,8 @@ async def match_candidates_for_job(job: JobPosting, db: AsyncSession) -> List[di
         # Use cached match if available
         if seeker_id in existing_matches:
             match = existing_matches[seeker_id]
+            if match.score < MATCH_SCORE_THRESHOLD:
+                continue
             rank = {
                 "score": match.score,
                 "highlights": match.highlights or [],
@@ -468,7 +835,8 @@ async def match_candidates_for_job(job: JobPosting, db: AsyncSession) -> List[di
         else:
             # Use newly computed rank
             rank = rank_map.get(i, {"score": round(row.similarity * 100, 1), "highlights": [], "gaps": [], "fit_reason": ""})
-            # Get the match_id from the newly created match
+            if rank.get("score", 0) < MATCH_SCORE_THRESHOLD:
+                continue
             match_result = await db.execute(
                 select(Match).where(
                     and_(Match.seeker_id == seeker_id, Match.job_id == job.id)
@@ -659,80 +1027,55 @@ async def proactive_match_resume_to_jobs(resume_id: str) -> None:
             if not jobs_to_process:
                 logger.info(f"[PROACTIVE_MATCH] All jobs already matched for resume {resume_id}")
                 return
-            
-            # Run GPT batch ranking
-            candidates = [
-                {"index": i, "title": r.title, "description": r.description}
-                for i, r in jobs_to_process
-            ]
-            rankings = await _batch_rerank_gpt(resume.parsed_text or "", candidates, mode="jobs")
+
+            portfolio_result = await db.execute(select(Portfolio).where(Portfolio.user_id == seeker.id))
+            portfolio = portfolio_result.scalar_one_or_none()
+            rankings_by_idx = await _rank_seeker_jobs(resume, seeker, jobs_to_process, portfolio)
 
             # Store matches in DB
             matches_created = 0
             from services.notification_service import create_notification
             from models.notification import NotificationType
 
-            if rankings:
-                # GPT succeeded — use real scores (only store >= threshold)
-                for ranking in rankings:
-                    job_row = jobs_to_process[ranking["index"]][1]
-                    score = float(ranking.get("score", 70))
+            for list_idx, job_row in jobs_to_process:
+                rank = rankings_by_idx.get(list_idx)
+                if not rank:
+                    continue
+                score = float(rank.get("score", 70))
+                if score < MATCH_SCORE_THRESHOLD:
+                    continue
 
-                    if score < MATCH_SCORE_THRESHOLD:
-                        continue
+                new_match = Match(
+                    seeker_id=seeker.id,
+                    job_id=str(job_row.id),
+                    score=score,
+                    highlights=rank.get("highlights", []),
+                    gaps=rank.get("gaps", []),
+                    fit_reason=rank.get("fit_reason", "")
+                )
+                db.add(new_match)
+                await db.flush()
 
-                    new_match = Match(
-                        seeker_id=seeker.id,
-                        job_id=str(job_row.id),
-                        score=score,
-                        highlights=ranking.get("highlights", []),
-                        gaps=ranking.get("gaps", []),
-                        fit_reason=ranking.get("fit_reason", "")
+                if score >= 85:
+                    await create_notification(
+                        db=db,
+                        user_id=seeker.id,
+                        type=NotificationType.match,
+                        title=f"🔥 Perfect match found: {job_row.title}",
+                        message=f"We found a job that perfectly matches your profile! {job_row.title} with a {score}% match score.",
+                        related_job_id=str(job_row.id),
                     )
-                    db.add(new_match)
-                    await db.flush()
-
-                    # Notify seeker of high matches
-                    if score >= 85:
-                        await create_notification(
-                            db=db,
-                            user_id=seeker.id,
-                            type=NotificationType.match,
-                            title=f"🔥 Perfect match found: {job_row.title}",
-                            message=f"We found a job that perfectly matches your profile! {job_row.title} with a {score}% match score.",
-                            related_job_id=str(job_row.id),
-                        )
-                        # Also notify the job's provider about this strong candidate
-                        await create_notification(
-                            db=db,
-                            user_id=str(job_row.provider_id),
-                            type=NotificationType.match,
-                            title=f"✨ Top Candidate for {job_row.title}",
-                            message=f"A new candidate {seeker.first_name} {seeker.last_name} is a {score}% match for your job!",
-                            related_job_id=str(job_row.id),
-                            related_user_id=str(seeker.id),
-                        )
-
-                    matches_created += 1
-            else:
-                # GPT failed — fallback to vector similarity scores (only store >= threshold)
-                logger.warning("[PROACTIVE_MATCH] GPT ranking failed — using similarity scores")
-                for _, job_row in jobs_to_process:
-                    sim_score = round(
-                        float(getattr(job_row, "similarity", 0.5)) * 100, 1
+                    await create_notification(
+                        db=db,
+                        user_id=str(job_row.provider_id),
+                        type=NotificationType.match,
+                        title=f"✨ Top Candidate for {job_row.title}",
+                        message=f"A new candidate {seeker.first_name} {seeker.last_name} is a {score}% match for your job!",
+                        related_job_id=str(job_row.id),
+                        related_user_id=str(seeker.id),
                     )
-                    if sim_score < MATCH_SCORE_THRESHOLD:
-                        continue
-                    new_match = Match(
-                        seeker_id=seeker.id,
-                        job_id=str(job_row.id),
-                        score=sim_score,
-                        highlights=[],
-                        gaps=[],
-                        fit_reason="Score based on vector similarity (AI re-ranking unavailable)"
-                    )
-                    db.add(new_match)
-                    matches_created += 1
+
+                matches_created += 1
             
             await db.commit()
             
@@ -824,76 +1167,53 @@ async def proactive_match_job_to_candidates(job_id: str) -> None:
             if not candidates_to_process:
                 logger.info(f"[PROACTIVE_MATCH] All candidates already matched for job {job_id}")
                 return
-            
-            # Run GPT batch ranking
-            jd_text = f"Title: {job.title}\nSkills: {', '.join(job.required_skills or [])}\n{job.description}"
-            batch_input = [
-                {"index": i, "candidate_name": f"{r.first_name} {r.last_name}", "resume_text": r.parsed_text or ""}
-                for i, r in candidates_to_process
-            ]
-            rankings = await _batch_rerank_gpt(jd_text, batch_input, mode="resumes")
-            
+
+            rankings_by_idx = await _rank_provider_candidates(job, candidates_to_process)
+
             # Store matches in DB
             matches_created = 0
             from services.notification_service import create_notification
             from models.notification import NotificationType
 
-            if rankings:
-                # GPT succeeded — use real scores
-                for ranking in rankings:
-                    candidate_row = candidates_to_process[ranking["index"]][1]
-                    score = float(ranking.get("score", 70))
-                    
-                    new_match = Match(
-                        seeker_id=str(candidate_row.user_id),
-                        job_id=job.id,
-                        score=score,
-                        highlights=ranking.get("highlights", []),
-                        gaps=ranking.get("gaps", []),
-                        fit_reason=ranking.get("fit_reason", "")
-                    )
-                    db.add(new_match)
-                    await db.flush()
+            for original_idx, candidate_row in candidates_to_process:
+                rank = rankings_by_idx.get(original_idx)
+                if not rank:
+                    continue
+                score = float(rank.get("score", 70))
+                if score < MATCH_SCORE_THRESHOLD:
+                    continue
 
-                    # Notify provider of high matches
-                    if score >= 85:
-                        await create_notification(
-                            db=db,
-                            user_id=job.provider_id,
-                            type=NotificationType.match,
-                            title=f"✨ Top Candidate for {job.title}",
-                            message=f"A new candidate {candidate_row.first_name} {candidate_row.last_name} is a {score}% match for your job!",
-                            related_job_id=str(job.id),
-                            related_user_id=str(new_match.id),
-                        )
-                        # Also notify the seeker about this strong match
-                        await create_notification(
-                            db=db,
-                            user_id=str(candidate_row.user_id),
-                            type=NotificationType.match,
-                            title=f"🔥 Perfect match found: {job.title}",
-                            message=f"You're a {score}% match for {job.title}! Log in to view and apply.",
-                            related_job_id=str(job.id),
-                        )
+                new_match = Match(
+                    seeker_id=str(candidate_row.user_id),
+                    job_id=job.id,
+                    score=score,
+                    highlights=rank.get("highlights", []),
+                    gaps=rank.get("gaps", []),
+                    fit_reason=rank.get("fit_reason", "")
+                )
+                db.add(new_match)
+                await db.flush()
 
-                    matches_created += 1
-            else:
-                # GPT failed — fallback to vector similarity scores
-                logger.warning("[PROACTIVE_MATCH] GPT ranking failed — using similarity scores")
-                for _, candidate_row in candidates_to_process:
-                    sim_score = round(
-                        float(getattr(candidate_row, "similarity", 0.5)) * 100, 1
+                if score >= 85:
+                    await create_notification(
+                        db=db,
+                        user_id=job.provider_id,
+                        type=NotificationType.match,
+                        title=f"✨ Top Candidate for {job.title}",
+                        message=f"A new candidate {candidate_row.first_name} {candidate_row.last_name} is a {score}% match for your job!",
+                        related_job_id=str(job.id),
+                        related_user_id=str(new_match.id),
                     )
-                    new_match = Match(
-                        seeker_id=str(candidate_row.user_id),
-                        job_id=job.id,
-                        score=sim_score,
-                        highlights=[],
-                        gaps=[],
-                        fit_reason="Score based on vector similarity (AI re-ranking unavailable)"
+                    await create_notification(
+                        db=db,
+                        user_id=str(candidate_row.user_id),
+                        type=NotificationType.match,
+                        title=f"🔥 Perfect match found: {job.title}",
+                        message=f"You're a {score}% match for {job.title}! Log in to view and apply.",
+                        related_job_id=str(job.id),
                     )
-                    db.add(new_match)
-                    matches_created += 1
+
+                matches_created += 1
             
             await db.commit()
 
