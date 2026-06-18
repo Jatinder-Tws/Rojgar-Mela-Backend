@@ -1202,7 +1202,7 @@ async def proactive_match_job_to_candidates(job_id: str) -> None:
                         title=f"✨ Top Candidate for {job.title}",
                         message=f"A new candidate {candidate_row.first_name} {candidate_row.last_name} is a {score}% match for your job!",
                         related_job_id=str(job.id),
-                        related_user_id=str(new_match.id),
+                        related_user_id=str(candidate_row.user_id),
                     )
                     await create_notification(
                         db=db,
