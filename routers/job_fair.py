@@ -745,11 +745,10 @@ async def get_job_fair_seekers(
     if not jf:
         raise HTTPException(status_code=404, detail="Job Fair not found")
 
-    # Secure access to student seeker lists:
-    # 1. Super admin can see all
-    # 2. Providers can see seekers if they are registered for this Job Fair
-    # 3. Anyone else is forbidden
-    if not current_user.is_super_admin:
+    is_admin = current_user.is_super_admin or current_user.role == UserRole.superadmin or (
+        hasattr(current_user.role, "value") and current_user.role.value == "superadmin"
+    )
+    if not is_admin:
         if current_user.role == UserRole.provider:
             # Check if provider is registered
             jfc_exists = await db.execute(

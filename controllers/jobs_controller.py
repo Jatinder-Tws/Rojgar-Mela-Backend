@@ -107,24 +107,80 @@ async def create_job(
     return JobOut.model_validate(job)
 
 
-async def list_jobs(user: User, db: AsyncSession) -> List[JobOut]:
+async def list_jobs(
+    user: User,
+    db: AsyncSession,
+    page: Optional[int] = None,
+    page_size: Optional[int] = None,
+    search: Optional[str] = None,
+    job_type: Optional[str] = None,
+    salary_range: Optional[str] = None,
+    industry: Optional[str] = None,
+):
     from models.user import UserRole
+    from models.job import JobType as ModelJobType
+    from sqlalchemy import func, and_, or_
 
     if user.role == UserRole.provider:
-        result = await db.execute(
+        base_query = (
             select(JobPosting)
             .where(JobPosting.provider_id == user.id)
             .order_by(JobPosting.created_at.desc())
         )
     else:
-        result = await db.execute(
+        base_query = (
             select(JobPosting)
             .where(JobPosting.is_active == True)  # noqa
             .order_by(JobPosting.created_at.desc())
-            .limit(100)
         )
-    jobs = result.scalars().all()
-    return [JobOut.model_validate(j) for j in jobs]
+
+    # Apply search and filters
+    filters = []
+    if search:
+        term = f"%{search.strip()}%"
+        filters.append(
+            or_(
+                JobPosting.title.ilike(term),
+                JobPosting.description.ilike(term),
+                JobPosting.location.ilike(term),
+                JobPosting.posted_by_name.ilike(term),
+            )
+        )
+    if job_type and job_type != "all":
+        try:
+            filters.append(JobPosting.job_type == ModelJobType(job_type))
+        except ValueError:
+            pass
+    if salary_range and salary_range != "all":
+        filters.append(JobPosting.salary_range.ilike(f"%{salary_range.strip()}%"))
+    if industry and industry != "all":
+        filters.append(JobPosting.industry == industry.strip())
+
+    if filters:
+        base_query = base_query.where(and_(*filters))
+
+    if page is not None and page_size is not None:
+        count_query = select(func.count(JobPosting.id)).select_from(base_query.subquery())
+        total_result = await db.execute(count_query)
+        total = total_result.scalar_one() or 0
+
+        offset = (page - 1) * page_size
+        query = base_query.offset(offset).limit(page_size)
+        result = await db.execute(query)
+        jobs = result.scalars().all()
+
+        return {
+            "items": [JobOut.model_validate(j) for j in jobs],
+            "total": int(total),
+            "page": page,
+            "page_size": page_size,
+        }
+    else:
+        if user.role != UserRole.provider:
+            base_query = base_query.limit(100)
+        result = await db.execute(base_query)
+        jobs = result.scalars().all()
+        return [JobOut.model_validate(j) for j in jobs]
 
 
 async def get_job(job_id: str, user: User, db: AsyncSession) -> JobOut:

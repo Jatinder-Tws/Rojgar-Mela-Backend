@@ -60,3 +60,47 @@ async def check_candidate_resume_status(
 @router.post("/resume/improve")
 async def improve_resume(request: ResumeImproveRequest, db: AsyncSession = Depends(get_db)):
     return await ctrl_improve_resume(request, db)
+
+
+@router.get("/resume/improve/status/{task_id}")
+async def get_resume_improvement_status(task_id: str):
+    from celery.result import AsyncResult
+    from services.celery_app import celery_app
+    res = AsyncResult(task_id, app=celery_app)
+    state = res.state
+    if state == "SUCCESS":
+        result = res.result or {}
+        raw_score = result.get("score") or 0.0
+        # Normalize score to 0.0 - 10.0 scale
+        if raw_score > 10.0:
+            score_out_of_10 = min(max(raw_score / 10.0, 0.0), 10.0)
+        else:
+            score_out_of_10 = min(max(raw_score, 0.0), 10.0)
+            
+        match_score = int(score_out_of_10 * 10)
+
+        return {
+            "status": "SUCCESS",
+            "result": {
+                "missing_skills": result.get("missing_skills") or [],
+                "improvements": result.get("improvements") or [],
+                "rewritten_bullets": result.get("rewritten_bullets") or [],
+                "ats_keywords": result.get("ats_keywords") or [],
+                "score": score_out_of_10,
+                "futureTechToLearn": result.get("futureTechToLearn") or [],
+                # Legacy compatibility mapping for ResumeOptimizerModal.tsx
+                "match_score": match_score,
+                "suggestions": result.get("improvements") or [],
+                "feedback": result.get("improvements")[0] if result.get("improvements") else "No specific suggestions."
+            }
+        }
+    elif state == "FAILURE":
+        return {
+            "status": "FAILURE",
+            "error": str(res.result)
+        }
+    else:
+        return {
+            "status": state,
+            "result": None
+        }

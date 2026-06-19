@@ -345,14 +345,18 @@ async def check_candidate_resume_status(user_id: str, db: AsyncSession) -> dict:
     return {"has_resume": True, "filename": resume.filename}
 
 
-async def improve_resume(request: ResumeImproveRequest, db: AsyncSession) -> ResumeResponse:
-    tech_list = [t.strip() for t in request.technologies.split(",")]
+async def improve_resume(request: ResumeImproveRequest, db: AsyncSession) -> dict:
     result = await db.execute(select(Resume).where(Resume.user_id == request.user_id).order_by(Resume.created_at.desc()).limit(1))
     resume = result.scalars().first()
     if not resume:
         raise HTTPException(status_code=404, detail="Resume not found")
-    ai_result = await analyze_resume_multi(
-        data={"job_title": request.job_title, "job_description": request.job_description, "technologies": tech_list},
-        resume_text=resume.parsed_json,
+
+    from services.celery_tasks import improve_resume_task
+    task = improve_resume_task.delay(
+        job_title=request.job_title,
+        job_description=request.job_description,
+        technologies=request.technologies,
+        user_id=request.user_id
     )
-    return ai_result
+    return {"task_id": task.id, "status": "PENDING"}
+

@@ -43,6 +43,7 @@ services:
       - DATABASE_URL=postgresql+asyncpg://jobmatch:secret@postgres:5432/jobmatch_db
       - REDIS_URL=redis://redis:6379/0
       - FRONTEND_URL=http://localhost:5173
+      - PYTHONPATH=/app
     env_file:
       - .env
     depends_on:
@@ -62,6 +63,7 @@ services:
     environment:
       - DATABASE_URL=postgresql+asyncpg://jobmatch:secret@postgres:5432/jobmatch_db
       - REDIS_URL=redis://redis:6379/0
+      - PYTHONPATH=/app
     env_file:
       - .env
     depends_on:

@@ -408,3 +408,10 @@ class ResumeImproveRequest(BaseModel):
     job_description: str
     technologies: str
     user_id: str
+
+
+class JobListResponse(BaseModel):
+    items: List[JobOut]
+    total: int
+    page: int
+    page_size: int

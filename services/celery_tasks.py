@@ -180,3 +180,35 @@ def send_inquiry_reply_email(to_email: str, subject: str, message_body: str):
         logger.exception(f"[CELERY] Reply email delivery failed to {to_email}: {exc}")
         raise celery_app.retry(exc=exc)
 
+
+@celery_app.task(name="improve_resume_task", max_retries=3, default_retry_delay=30)
+def improve_resume_task(job_title: str, job_description: str, technologies: str, user_id: str):
+    """Run resume improvement suggestion asynchronously."""
+    from database import AsyncSessionLocal
+    from sqlalchemy import select
+    from models.resume import Resume
+    from services.ai_improvement_suggestion_service import analyze_resume_multi
+
+    async def _improve():
+        async with AsyncSessionLocal() as s:
+            tech_list = [t.strip() for t in technologies.split(",")]
+            result = await s.execute(
+                select(Resume).where(Resume.user_id == user_id).order_by(Resume.created_at.desc()).limit(1)
+            )
+            resume = result.scalars().first()
+            if not resume:
+                raise ValueError("Resume not found")
+
+            ai_result = await analyze_resume_multi(
+                data={"job_title": job_title, "job_description": job_description, "technologies": tech_list},
+                resume_text=resume.parsed_json,
+            )
+            return ai_result
+
+    try:
+        return _run_async(_improve())
+    except Exception as exc:
+        logger.exception(f"[CELERY] Resume improvement failed for user {user_id}: {exc}")
+        raise celery_app.retry(exc=exc)
+
+

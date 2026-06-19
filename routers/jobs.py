@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Union
 from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -7,11 +7,12 @@ from models.user import User
 from schemas.jobs import (
     JobCreate, JobDescriptionOnlyResponse, JobDescriptionRequest,
     JobOut, JobSkillsResponse, JobTitleRequest, JobUpdate,
+    JobListResponse,
 )
 from services.auth_service import require_provider, require_verified
 from controllers.jobs_controller import (
-    create_job as ctrl_create_job,
     list_jobs as ctrl_list_jobs,
+    create_job as ctrl_create_job,
     get_job as ctrl_get_job,
     update_job_patch as ctrl_update_job_patch,
     update_job_put as ctrl_update_job_put,
@@ -31,9 +32,20 @@ async def create_job(body: JobCreate, background_tasks: BackgroundTasks, user: U
     return await ctrl_create_job(body, background_tasks, user, db)
 
 
-@router.get("", response_model=list[JobOut])
-async def list_jobs(user: User = Depends(require_verified), db: AsyncSession = Depends(get_db)):
-    return await ctrl_list_jobs(user, db)
+@router.get("", response_model=Union[JobListResponse, list[JobOut]])
+async def list_jobs(
+    page: Optional[int] = Query(None, ge=1),
+    page_size: Optional[int] = Query(None, ge=1, le=100),
+    search: Optional[str] = Query(None),
+    job_type: Optional[str] = Query(None),
+    salary_range: Optional[str] = Query(None),
+    industry: Optional[str] = Query(None),
+    user: User = Depends(require_verified),
+    db: AsyncSession = Depends(get_db)
+):
+    return await ctrl_list_jobs(
+        user, db, page, page_size, search, job_type, salary_range, industry
+    )
 
 
 @router.get("/stats")

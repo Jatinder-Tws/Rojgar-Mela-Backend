@@ -189,7 +189,7 @@ async def create_interview(
         db=db,
         user_id=body.seeker_id,
         type=NotificationType.match,
-        title="Interview Scheduled:",
+        title="Interview Scheduled",
         message=f"{provider.first_name} has scheduled an interview for '{job.title}'. Open your dashboard to see the date and time in your timezone.",
         related_job_id=body.job_id,
         related_user_id=str(provider.id)

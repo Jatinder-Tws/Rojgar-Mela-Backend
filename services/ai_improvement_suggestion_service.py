@@ -2,6 +2,7 @@ import json
 import asyncio
 from config import settings
 import google.genai as genai
+from schemas.resume import ResumeResponse
 
 
 def get_gemini_client():
@@ -26,19 +27,16 @@ def build_prompt(job_title, job_description, technologies, resume_text):
         RESUME:
         {resume_text}
 
-        Return ONLY valid JSON with:
-        - missing_skills (list)
-        - improvements (list)
-        - rewritten_bullets (list)
-        - ats_keywords (list)
-        - score (0-10)
-        - futureTechToLearn (list)
+        Return ONLY valid JSON matching the schema.
+        Note:
+        1. The 'score' field in the schema MUST be a float between 0.0 and 10.0 (inclusive), representing how well the resume matches the job.
+        2. Provide highly actionable suggestions in 'improvements' that the user can use to update their profile/portfolio and resume to better match the target job requirements.
         """
 
 
 async def analyze_resume_multi(data, resume_text):
 
- 
+
     prompt = build_prompt(
         data["job_title"], data["job_description"], data["technologies"], resume_text
     )
@@ -52,7 +50,10 @@ async def analyze_resume_multi(data, resume_text):
     response =  client.models.generate_content(
         model=settings.GEMINI_CHAT_MODEL,
         contents=[system_instruction, prompt],
-        config={"response_mime_type": "application/json"},
+        config={
+            "response_mime_type": "application/json",
+            "response_schema": ResumeResponse,
+        },
     )
     return json.loads(response.text)
 
