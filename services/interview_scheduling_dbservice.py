@@ -189,7 +189,7 @@ async def create_interview(
         db=db,
         user_id=body.seeker_id,
         type=NotificationType.match,
-        title=f"📅 Interview Scheduled: {body.title}",
+        title="Interview Scheduled:",
         message=f"{provider.first_name} has scheduled an interview for '{job.title}'. Open your dashboard to see the date and time in your timezone.",
         related_job_id=body.job_id,
         related_user_id=str(provider.id)
@@ -266,14 +266,14 @@ async def record_interview_outcome(
         if application:
             if body.outcome == "selected":
                 application.status = ApplicationStatus.selected
-                outcome_title = "Congratulations! You were selected"
+                outcome_title = "Congratulations:"
                 outcome_msg = f"You have been selected after your interview for '{interview.title}'."
                 notif_type = NotificationType.shortlisted
             else:
                 application.status = ApplicationStatus.rejected
                 application.rejection_reason = body.notes or "Not selected after interview"
-                outcome_title = "Interview outcome update"
-                outcome_msg = f"Thank you for interviewing. Unfortunately you were not selected for this role."
+                outcome_title = "Interview Outcome Update:"
+                outcome_msg = f"Thank you for interviewing. Unfortunately you were not selected for '{interview.title}'."
                 notif_type = NotificationType.rejected
 
             await create_notification(

@@ -188,7 +188,7 @@ async def show_interest(candidate_id: str, user: User, db: AsyncSession) -> dict
         db=db,
         user_id=candidate_id,
         type=NotificationType.interest,
-        title="A recruiter is interested in your profile! 👀",
+        title="Profile Interest:",
         message=f"{user.first_name} {user.last_name} from {user.company_name or 'a company'} has shown interest in your profile. Log in to view and connect.",
         related_user_id=user.id,
     )

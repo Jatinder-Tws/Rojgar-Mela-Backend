@@ -1061,16 +1061,16 @@ async def proactive_match_resume_to_jobs(resume_id: str) -> None:
                         db=db,
                         user_id=seeker.id,
                         type=NotificationType.match,
-                        title=f"🔥 Perfect match found: {job_row.title}",
-                        message=f"We found a job that perfectly matches your profile! {job_row.title} with a {score}% match score.",
+                        title="Perfect match found:",
+                        message=f"We found a job that perfectly matches your profile: {job_row.title} with a {score}% match score.",
                         related_job_id=str(job_row.id),
                     )
                     await create_notification(
                         db=db,
                         user_id=str(job_row.provider_id),
                         type=NotificationType.match,
-                        title=f"✨ Top Candidate for {job_row.title}",
-                        message=f"A new candidate {seeker.first_name} {seeker.last_name} is a {score}% match for your job!",
+                        title="Top Candidate:",
+                        message=f"A new candidate {seeker.first_name} {seeker.last_name} is a {score}% match for {job_row.title}.",
                         related_job_id=str(job_row.id),
                         related_user_id=str(seeker.id),
                     )
@@ -1199,8 +1199,8 @@ async def proactive_match_job_to_candidates(job_id: str) -> None:
                         db=db,
                         user_id=job.provider_id,
                         type=NotificationType.match,
-                        title=f"✨ Top Candidate for {job.title}",
-                        message=f"A new candidate {candidate_row.first_name} {candidate_row.last_name} is a {score}% match for your job!",
+                        title="Top Candidate:",
+                        message=f"A new candidate {candidate_row.first_name} {candidate_row.last_name} is a {score}% match for {job.title}.",
                         related_job_id=str(job.id),
                         related_user_id=str(candidate_row.user_id),
                     )
@@ -1208,8 +1208,8 @@ async def proactive_match_job_to_candidates(job_id: str) -> None:
                         db=db,
                         user_id=str(candidate_row.user_id),
                         type=NotificationType.match,
-                        title=f"🔥 Perfect match found: {job.title}",
-                        message=f"You're a {score}% match for {job.title}! Log in to view and apply.",
+                        title="Perfect match found:",
+                        message=f"You're a {score}% match for {job.title}. Log in to view and apply.",
                         related_job_id=str(job.id),
                     )
 

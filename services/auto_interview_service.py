@@ -62,7 +62,7 @@ async def auto_schedule_for_application(
             db=db,
             user_id=str(provider.id),
             type=NotificationType.general,
-            title="Auto-schedule: no availability configured",
+            title="Auto-schedule Failed:",
             message=(
                 f"Could not auto-schedule an interview for '{job.title}'. "
                 "Add availability windows in interview settings."
@@ -79,7 +79,7 @@ async def auto_schedule_for_application(
             db=db,
             user_id=str(provider.id),
             type=NotificationType.general,
-            title="Auto-schedule: no free slots",
+            title="Auto-schedule Failed:",
             message=(
                 f"No interview slot available within the next {settings.lookahead_days} days "
                 f"for '{job.title}'. Extend availability or schedule manually."
@@ -136,7 +136,7 @@ async def auto_schedule_for_application(
         db=db,
         user_id=str(application.seeker_id),
         type=NotificationType.match,
-        title=f"Interview Scheduled: {title}",
+        title="Interview Scheduled:",
         message=(
             f"{provider.first_name or 'The employer'} has scheduled an interview "
             f"for '{job.title}'. Check your dashboard for date and time."
