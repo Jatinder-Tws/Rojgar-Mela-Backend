@@ -57,7 +57,7 @@ class Settings(BaseSettings):
 
     # Files
     UPLOAD_DIR: str = "uploads"
-    MAX_UPLOAD_MB: int = 10
+    MAX_UPLOAD_MB: int = 50
     TESSERACT_CMD: str = ""
 
     # Matching thresholds
