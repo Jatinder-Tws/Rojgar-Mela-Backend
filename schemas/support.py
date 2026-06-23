@@ -22,6 +22,7 @@ class TicketMessageOut(BaseModel):
     author_role: Optional[str] = None
     body: str
     is_staff_reply: bool
+    is_bot_reply: bool = False
     created_at: datetime
 
     class Config:

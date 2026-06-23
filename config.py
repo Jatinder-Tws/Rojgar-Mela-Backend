@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     # GEMINI_CHAT_MODEL: str = "gemini-1.5-flash"
     # GEMINI_CHAT_MODEL: str = "gemini-2.0-flash"
     GEMINI_CHAT_MODEL: str = "gemini-2.5-flash"
+    GEMINI_LIVE_MODEL: str = "gemini-3.1-flash-live-preview"
 
 
     # AI_MODE: "openai" | "gemini" | "mock"

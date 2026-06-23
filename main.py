@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
 from config import settings, get_cors_allow_origins, get_cors_origin_regex
-from database import init_db, patch_email_admin_schema, patch_interview_application_schema, patch_dashboard_indexes, AsyncSessionLocal, engine
+from database import init_db, patch_email_admin_schema, patch_interview_application_schema, patch_dashboard_indexes, patch_support_bot_schema, AsyncSessionLocal, engine
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,7 @@ async def ensure_db_tables():
     await patch_email_admin_schema()
     await patch_interview_application_schema()
     await patch_dashboard_indexes()
+    await patch_support_bot_schema()
 
 # ── Custom Exception Handler for Validation Errors ──────────────────────────
 @app.exception_handler(RequestValidationError)
@@ -64,7 +65,7 @@ app.add_middleware(
 )
 
 # ── Routers ─────────────────────────────────────────────────────────────────
-from routers import auth, users, jobs, resumes, matches, applications, notifications, interviews, assessment, portfolio, analytics, resume_builder, onboarding, master, ai_interview, roadmap, external_candidate, master_data, ai_coach ,interview_scheduling, import_users, superadmin, super_admin, super_admin_support, support, attendance, job_fair, email_admin, dashboard # noqa
+from routers import auth, users, jobs, resumes, matches, applications, notifications, interviews, assessment, portfolio, analytics, resume_builder, onboarding, master, ai_interview, roadmap, external_candidate, master_data, ai_coach ,interview_scheduling, import_users, superadmin, super_admin, super_admin_support, support, help_desk_bot, attendance, job_fair, email_admin, dashboard # noqa
 
 
 API_PREFIX = ""
@@ -92,6 +93,7 @@ routers = [
     super_admin.router,
     super_admin_support.router,
     support.router,
+    help_desk_bot.router,
     job_fair.router,
     email_admin.router,
 ]
@@ -139,6 +141,18 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str, token: str = Qu
         manager.disconnect(user_id, websocket)
     except Exception:
         manager.disconnect(user_id, websocket)
+
+
+@app.websocket("/ws/helpdesk/{user_id}")
+async def helpdesk_bot_websocket(
+    websocket: WebSocket,
+    user_id: str,
+    token: str = Query(...),
+    mode: str = Query("text"),
+):
+    from routers.help_desk_bot import helpdesk_websocket_handler
+
+    await helpdesk_websocket_handler(websocket, user_id, token, mode)
 
 
 @app.get("/health")

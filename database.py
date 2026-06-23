@@ -91,6 +91,23 @@ async def patch_email_admin_schema():
             await conn.execute(text(sql))
 
 
+async def patch_support_bot_schema():
+    """Add help desk bot columns to support tables."""
+    from sqlalchemy import text
+
+    statements = [
+        "ALTER TABLE support_tickets ADD COLUMN IF NOT EXISTS bot_handled BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE support_tickets ADD COLUMN IF NOT EXISTS escalated_at TIMESTAMP",
+        "ALTER TABLE ticket_messages ADD COLUMN IF NOT EXISTS is_bot_reply BOOLEAN NOT NULL DEFAULT FALSE",
+    ]
+    async with engine.begin() as conn:
+        for sql in statements:
+            try:
+                await conn.execute(text(sql))
+            except Exception:
+                pass
+
+
 async def patch_dashboard_indexes():
     """Create indexes for dashboard analytics optimization if they do not exist."""
     from sqlalchemy import text
