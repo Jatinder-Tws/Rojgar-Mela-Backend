@@ -13,8 +13,8 @@ async def save_upload(file: UploadFile, user_id: str) -> tuple[str, str, int]:
     Returns (stored_path, original_filename, size_bytes)
     """
     ext = Path(file.filename or "resume").suffix.lower()
-    if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(status_code=400, detail=f"Unsupported file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}")
+    # Allow any file type to be uploaded
+
 
     # Use absolute path to ensure file is saved correctly
     base_dir = Path(settings.UPLOAD_DIR)

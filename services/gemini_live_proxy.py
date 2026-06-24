@@ -6,6 +6,32 @@ import asyncio
 import logging
 from typing import Awaitable, Callable, Optional
 
+# Monkeypatch websockets to disable client-initiated pings and timeouts.
+# This prevents "sent 1011 (internal error) keepalive ping timeout" when Google's
+# servers do not respond to client WebSocket ping frames.
+try:
+    import websockets.client
+    _orig_client_connect = websockets.client.connect
+    def patched_client_connect(*args, **kwargs):
+        kwargs['ping_interval'] = None
+        kwargs['ping_timeout'] = None
+        return _orig_client_connect(*args, **kwargs)
+    websockets.client.connect = patched_client_connect
+    websockets.connect = patched_client_connect
+except Exception:
+    pass
+
+try:
+    import websockets.asyncio.client
+    _orig_asyncio_connect = websockets.asyncio.client.connect
+    def patched_asyncio_connect(*args, **kwargs):
+        kwargs['ping_interval'] = None
+        kwargs['ping_timeout'] = None
+        return _orig_asyncio_connect(*args, **kwargs)
+    websockets.asyncio.client.connect = patched_asyncio_connect
+except Exception:
+    pass
+
 from google import genai
 from google.genai import types
 
@@ -21,6 +47,8 @@ OnInterrupted = Callable[[], Awaitable[None]]
 OnError = Callable[[str], Awaitable[None]]
 
 _AUDIO_QUEUE_MAX = 48
+_KEEPALIVE_INTERVAL = 10          # seconds between silent-audio pings
+_SILENT_FRAME = b'\x00' * 320    # 10ms of silent PCM16 @ 16kHz (160 samples × 2 bytes)
 
 
 class GeminiLiveProxy:
@@ -37,6 +65,7 @@ class GeminiLiveProxy:
         self._callback_tasks: set[asyncio.Task] = set()
         self._closed = False
         self._connection_lost = False
+        self._keepalive_task: Optional[asyncio.Task] = None
         self.on_audio: Optional[OnAudioChunk] = None
         self.on_transcript: Optional[OnTranscript] = None
         self.on_state: Optional[OnState] = None
@@ -70,6 +99,7 @@ class GeminiLiveProxy:
         await self._connect_session()
         self._receive_task = asyncio.create_task(self._receive_loop())
         self._send_worker_task = asyncio.create_task(self._send_worker())
+        self._keepalive_task = asyncio.create_task(self._keepalive_loop())
         logger.info("Gemini Live session started for role=%s", self.user_role)
 
     async def _connect_session(self) -> None:
@@ -153,6 +183,31 @@ class GeminiLiveProxy:
                 logger.warning("Gemini Live receive ended: %s", exc)
                 await self._handle_connection_lost(exc)
 
+    async def _keepalive_loop(self) -> None:
+        """Send silent audio frames periodically to prevent Gemini's
+        keep-alive ping timeout (1011) when the user is not speaking."""
+        try:
+            while not self._closed and not self._connection_lost:
+                await asyncio.sleep(_KEEPALIVE_INTERVAL)
+                if self._closed or self._connection_lost or not self._session:
+                    break
+                # Only send keep-alive when not actively streaming user audio
+                if self._send_queue.empty():
+                    try:
+                        await self._session.send_realtime_input(
+                            audio=types.Blob(
+                                data=_SILENT_FRAME,
+                                mime_type="audio/pcm;rate=16000",
+                            )
+                        )
+                    except Exception as exc:
+                        if not self._closed:
+                            logger.debug("Keep-alive send failed: %s", exc)
+                            await self._handle_connection_lost(exc)
+                        break
+        except asyncio.CancelledError:
+            pass
+
     async def _send_worker(self) -> None:
         try:
             while not self._closed:
@@ -177,6 +232,8 @@ class GeminiLiveProxy:
             return
         self._connection_lost = True
         logger.warning("Gemini Live connection lost: %s", exc)
+
+        # Cancel the old receive loop before reconnect
         self._session = None
         await self._disconnect_session()
         if self._receive_task and not self._receive_task.done():
@@ -185,6 +242,34 @@ class GeminiLiveProxy:
                 await self._receive_task
             except asyncio.CancelledError:
                 pass
+        if self._keepalive_task and not self._keepalive_task.done():
+            self._keepalive_task.cancel()
+            try:
+                await self._keepalive_task
+            except asyncio.CancelledError:
+                pass
+
+        # Attempt automatic reconnect (up to 2 retries)
+        for attempt in range(1, 3):
+            if self._closed:
+                break
+            logger.info("Gemini Live reconnect attempt %d/2", attempt)
+            try:
+                await asyncio.sleep(1.0 * attempt)
+                await self._connect_session()
+                self._connection_lost = False
+                self._receive_task = asyncio.create_task(self._receive_loop())
+                self._keepalive_task = asyncio.create_task(self._keepalive_loop())
+                logger.info("Gemini Live reconnected successfully on attempt %d", attempt)
+                if self.on_state:
+                    await self._safe_call(self.on_state, "listening")
+                return
+            except Exception as retry_exc:
+                logger.warning("Gemini Live reconnect attempt %d failed: %s", attempt, retry_exc)
+                self._session = None
+                await self._disconnect_session()
+
+        # All retries exhausted
         if self.on_error:
             await self.on_error("Voice session disconnected. Close and reopen the assistant to try again.")
 
@@ -229,7 +314,7 @@ class GeminiLiveProxy:
         except asyncio.QueueFull:
             pass
 
-        for task in (self._send_worker_task, self._receive_task):
+        for task in (self._send_worker_task, self._receive_task, self._keepalive_task):
             if task:
                 task.cancel()
                 try:
