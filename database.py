@@ -39,7 +39,7 @@ async def init_db():
     """Create all tables and enable pgvector extension."""
     async with engine.begin() as conn:
         await conn.execute(__import__("sqlalchemy").text("CREATE EXTENSION IF NOT EXISTS vector"))
-        from models import user, resume, job, match, application, notification, otp, interview, provider_interview_settings, provider_availability_window, assessment, portfolio, master, ai_interview, roadmap, ai_coach, imported_user_password, attendance, job_fair, email_template, email_campaign, support_ticket, platform_feedback, contact_inquiry  # noqa
+        from models import user, resume, job, match, application, notification, otp, interview, provider_interview_settings, provider_availability_window, assessment, portfolio, master, ai_interview, roadmap, ai_coach, imported_user_password, attendance, job_fair, email_template, email_campaign, support_ticket, platform_feedback, contact_inquiry, company_internship, training_course  # noqa
         await conn.run_sync(Base.metadata.create_all)
 
 
@@ -123,6 +123,96 @@ async def patch_dashboard_indexes():
         "CREATE INDEX IF NOT EXISTS idx_job_postings_created_at ON job_postings(created_at)",
         "CREATE INDEX IF NOT EXISTS idx_applications_applied_at ON applications(applied_at)",
         "CREATE INDEX IF NOT EXISTS idx_interviews_scheduled_at ON interviews(scheduled_at)",
+    ]
+    async with engine.begin() as conn:
+        for sql in statements:
+            try:
+                await conn.execute(text(sql))
+            except Exception:
+                pass
+
+
+async def patch_company_internships_schema():
+    """Ensure all columns exist for company internships and training course models."""
+    from sqlalchemy import text
+    statements = [
+        # company_internships columns
+        "ALTER TABLE company_internships ADD COLUMN IF NOT EXISTS provider_id UUID",
+        "ALTER TABLE company_internships ADD COLUMN IF NOT EXISTS title VARCHAR(200)",
+        "ALTER TABLE company_internships ADD COLUMN IF NOT EXISTS description TEXT",
+        "ALTER TABLE company_internships ADD COLUMN IF NOT EXISTS thumbnail_url VARCHAR(500)",
+        "ALTER TABLE company_internships ADD COLUMN IF NOT EXISTS brochure_url VARCHAR(500)",
+        "ALTER TABLE company_internships ADD COLUMN IF NOT EXISTS is_stipend BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE company_internships ADD COLUMN IF NOT EXISTS stipend_amount VARCHAR(100)",
+        "ALTER TABLE company_internships ADD COLUMN IF NOT EXISTS duration INTEGER",
+        "ALTER TABLE company_internships ADD COLUMN IF NOT EXISTS duration_unit VARCHAR(50) NOT NULL DEFAULT 'month'",
+        "ALTER TABLE company_internships ADD COLUMN IF NOT EXISTS state VARCHAR(100)",
+        "ALTER TABLE company_internships ADD COLUMN IF NOT EXISTS city VARCHAR(100)",
+        "ALTER TABLE company_internships ADD COLUMN IF NOT EXISTS address TEXT",
+        "ALTER TABLE company_internships ADD COLUMN IF NOT EXISTS apply_by DATE",
+        "ALTER TABLE company_internships ADD COLUMN IF NOT EXISTS start_date VARCHAR(200)",
+        "ALTER TABLE company_internships ADD COLUMN IF NOT EXISTS company_name VARCHAR(200)",
+        "ALTER TABLE company_internships ADD COLUMN IF NOT EXISTS who_can_apply TEXT",
+        "ALTER TABLE company_internships ADD COLUMN IF NOT EXISTS skills_required JSON",
+        "ALTER TABLE company_internships ADD COLUMN IF NOT EXISTS perks JSON",
+        "ALTER TABLE company_internships ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE",
+        "ALTER TABLE company_internships ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW()",
+        "ALTER TABLE company_internships ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW()",
+
+        # company_internship_applications columns
+        "ALTER TABLE company_internship_applications ADD COLUMN IF NOT EXISTS internship_id VARCHAR(50)",
+        "ALTER TABLE company_internship_applications ADD COLUMN IF NOT EXISTS seeker_id UUID",
+        "ALTER TABLE company_internship_applications ADD COLUMN IF NOT EXISTS why_join TEXT",
+        "ALTER TABLE company_internship_applications ADD COLUMN IF NOT EXISTS career_goals TEXT",
+        "ALTER TABLE company_internship_applications ADD COLUMN IF NOT EXISTS why_consider TEXT",
+        "ALTER TABLE company_internship_applications ADD COLUMN IF NOT EXISTS resume_url VARCHAR(500)",
+        "ALTER TABLE company_internship_applications ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW()",
+        "ALTER TABLE company_internship_applications ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW()",
+
+        # training_courses columns
+        "ALTER TABLE training_courses ADD COLUMN IF NOT EXISTS provider_id UUID",
+        "ALTER TABLE training_courses ADD COLUMN IF NOT EXISTS title VARCHAR(200)",
+        "ALTER TABLE training_courses ADD COLUMN IF NOT EXISTS description TEXT",
+        "ALTER TABLE training_courses ADD COLUMN IF NOT EXISTS thumbnail_url VARCHAR(500)",
+        "ALTER TABLE training_courses ADD COLUMN IF NOT EXISTS brochure_url VARCHAR(500)",
+        "ALTER TABLE training_courses ADD COLUMN IF NOT EXISTS is_paid BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE training_courses ADD COLUMN IF NOT EXISTS price VARCHAR(100)",
+        "ALTER TABLE training_courses ADD COLUMN IF NOT EXISTS duration INTEGER",
+        "ALTER TABLE training_courses ADD COLUMN IF NOT EXISTS duration_unit VARCHAR(50) NOT NULL DEFAULT 'month'",
+        "ALTER TABLE training_courses ADD COLUMN IF NOT EXISTS skills_learned JSON",
+        "ALTER TABLE training_courses ADD COLUMN IF NOT EXISTS has_certificate BOOLEAN NOT NULL DEFAULT TRUE",
+        "ALTER TABLE training_courses ADD COLUMN IF NOT EXISTS company_name VARCHAR(200)",
+        "ALTER TABLE training_courses ADD COLUMN IF NOT EXISTS state VARCHAR(100)",
+        "ALTER TABLE training_courses ADD COLUMN IF NOT EXISTS city VARCHAR(100)",
+        "ALTER TABLE training_courses ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE",
+        "ALTER TABLE training_courses ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW()",
+        "ALTER TABLE training_courses ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW()",
+
+        # training_modules columns
+        "ALTER TABLE training_modules ADD COLUMN IF NOT EXISTS course_id VARCHAR(50)",
+        "ALTER TABLE training_modules ADD COLUMN IF NOT EXISTS title VARCHAR(200)",
+        "ALTER TABLE training_modules ADD COLUMN IF NOT EXISTS description TEXT",
+        "ALTER TABLE training_modules ADD COLUMN IF NOT EXISTS order_index INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE training_modules ADD COLUMN IF NOT EXISTS estimated_hours FLOAT",
+        "ALTER TABLE training_modules ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW()",
+        "ALTER TABLE training_modules ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW()",
+
+        # training_module_topics columns
+        "ALTER TABLE training_module_topics ADD COLUMN IF NOT EXISTS module_id VARCHAR(50)",
+        "ALTER TABLE training_module_topics ADD COLUMN IF NOT EXISTS title VARCHAR(200)",
+        "ALTER TABLE training_module_topics ADD COLUMN IF NOT EXISTS order_index INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE training_module_topics ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW()",
+
+        # training_course_applications columns
+        "ALTER TABLE training_course_applications ADD COLUMN IF NOT EXISTS course_id VARCHAR(50)",
+        "ALTER TABLE training_course_applications ADD COLUMN IF NOT EXISTS seeker_id UUID",
+        "ALTER TABLE training_course_applications ADD COLUMN IF NOT EXISTS first_name VARCHAR(100)",
+        "ALTER TABLE training_course_applications ADD COLUMN IF NOT EXISTS last_name VARCHAR(100)",
+        "ALTER TABLE training_course_applications ADD COLUMN IF NOT EXISTS email VARCHAR(100)",
+        "ALTER TABLE training_course_applications ADD COLUMN IF NOT EXISTS phone VARCHAR(100)",
+        "ALTER TABLE training_course_applications ADD COLUMN IF NOT EXISTS location VARCHAR(200)",
+        "ALTER TABLE training_course_applications ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW()",
+        "ALTER TABLE training_course_applications ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW()"
     ]
     async with engine.begin() as conn:
         for sql in statements:
