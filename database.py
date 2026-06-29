@@ -221,3 +221,20 @@ async def patch_company_internships_schema():
             except Exception:
                 pass
 
+
+async def patch_teacher_role_schema():
+    """Add teacher to userrole enum and apply training table indexes."""
+    from sqlalchemy import text
+    statements = [
+        "ALTER TYPE userrole ADD VALUE IF NOT EXISTS 'teacher'",
+        "CREATE INDEX IF NOT EXISTS idx_tc_status_created ON training_courses(is_active, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_tca_course_status ON training_course_applications(course_id)",
+        "CREATE INDEX IF NOT EXISTS idx_tca_user_status ON training_course_applications(seeker_id)",
+    ]
+    async with engine.begin() as conn:
+        for sql in statements:
+            try:
+                await conn.execute(text(sql))
+            except Exception:
+                pass
+

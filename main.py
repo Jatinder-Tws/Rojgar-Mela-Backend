@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
 from config import settings, get_cors_allow_origins, get_cors_origin_regex
-from database import init_db, patch_email_admin_schema, patch_interview_application_schema, patch_dashboard_indexes, patch_support_bot_schema, patch_company_internships_schema, AsyncSessionLocal, engine
+from database import init_db, patch_email_admin_schema, patch_interview_application_schema, patch_dashboard_indexes, patch_support_bot_schema, patch_company_internships_schema, patch_teacher_role_schema, AsyncSessionLocal, engine
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +27,9 @@ async def ensure_db_tables():
     await patch_dashboard_indexes()
     await patch_support_bot_schema()
     await patch_company_internships_schema()
+    await patch_teacher_role_schema()
+    from controllers.super_admin_controller import ensure_super_admin_user
+    await ensure_super_admin_user()
 
 # ── Custom Exception Handler for Validation Errors ──────────────────────────
 @app.exception_handler(RequestValidationError)

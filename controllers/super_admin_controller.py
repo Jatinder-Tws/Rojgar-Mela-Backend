@@ -642,9 +642,11 @@ async def bulk_import_providers(content: bytes, filename: str) -> BulkImportJobS
 
 
 async def ensure_super_admin_user():
-    """Create default super admin from env if missing."""
+    """Create default super admin from env if missing, and default teacher/student for quick testing."""
     from database import AsyncSessionLocal
+    from models.user import UserRole
     async with AsyncSessionLocal() as db:
+        # 1. Super Admin
         email = settings.SUPER_ADMIN_EMAIL.strip().lower()
         result = await db.execute(select(User).where(User.email == email))
         admin = result.scalar_one_or_none()
@@ -660,4 +662,29 @@ async def ensure_super_admin_user():
             admin.is_verified = True
             if not admin.hashed_password:
                 admin.hashed_password = hash_password(settings.SUPER_ADMIN_PASSWORD)
+
+        # 2. Teacher Vikram Sharma
+        teacher_email = "vikram.sharma@rojgarmela.ai"
+        result = await db.execute(select(User).where(User.email == teacher_email))
+        teacher = result.scalar_one_or_none()
+        if not teacher:
+            teacher = User(
+                first_name="Vikram", last_name="Sharma", email=teacher_email, phone="9876543210",
+                hashed_password=hash_password("Teacher@123"), role=UserRole.teacher,
+                is_verified=True, onboarding_complete=True, is_super_admin=False, totp_enabled=False,
+            )
+            db.add(teacher)
+
+        # 3. Student Amit Singh
+        student_email = "amit.singh@gmail.com"
+        result = await db.execute(select(User).where(User.email == student_email))
+        student = result.scalar_one_or_none()
+        if not student:
+            student = User(
+                first_name="Amit", last_name="Singh", email=student_email, phone="8888888801",
+                hashed_password=hash_password("Student@123"), role=UserRole.seeker,
+                is_verified=True, onboarding_complete=True, is_super_admin=False, totp_enabled=False,
+            )
+            db.add(student)
+
         await db.commit()

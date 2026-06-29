@@ -155,3 +155,21 @@ async def require_seeker_or_provider(user: User = Depends(require_verified)) -> 
     if role_str not in ("seeker", "provider"):
         raise HTTPException(status_code=403, detail="Only job seekers and providers can access support")
     return user
+
+
+async def require_teacher(user: User = Depends(require_verified)) -> User:
+    role_str = user.role.value if hasattr(user.role, "value") else str(user.role)
+    if role_str != "teacher":
+        raise HTTPException(status_code=403, detail="Only teachers can perform this action")
+    return user
+
+
+async def require_teacher_or_super_admin(user: User = Depends(get_current_user)) -> User:
+    if getattr(user, "is_super_admin", False):
+        return user
+    if not user.is_verified:
+        raise HTTPException(status_code=403, detail="Email not verified")
+    role_str = user.role.value if hasattr(user.role, "value") else str(user.role)
+    if role_str not in ("teacher",):
+        raise HTTPException(status_code=403, detail="Only teachers or admins can perform this action")
+    return user

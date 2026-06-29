@@ -51,6 +51,7 @@ class Settings(BaseSettings):
 
     # CORS — set FRONTEND_URL and/or CORS_ORIGINS on the server to match where the SPA is served
     FRONTEND_URL: str = "http://localhost:5173"
+    TRAINING_URL: str = "http://localhost:5000"
     CORS_ORIGINS: str = ""  # comma-separated extra origins, e.g. http://10.0.0.5:8080,https://app.example.com
     # Empty = allow typical LAN/dev hosts (192.168.x.x, 10.x, 172.16–31.x) + any port via regex.
     # Set to "none" to disable regex (only explicit origins). Or set a custom regex string.
@@ -104,7 +105,9 @@ def get_cors_allow_origins() -> list[str]:
         "http://127.0.0.1:3000",
         "http://localhost:4173",
         "http://127.0.0.1:4173",
-        "http://192.168.100.15:5041"
+        "http://192.168.100.15:5041",
+        "http://localhost:5000",
+        "http://127.0.0.1:5000"
     ):
         add(dev)
     return out
