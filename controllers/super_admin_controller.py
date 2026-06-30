@@ -14,7 +14,7 @@ import os
 import uuid as uuid_lib
 
 from fastapi import UploadFile
-from models.application import Application
+from models.application import Application, ApplicationStatus
 from models.assessment import AssessmentResult, AssessmentSession
 from models.interview import Interview
 from models.job import JobPosting
@@ -30,6 +30,11 @@ from schemas.super_admin import (
     DashboardAnalyticsResponse, DetailedPlatformAnalytics, ImportJobStatus, PlatformStatsResponse,
     SuperAdminChangePasswordRequest, SuperAdminLoginRequest, SuperAdminLoginResponse,
     SuperAdminProfileOut, SuperAdminProfileUpdate,
+)
+from schemas.super_admin_detail import (
+    AdminProviderDetailResponse, AdminSeekerDetailResponse,
+    ProviderJobItem, SeekerApplicationItem,
+    ProviderInterviewItem, SeekerInterviewItem,
 )
 from services.auth_service import create_access_token, hash_password, verify_password
 from services.import_job_store import create_job as _create_job, get_job as _get_job
@@ -521,6 +526,120 @@ async def get_seeker(user_id: str, db: AsyncSession) -> AdminUserOut:
     return _user_to_admin_out(user, "seeker", profile_completion_percentage=pct, registered_job_fairs=jf_titles)
 
 
+async def get_seeker_detail(user_id: str, db: AsyncSession) -> AdminSeekerDetailResponse:
+    """Full seeker detail including applications, interviews, and extended personal info."""
+    user = await _get_role_user(db, user_id, UserRole.seeker)
+
+    # Profile completion
+    portfolio = (await db.execute(select(Portfolio).where(Portfolio.user_id == user.id))).scalar_one_or_none()
+    pct = 0
+    if portfolio:
+        pct, _, _ = calculate_completion(portfolio, user)
+
+    # Job fair names
+    jf_titles = await _seeker_job_fair_names(db, user.id)
+
+    # Fetch all applications for this seeker
+    apps_q = (
+        select(Application, JobPosting, User)
+        .join(JobPosting, Application.job_id == JobPosting.id)
+        .join(User, JobPosting.provider_id == User.id)
+        .where(Application.seeker_id == user.id)
+        .order_by(Application.applied_at.desc())
+    )
+    rows = (await db.execute(apps_q)).all()
+
+    app_items = []
+    shortlisted_count = 0
+    interviewing_count = 0
+    selected_count = 0
+    for app, job, provider in rows:
+        status_str = str(app.status.value if hasattr(app.status, "value") else app.status)
+        if status_str == "shortlisted":
+            shortlisted_count += 1
+        elif status_str == "interviewing":
+            interviewing_count += 1
+        elif status_str == "selected":
+            selected_count += 1
+        app_items.append(SeekerApplicationItem(
+            id=str(app.id),
+            job_title=job.title,
+            company_name=provider.company_name,
+            company_location=job.location,
+            industry=job.industry,
+            status=status_str,
+            applied_at=app.applied_at,
+            updated_at=app.updated_at,
+        ))
+
+    # Fetch interviews for this seeker
+    interviews_q = (
+        select(Interview, JobPosting, User)
+        .join(JobPosting, Interview.job_id == JobPosting.id)
+        .join(User, Interview.provider_id == User.id)
+        .where(Interview.seeker_id == user.id)
+        .order_by(Interview.scheduled_at.desc())
+    )
+    interview_rows = (await db.execute(interviews_q)).all()
+    interview_items = [
+        SeekerInterviewItem(
+            id=str(iv.id),
+            title=iv.title,
+            job_title=job.title,
+            provider_name=provider.company_name or _user_display_name(provider, "Provider"),
+            interview_type=iv.interview_type.value if iv.interview_type and hasattr(iv.interview_type, "value") else None,
+            status=str(iv.status.value if hasattr(iv.status, "value") else iv.status),
+            scheduled_at=iv.scheduled_at,
+            meeting_link=iv.meeting_link,
+            location=iv.location,
+            interviewer_name=iv.interviewer_name,
+        )
+        for iv, job, provider in interview_rows
+    ]
+
+    job_type = user.job_type.value if user.job_type and hasattr(user.job_type, "value") else user.job_type
+    company_type = user.company_type.value if user.company_type and hasattr(user.company_type, "value") else user.company_type
+    return AdminSeekerDetailResponse(
+        id=user.id,
+        first_name=user.first_name,
+        last_name=user.last_name,
+        email=user.email,
+        phone=user.phone,
+        profile_pic_url=user.profile_pic_url,
+        has_password=bool(user.hashed_password),
+        is_verified=user.is_verified,
+        onboarding_complete=user.onboarding_complete,
+        is_assessment_done=user.is_assessment_done or False,
+        is_first_login=user.is_first_login,
+        auto_apply_enabled=user.auto_apply_enabled or False,
+        welcome_email_status=user.welcome_email_status,
+        welcome_email_error=user.welcome_email_error,
+        industry=user.industry,
+        job_role=user.job_role,
+        job_type=job_type,
+        salary_range=user.salary_range,
+        experience=user.experience,
+        preferred_locations=user.preferred_locations,
+        profile_completion_percentage=pct,
+        father_or_mother_name=user.father_or_mother_name,
+        gender=user.gender,
+        address=user.address,
+        highest_qualification=user.highest_qualification,
+        stream_specialization=user.stream_specialization,
+        college_institute_name=user.college_institute_name,
+        preferred_job_sector=user.preferred_job_sector,
+        registered_job_fairs=jf_titles,
+        created_at=user.created_at,
+        updated_at=user.updated_at,
+        applications=app_items,
+        total_applications=len(app_items),
+        shortlisted_count=shortlisted_count,
+        interviewing_count=interviewing_count,
+        selected_count=selected_count,
+        interviews=interview_items,
+    )
+
+
 async def update_seeker(user_id: str, body: AdminSeekerUpdate, db: AsyncSession) -> AdminUserOut:
     user = await _get_role_user(db, user_id, UserRole.seeker)
     await _apply_user_update(db, user, body)
@@ -608,6 +727,108 @@ async def get_provider(user_id: str, db: AsyncSession) -> AdminUserOut:
     return _user_to_admin_out(user, "provider")
 
 
+async def get_provider_detail(user_id: str, db: AsyncSession) -> AdminProviderDetailResponse:
+    """Full provider detail including job postings and interviews."""
+    user = await _get_role_user(db, user_id, UserRole.provider)
+
+    # Fetch all job postings for this provider with application counts
+    jobs_q = (
+        select(
+            JobPosting,
+            func.count(Application.id).label("app_count")
+        )
+        .outerjoin(Application, Application.job_id == JobPosting.id)
+        .where(JobPosting.provider_id == user.id)
+        .group_by(JobPosting.id)
+        .order_by(JobPosting.created_at.desc())
+    )
+    rows = (await db.execute(jobs_q)).all()
+
+    job_items = []
+    active_count = 0
+    total_apps_received = 0
+    for job, app_count in rows:
+        if job.is_active:
+            active_count += 1
+        total_apps_received += int(app_count)
+        job_type = job.job_type.value if job.job_type and hasattr(job.job_type, "value") else job.job_type
+        required_skills = job.required_skills if isinstance(job.required_skills, list) else None
+        perks = job.perks if isinstance(job.perks, list) else None
+        job_items.append(ProviderJobItem(
+            id=str(job.id),
+            title=job.title,
+            industry=job.industry,
+            location=job.location,
+            job_type=job_type,
+            salary_range=job.salary_range,
+            experience_required=job.experience_required,
+            description=job.description,
+            required_skills=required_skills,
+            is_active=bool(job.is_active),
+            posted_by_name=job.posted_by_name,
+            employment_type=job.employment_type,
+            shift=job.shift,
+            perks=perks,
+            application_count=int(app_count),
+            created_at=job.created_at,
+            updated_at=job.updated_at,
+        ))
+
+    # Fetch interviews for this provider
+    interviews_q = (
+        select(Interview, JobPosting, User)
+        .join(JobPosting, Interview.job_id == JobPosting.id)
+        .join(User, Interview.seeker_id == User.id)
+        .where(Interview.provider_id == user.id)
+        .order_by(Interview.scheduled_at.desc())
+    )
+    interview_rows = (await db.execute(interviews_q)).all()
+    interview_items = [
+        ProviderInterviewItem(
+            id=str(iv.id),
+            title=iv.title,
+            seeker_name=_user_display_name(seeker),
+            job_title=job.title,
+            interview_type=iv.interview_type.value if iv.interview_type and hasattr(iv.interview_type, "value") else None,
+            status=str(iv.status.value if hasattr(iv.status, "value") else iv.status),
+            scheduled_at=iv.scheduled_at,
+            meeting_link=iv.meeting_link,
+        )
+        for iv, job, seeker in interview_rows
+    ]
+
+    company_type = user.company_type.value if user.company_type and hasattr(user.company_type, "value") else user.company_type
+    return AdminProviderDetailResponse(
+        id=user.id,
+        first_name=user.first_name,
+        last_name=user.last_name,
+        email=user.email,
+        phone=user.phone,
+        profile_pic_url=user.profile_pic_url,
+        has_password=bool(user.hashed_password),
+        is_verified=user.is_verified,
+        onboarding_complete=user.onboarding_complete,
+        is_first_login=user.is_first_login,
+        welcome_email_status=user.welcome_email_status,
+        welcome_email_error=user.welcome_email_error,
+        company_name=user.company_name,
+        company_type=company_type,
+        company_location=user.company_location,
+        company_address=user.company_address,
+        company_size=user.company_size,
+        gender=user.gender,
+        job_roles_offering=user.job_roles_offering,
+        specific_requirements=user.specific_requirements,
+        created_at=user.created_at,
+        updated_at=user.updated_at,
+        job_postings=job_items,
+        total_jobs=len(job_items),
+        active_jobs=active_count,
+        total_applications_received=total_apps_received,
+        interviews=interview_items,
+    )
+
+
 async def update_provider(user_id: str, body: AdminProviderUpdate, db: AsyncSession) -> AdminUserOut:
     user = await _get_role_user(db, user_id, UserRole.provider)
     await _apply_user_update(db, user, body)
@@ -662,29 +883,4 @@ async def ensure_super_admin_user():
             admin.is_verified = True
             if not admin.hashed_password:
                 admin.hashed_password = hash_password(settings.SUPER_ADMIN_PASSWORD)
-
-        # 2. Teacher Vikram Sharma
-        teacher_email = "vikram.sharma@rojgarmela.ai"
-        result = await db.execute(select(User).where(User.email == teacher_email))
-        teacher = result.scalar_one_or_none()
-        if not teacher:
-            teacher = User(
-                first_name="Vikram", last_name="Sharma", email=teacher_email, phone="9876543210",
-                hashed_password=hash_password("Teacher@123"), role=UserRole.teacher,
-                is_verified=True, onboarding_complete=True, is_super_admin=False, totp_enabled=False,
-            )
-            db.add(teacher)
-
-        # 3. Student Amit Singh
-        student_email = "amit.singh@gmail.com"
-        result = await db.execute(select(User).where(User.email == student_email))
-        student = result.scalar_one_or_none()
-        if not student:
-            student = User(
-                first_name="Amit", last_name="Singh", email=student_email, phone="8888888801",
-                hashed_password=hash_password("Student@123"), role=UserRole.seeker,
-                is_verified=True, onboarding_complete=True, is_super_admin=False, totp_enabled=False,
-            )
-            db.add(student)
-
         await db.commit()
