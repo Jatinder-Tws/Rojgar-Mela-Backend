@@ -39,7 +39,7 @@ async def init_db():
     """Create all tables and enable pgvector extension."""
     async with engine.begin() as conn:
         await conn.execute(__import__("sqlalchemy").text("CREATE EXTENSION IF NOT EXISTS vector"))
-        from models import user, resume, job, match, application, notification, otp, interview, provider_interview_settings, provider_availability_window, assessment, portfolio, master, ai_interview, roadmap, ai_coach, imported_user_password, attendance, job_fair, email_template, email_campaign, support_ticket, platform_feedback, contact_inquiry, company_internship, training_course  # noqa
+        from models import user, resume, job, match, application, notification, otp, interview, provider_interview_settings, provider_availability_window, assessment, portfolio, master, ai_interview, roadmap, ai_coach, imported_user_password, attendance, job_fair, email_template, email_campaign, support_ticket, platform_feedback, contact_inquiry, company_internship, training_course, training_portal_course, training_portal_category, training_portal_teacher, training_portal_internship, training_portal_batch, training_portal_enrollment, training_portal_class_session, training_portal_payment, training_portal_candidate_notification, training_portal_transaction, training_portal_refund_request, training_portal_attendance  # noqa
         await conn.run_sync(Base.metadata.create_all)
 
 
@@ -213,6 +213,31 @@ async def patch_company_internships_schema():
         "ALTER TABLE training_course_applications ADD COLUMN IF NOT EXISTS location VARCHAR(200)",
         "ALTER TABLE training_course_applications ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW()",
         "ALTER TABLE training_course_applications ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW()"
+    ]
+    async with engine.begin() as conn:
+        for sql in statements:
+            try:
+                await conn.execute(text(sql))
+            except Exception:
+                pass
+
+
+async def patch_training_portal_schema():
+    """Add key_highlights column to training portal courses."""
+    from sqlalchemy import text
+
+    statements = [
+        "ALTER TABLE training_portal_courses ADD COLUMN IF NOT EXISTS key_highlights JSON NOT NULL DEFAULT '[]'::json",
+        "ALTER TABLE training_portal_class_sessions ADD COLUMN IF NOT EXISTS live_status VARCHAR(20) NOT NULL DEFAULT 'scheduled'",
+        "ALTER TABLE training_portal_class_sessions ADD COLUMN IF NOT EXISTS started_at TIMESTAMP",
+        "ALTER TABLE training_portal_class_sessions ADD COLUMN IF NOT EXISTS ended_at TIMESTAMP",
+        "ALTER TABLE training_portal_class_sessions ADD COLUMN IF NOT EXISTS session_report TEXT",
+        "ALTER TABLE training_portal_class_sessions ADD COLUMN IF NOT EXISTS covered_topic_ids JSON NOT NULL DEFAULT '[]'::json",
+        "ALTER TABLE training_portal_class_sessions ADD COLUMN IF NOT EXISTS reminder_sent BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE training_portal_class_sessions ADD COLUMN IF NOT EXISTS attendance_marked BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE training_portal_teachers ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id) ON DELETE SET NULL",
+        "CREATE INDEX IF NOT EXISTS idx_tpt_user_id ON training_portal_teachers(user_id)",
+        "ALTER TABLE training_portal_enrollments ADD COLUMN IF NOT EXISTS preferred_batch_id VARCHAR(50)",
     ]
     async with engine.begin() as conn:
         for sql in statements:

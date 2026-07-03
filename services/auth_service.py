@@ -173,3 +173,13 @@ async def require_teacher_or_super_admin(user: User = Depends(get_current_user))
     if role_str not in ("teacher",):
         raise HTTPException(status_code=403, detail="Only teachers or admins can perform this action")
     return user
+
+
+async def require_training_portal_user(user: User = Depends(get_current_user)) -> User:
+    """Super admin, teacher, or seeker (candidate) using the training portal."""
+    if getattr(user, "is_super_admin", False):
+        return user
+    role_str = user.role.value if hasattr(user.role, "value") else str(user.role or "")
+    if role_str in ("teacher", "seeker"):
+        return user
+    raise HTTPException(status_code=403, detail="Training portal access required")

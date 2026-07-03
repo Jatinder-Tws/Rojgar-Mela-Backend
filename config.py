@@ -70,6 +70,11 @@ class Settings(BaseSettings):
     SUPER_ADMIN_EMAIL: str = "superadmin@rojgarmela.ai"
     SUPER_ADMIN_PASSWORD: str = "SuperAdmin@123"
 
+    # Razorpay (training portal payments)
+    RAZORPAY_KEY_ID: str = ""
+    RAZORPAY_KEY_SECRET: str = ""
+    RAZORPAY_WEBHOOK_SECRET: str = ""
+
 
 @lru_cache()
 def get_settings() -> Settings:

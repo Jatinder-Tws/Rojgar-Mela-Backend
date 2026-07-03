@@ -161,8 +161,8 @@ def send_inquiry_reply_email(to_email: str, subject: str, message_body: str):
         <html>
         <body style="font-family: sans-serif; line-height: 1.5; color: #333; margin: 0; padding: 20px; background-color: #f8fafc;">
             <div style="max-width: 600px; margin: 0 auto; padding: 30px; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
-                <h2 style="color: #4f46e5; border-bottom: 2px solid #e2e8f0; padding-bottom: 15px; margin-top: 0;">Support Inquiry Response</h2>
-                <div style="font-size: 15px; color: #1e293b; white-space: pre-wrap; line-height: 1.6; margin-top: 20px; margin-bottom: 20px;">
+                <h2 style="color: #4f46e5; border-bottom: 2px solid #e2e8f0; padding-bottom: 13px; margin-top: 0;">Support Inquiry Response</h2>
+                <div style="font-size: 13px; color: #1e293b; white-space: pre-wrap; line-height: 1.6; margin-top: 20px; margin-bottom: 20px;">
 {message_body}
                 </div>
                 <hr style="border: 0; border-top: 1px solid #e2e8f0; margin-top: 30px; margin-bottom: 20px;">
