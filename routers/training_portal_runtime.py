@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, date
 from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
-from sqlalchemy import select, func, update
+from sqlalchemy import select, func, update, or_, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
@@ -20,6 +20,7 @@ from models.training_portal_payment import TrainingPortalPaymentSettings, Traini
 from models.training_portal_transaction import TrainingPortalTransaction
 from models.training_portal_refund_request import TrainingPortalRefundRequest
 from models.training_portal_attendance import TrainingPortalAttendanceRecord
+from models.training_portal_leave_request import TrainingPortalLeaveRequest
 from models.training_portal_course import TrainingPortalCourse
 from models.training_portal_teacher import TrainingPortalTeacher
 from schemas.training_portal_runtime import (
@@ -33,9 +34,16 @@ from schemas.training_portal_runtime import (
     PortalBatchUpdate,
     PortalBatchAssignStudents,
     PortalClassSessionCreate,
+    PortalClassSessionUpdate,
     PortalClassSessionOut,
     PortalClassSessionComplete,
+    PortalClassSessionStart,
     PortalSessionStudentOut,
+    PortalAttendanceRecordOut,
+    PortalLeaveRequestCreate,
+    PortalTeacherLeaveRequestCreate,
+    PortalLeaveRequestReview,
+    PortalLeaveRequestOut,
     PortalNotificationOut,
     PortalPaymentOrderCreate,
     PortalPaymentOrderOut,
@@ -57,6 +65,7 @@ from services.training_portal_mapper import (
     payment_order_to_out,
     transaction_to_out,
     refund_request_to_out,
+    leave_to_out,
 )
 from services.training_portal_payment_service import (
     create_razorpay_order,
@@ -76,6 +85,11 @@ from services.training_portal_class_live import (
     session_occurs_on_date,
     should_send_reminder,
     should_show_start_button,
+    pending_reminder_tier,
+    is_late_start,
+    is_early_end,
+    now_ist,
+    today_ist,
 )
 
 logger = logging.getLogger(__name__)
@@ -89,6 +103,16 @@ REFUND_REQUEST_MIN_DAYS = 14
 
 def _make_transaction_id() -> str:
     return f"TXN-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8].upper()}"
+
+
+def _user_display_name(user: User, fallback: str = "User") -> str:
+    name = f"{user.first_name or ''} {user.last_name or ''}".strip()
+    if name:
+        return name
+    email = (user.email or "").strip()
+    if email:
+        return email.split("@")[0]
+    return fallback
 
 
 async def _batch_student_count(db: AsyncSession, batch_id: str) -> int:
@@ -941,10 +965,18 @@ async def _notify_class_reminder(
     session: TrainingPortalClassSession,
     batch: Optional[TrainingPortalBatch],
     target: date,
+    tier: int = 30,
 ):
-    if session.reminder_sent:
+    if tier == 30:
+        if session.reminder_sent:
+            return
+        session.reminder_sent = True
+    elif tier == 15:
+        if session.reminder_15_sent:
+            return
+        session.reminder_15_sent = True
+    else:
         return
-    session.reminder_sent = True
     session.updated_at = datetime.utcnow()
 
     time_label = f"{session.start_time} – {session.end_time}"
@@ -959,11 +991,11 @@ async def _notify_class_reminder(
                 id=str(uuid.uuid4()),
                 candidate_email=teacher_email.lower(),
                 notification_type="class_reminder",
-                title=f"Class starting soon: {session.title}",
+                title=f"Class in {tier} min: {session.title}",
                 description=f"Your class is scheduled today at {time_label}.",
                 detail=detail,
                 event_date=event_date,
-                severity="warning",
+                severity="warning" if tier == 15 else "info",
             )
         )
 
@@ -980,11 +1012,11 @@ async def _notify_class_reminder(
                     id=str(uuid.uuid4()),
                     candidate_email=enrollment.candidate_email,
                     notification_type="class_reminder",
-                    title=f"Class starting soon: {session.title}",
+                    title=f"Class in {tier} min: {session.title}",
                     description=f"Your batch class is today at {time_label}.",
                     detail=detail,
                     event_date=event_date,
-                    severity="info",
+                    severity="warning" if tier == 15 else "info",
                 )
             )
 
@@ -1019,7 +1051,7 @@ async def _recalculate_batch_progress(db: AsyncSession, batch: TrainingPortalBat
         present_result = await db.execute(
             select(func.count()).select_from(TrainingPortalAttendanceRecord).where(
                 TrainingPortalAttendanceRecord.enrollment_id == enrollment.id,
-                TrainingPortalAttendanceRecord.status.in_(["present", "late"]),
+                TrainingPortalAttendanceRecord.status.in_(["present", "late", "on_leave"]),
             )
         )
         present_count = int(present_result.scalar() or 0)
@@ -1083,14 +1115,65 @@ async def create_class_session(
     return session_to_out(session)
 
 
+@router.put("/class-sessions/{session_id}", response_model=PortalClassSessionOut)
+async def update_class_session(
+    session_id: str,
+    body: PortalClassSessionUpdate,
+    current_user: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(TrainingPortalClassSession).where(TrainingPortalClassSession.id == session_id)
+    )
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="Class session not found")
+
+    batch_id = body.batch_id if body.batch_id is not None else session.batch_id
+    if batch_id:
+        student_count = await _batch_student_count(db, batch_id)
+        if student_count < MIN_BATCH_SCHEDULE_STUDENTS and not body.admin_override:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Batch needs at least {MIN_BATCH_SCHEDULE_STUDENTS} students before scheduling. "
+                    f"Currently {student_count}. Use admin override to schedule anyway."
+                ),
+            )
+
+    updates = body.model_dump(exclude_unset=True, exclude={"admin_override"})
+    for field, value in updates.items():
+        setattr(session, field, value)
+    session.updated_at = datetime.utcnow()
+    await db.flush()
+    return session_to_out(session)
+
+
+@router.delete("/class-sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_class_session(
+    session_id: str,
+    current_user: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(TrainingPortalClassSession).where(TrainingPortalClassSession.id == session_id)
+    )
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="Class session not found")
+    await db.delete(session)
+    await db.flush()
+    return None
+
+
 @router.get("/class-sessions/today", response_model=List[PortalClassSessionOut])
 async def list_todays_class_sessions(
     instructor_name: Optional[str] = Query(None),
     current_user: User = Depends(require_training_portal_user),
     db: AsyncSession = Depends(get_db),
 ):
-    today = date.today()
-    now = datetime.utcnow()
+    today = today_ist()
+    now = now_ist()
     filter_name = (instructor_name or "").strip()
 
     result = await db.execute(
@@ -1106,14 +1189,14 @@ async def list_todays_class_sessions(
             continue
         todays.append(session)
 
-        if should_send_reminder(session, now, today):
+        if tier := pending_reminder_tier(session, now, today):
             batch = None
             if session.batch_id:
                 batch_result = await db.execute(
                     select(TrainingPortalBatch).where(TrainingPortalBatch.id == session.batch_id)
                 )
                 batch = batch_result.scalar_one_or_none()
-            await _notify_class_reminder(db, session, batch, today)
+            await _notify_class_reminder(db, session, batch, today, tier)
 
     await db.flush()
     return [session_to_out(row) for row in todays]
@@ -1122,6 +1205,7 @@ async def list_todays_class_sessions(
 @router.post("/class-sessions/{session_id}/start", response_model=PortalClassSessionOut)
 async def start_class_session(
     session_id: str,
+    body: PortalClassSessionStart = PortalClassSessionStart(),
     current_user: User = Depends(require_training_portal_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1136,15 +1220,25 @@ async def start_class_session(
     if session.live_status == "completed":
         raise HTTPException(status_code=400, detail="Class session already completed")
 
-    today = date.today()
+    today = today_ist()
+    now = now_ist()
     if not session_occurs_on_date(session, today):
         raise HTTPException(status_code=400, detail="This session is not scheduled for today")
-    if not should_show_start_button(session, datetime.utcnow(), today):
+    if not should_show_start_button(session, now, today):
         raise HTTPException(status_code=400, detail="Class cannot be started yet")
 
+    if is_late_start(session, now, today):
+        reason = (body.late_start_reason or "").strip()
+        if len(reason) < 10:
+            raise HTTPException(
+                status_code=400,
+                detail="Late start reason is required when starting after scheduled time (min 10 characters)",
+            )
+        session.late_start_reason = reason
+
     session.live_status = "live"
-    session.started_at = datetime.utcnow()
-    session.updated_at = datetime.utcnow()
+    session.started_at = now
+    session.updated_at = now
     await db.flush()
     return session_to_out(session)
 
@@ -1170,13 +1264,28 @@ async def get_class_session_roster(
             TrainingPortalEnrollment.status != "dropped",
         ).order_by(TrainingPortalEnrollment.candidate_name.asc())
     )
+    enrollments = list(enrollments_result.scalars().all())
+    today_str = today_ist().isoformat()
+    approved_leaves_result = await db.execute(
+        select(TrainingPortalLeaveRequest).where(
+            TrainingPortalLeaveRequest.requester_type == "student",
+            TrainingPortalLeaveRequest.batch_id == session.batch_id,
+            TrainingPortalLeaveRequest.date == today_str,
+            TrainingPortalLeaveRequest.status == "approved",
+        )
+    )
+    approved_emails = {
+        (row.candidate_email or "").lower()
+        for row in approved_leaves_result.scalars().all()
+    }
     return [
         PortalSessionStudentOut(
             enrollment_id=e.id,
             candidate_name=e.candidate_name,
             candidate_email=e.candidate_email,
+            approved_leave=e.candidate_email.lower() in approved_emails,
         )
-        for e in enrollments_result.scalars().all()
+        for e in enrollments
     ]
 
 
@@ -1197,6 +1306,17 @@ async def complete_class_session(
         raise HTTPException(status_code=400, detail="Class must be started before completing")
     if not body.attendance:
         raise HTTPException(status_code=400, detail="Attendance records are required")
+
+    today = today_ist()
+    now = now_ist()
+    if is_early_end(session, now, today):
+        reason = (body.early_end_reason or "").strip()
+        if len(reason) < 10:
+            raise HTTPException(
+                status_code=400,
+                detail="Early end reason is required when ending before scheduled time (min 10 characters)",
+            )
+        session.early_end_reason = reason
 
     batch = None
     if session.batch_id:
@@ -1257,6 +1377,294 @@ async def complete_class_session(
 
     await db.flush()
     return session_to_out(session)
+
+
+# ── Attendance records ────────────────────────────────────────────────────────
+
+@router.get("/attendance-records", response_model=List[PortalAttendanceRecordOut])
+async def list_attendance_records(
+    batch_id: Optional[str] = Query(None),
+    candidate_email: Optional[str] = Query(None),
+    class_session_id: Optional[str] = Query(None),
+    current_user: User = Depends(require_training_portal_user),
+    db: AsyncSession = Depends(get_db),
+):
+    query = (
+        select(TrainingPortalAttendanceRecord, TrainingPortalClassSession)
+        .join(
+            TrainingPortalClassSession,
+            TrainingPortalAttendanceRecord.class_session_id == TrainingPortalClassSession.id,
+        )
+        .order_by(TrainingPortalAttendanceRecord.marked_at.desc())
+    )
+    is_admin = getattr(current_user, "is_super_admin", False)
+    user_email = (current_user.email or "").lower()
+
+    if class_session_id:
+        query = query.where(TrainingPortalAttendanceRecord.class_session_id == class_session_id)
+    if batch_id:
+        query = query.where(TrainingPortalAttendanceRecord.batch_id == batch_id)
+    if candidate_email:
+        query = query.where(
+            TrainingPortalAttendanceRecord.candidate_email == candidate_email.strip().lower()
+        )
+    elif not is_admin:
+        query = query.where(TrainingPortalAttendanceRecord.candidate_email == user_email)
+
+    result = await db.execute(query)
+    rows = result.all()
+    return [
+        PortalAttendanceRecordOut(
+            id=record.id,
+            class_session_id=record.class_session_id,
+            enrollment_id=record.enrollment_id,
+            batch_id=record.batch_id,
+            candidate_email=record.candidate_email,
+            candidate_name=record.candidate_name,
+            status=record.status,
+            marked_at=record.marked_at,
+            session_title=session.title,
+            session_date=session.date,
+            session_start_time=session.start_time,
+            session_end_time=session.end_time,
+            session_report=session.session_report,
+            covered_topic_ids=session.covered_topic_ids or [],
+            late_start_reason=session.late_start_reason,
+            early_end_reason=session.early_end_reason,
+            instructor_name=session.instructor_name,
+        )
+        for record, session in rows
+    ]
+
+
+# ── Leave requests ────────────────────────────────────────────────────────────
+
+def _leave_status_label(status: str) -> str:
+    return status.strip().lower()
+
+
+async def _notify_leave_status(
+    db: AsyncSession,
+    leave: TrainingPortalLeaveRequest,
+    status: str,
+):
+    email = (leave.candidate_email or leave.teacher_email or "").lower()
+    if not email:
+        return
+    label = "approved" if status == "approved" else "rejected"
+    db.add(
+        TrainingPortalCandidateNotification(
+            id=str(uuid.uuid4()),
+            candidate_email=email,
+            notification_type="leave_status",
+            title=f"Leave request {label}",
+            description=f"Your leave for {leave.date} has been {label}.",
+            detail=leave.review_note or leave.reason,
+            event_date=leave.date,
+            severity="success" if status == "approved" else "danger",
+        )
+    )
+
+
+@router.get("/leave-requests", response_model=List[PortalLeaveRequestOut])
+async def list_leave_requests(
+    batch_id: Optional[str] = Query(None),
+    requester_type: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    candidate_email: Optional[str] = Query(None),
+    current_user: User = Depends(require_training_portal_user),
+    db: AsyncSession = Depends(get_db),
+):
+    query = select(TrainingPortalLeaveRequest).order_by(TrainingPortalLeaveRequest.created_at.desc())
+    is_admin = getattr(current_user, "is_super_admin", False)
+    user_email = (current_user.email or "").lower()
+    user_role = getattr(current_user, "role", None)
+
+    if batch_id:
+        query = query.where(TrainingPortalLeaveRequest.batch_id == batch_id)
+    if requester_type:
+        query = query.where(TrainingPortalLeaveRequest.requester_type == requester_type.strip().lower())
+    if status:
+        query = query.where(TrainingPortalLeaveRequest.status == _leave_status_label(status))
+
+    if is_admin:
+        if candidate_email:
+            query = query.where(
+                TrainingPortalLeaveRequest.candidate_email == candidate_email.strip().lower()
+            )
+    elif user_role == "teacher":
+        teacher_result = await db.execute(
+            select(TrainingPortalTeacher).where(
+                func.lower(TrainingPortalTeacher.email) == user_email
+            )
+        )
+        teacher = teacher_result.scalar_one_or_none()
+        teacher_name = teacher.name if teacher else _user_display_name(current_user, "Teacher")
+        batch_result = await db.execute(
+            select(TrainingPortalBatch.id).where(
+                func.lower(TrainingPortalBatch.instructor_name) == teacher_name.strip().lower()
+            )
+        )
+        teacher_batch_ids = [row[0] for row in batch_result.all()]
+        query = query.where(
+            (TrainingPortalLeaveRequest.batch_id.in_(teacher_batch_ids))
+            | (TrainingPortalLeaveRequest.teacher_email == user_email)
+        )
+    else:
+        enrollments_result = await db.execute(
+            select(TrainingPortalEnrollment.batch_id).where(
+                func.lower(TrainingPortalEnrollment.candidate_email) == user_email,
+                TrainingPortalEnrollment.status != "dropped",
+                TrainingPortalEnrollment.batch_id.isnot(None),
+            )
+        )
+        enrolled_batch_ids = [row[0] for row in enrollments_result.all() if row[0]]
+        instructor_names: set[str] = set()
+        if enrolled_batch_ids:
+            batch_rows = await db.execute(
+                select(TrainingPortalBatch.instructor_name).where(
+                    TrainingPortalBatch.id.in_(enrolled_batch_ids)
+                )
+            )
+            instructor_names = {
+                (row[0] or "").strip().lower()
+                for row in batch_rows.all()
+                if row[0]
+            }
+
+        student_own = TrainingPortalLeaveRequest.candidate_email == user_email
+        if instructor_names:
+            teacher_approved = and_(
+                TrainingPortalLeaveRequest.requester_type == "teacher",
+                TrainingPortalLeaveRequest.status == "approved",
+                func.lower(TrainingPortalLeaveRequest.teacher_name).in_(instructor_names),
+            )
+            query = query.where(or_(student_own, teacher_approved))
+        else:
+            query = query.where(student_own)
+
+    result = await db.execute(query)
+    return [leave_to_out(row) for row in result.scalars().all()]
+
+
+@router.post("/leave-requests", response_model=PortalLeaveRequestOut, status_code=status.HTTP_201_CREATED)
+async def create_student_leave_request(
+    body: PortalLeaveRequestCreate,
+    current_user: User = Depends(require_training_portal_user),
+    db: AsyncSession = Depends(get_db),
+):
+    reason = body.reason.strip()
+    if len(reason) < 10:
+        raise HTTPException(status_code=400, detail="Leave reason must be at least 10 characters")
+
+    leave = TrainingPortalLeaveRequest(
+        id=str(uuid.uuid4()),
+        requester_type="student",
+        candidate_email=(current_user.email or "").lower(),
+        candidate_name=_user_display_name(current_user, "Student"),
+        session_id=body.session_id,
+        date=body.date,
+        batch_id=body.batch_id,
+        batch_name=body.batch_name,
+        reason=reason,
+        status="pending",
+    )
+    db.add(leave)
+    await db.flush()
+    return leave_to_out(leave)
+
+
+@router.post("/leave-requests/teacher", response_model=PortalLeaveRequestOut, status_code=status.HTTP_201_CREATED)
+async def create_teacher_leave_request(
+    body: PortalTeacherLeaveRequestCreate,
+    current_user: User = Depends(require_training_portal_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if getattr(current_user, "role", None) != "teacher" and not getattr(current_user, "is_super_admin", False):
+        raise HTTPException(status_code=403, detail="Only teachers can submit teacher leave requests")
+
+    reason = body.reason.strip()
+    if len(reason) < 10:
+        raise HTTPException(status_code=400, detail="Leave reason must be at least 10 characters")
+
+    teacher_result = await db.execute(
+        select(TrainingPortalTeacher).where(
+            func.lower(TrainingPortalTeacher.email) == (current_user.email or "").lower()
+        )
+    )
+    teacher = teacher_result.scalar_one_or_none()
+    teacher_name = teacher.name if teacher else _user_display_name(current_user, "Teacher")
+
+    leave = TrainingPortalLeaveRequest(
+        id=str(uuid.uuid4()),
+        requester_type="teacher",
+        teacher_email=(current_user.email or "").lower(),
+        teacher_name=teacher_name,
+        date=body.date,
+        batch_id=body.batch_id,
+        batch_name=body.batch_name,
+        reason=reason,
+        status="pending",
+    )
+    db.add(leave)
+    await db.flush()
+    return leave_to_out(leave)
+
+
+@router.patch("/leave-requests/{leave_id}/review", response_model=PortalLeaveRequestOut)
+async def review_leave_request(
+    leave_id: str,
+    body: PortalLeaveRequestReview,
+    current_user: User = Depends(require_training_portal_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(TrainingPortalLeaveRequest).where(TrainingPortalLeaveRequest.id == leave_id)
+    )
+    leave = result.scalar_one_or_none()
+    if not leave:
+        raise HTTPException(status_code=404, detail="Leave request not found")
+    if leave.status != "pending":
+        raise HTTPException(status_code=400, detail="Leave request already reviewed")
+
+    is_admin = getattr(current_user, "is_super_admin", False)
+    user_role = getattr(current_user, "role", None)
+    new_status = _leave_status_label(body.status)
+
+    if leave.requester_type == "teacher":
+        if not is_admin:
+            raise HTTPException(status_code=403, detail="Only admin can review teacher leave requests")
+        reviewer_role = "admin"
+    else:
+        if is_admin:
+            reviewer_role = "admin"
+        elif user_role == "teacher":
+            if leave.batch_id:
+                batch_result = await db.execute(
+                    select(TrainingPortalBatch).where(TrainingPortalBatch.id == leave.batch_id)
+                )
+                batch = batch_result.scalar_one_or_none()
+                teacher_result = await db.execute(
+                    select(TrainingPortalTeacher).where(
+                        func.lower(TrainingPortalTeacher.email) == (current_user.email or "").lower()
+                    )
+                )
+                teacher = teacher_result.scalar_one_or_none()
+                teacher_name = teacher.name if teacher else _user_display_name(current_user, "Teacher")
+                if not batch or batch.instructor_name.strip().lower() != teacher_name.strip().lower():
+                    raise HTTPException(status_code=403, detail="Not authorized to review this leave")
+            reviewer_role = "teacher"
+        else:
+            raise HTTPException(status_code=403, detail="Not authorized to review leave requests")
+
+    leave.status = new_status
+    leave.reviewed_by_id = current_user.id
+    leave.reviewed_by_role = reviewer_role
+    leave.review_note = (body.review_note or "").strip() or None
+    leave.updated_at = datetime.utcnow()
+    await _notify_leave_status(db, leave, new_status)
+    await db.flush()
+    return leave_to_out(leave)
 
 
 # ── Notifications ─────────────────────────────────────────────────────────────

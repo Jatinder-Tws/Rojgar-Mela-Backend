@@ -179,6 +179,23 @@ class PortalClassSessionCreate(BaseModel):
     admin_override: bool = False
 
 
+class PortalClassSessionUpdate(BaseModel):
+    batch_id: Optional[str] = None
+    item_id: Optional[str] = None
+    title: Optional[str] = None
+    instructor_name: Optional[str] = None
+    date: Optional[str] = None
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    days: Optional[list[str]] = None
+    venue: Optional[str] = None
+    note: Optional[str] = None
+    schedule_type: Optional[Literal["one_time", "recurring"]] = None
+    postponed: Optional[bool] = None
+    teacher_unavailable: Optional[bool] = None
+    admin_override: bool = False
+
+
 class PortalClassSessionOut(BaseModel):
     id: str
     batch_id: Optional[str] = None
@@ -200,6 +217,9 @@ class PortalClassSessionOut(BaseModel):
     session_report: Optional[str] = None
     covered_topic_ids: list[str] = Field(default_factory=list)
     reminder_sent: bool = False
+    reminder_15_sent: bool = False
+    late_start_reason: Optional[str] = None
+    early_end_reason: Optional[str] = None
     attendance_marked: bool = False
     created_at: datetime
     updated_at: datetime
@@ -209,17 +229,84 @@ class PortalSessionStudentOut(BaseModel):
     enrollment_id: str
     candidate_name: str
     candidate_email: str
+    approved_leave: bool = False
+
+
+class PortalClassSessionStart(BaseModel):
+    late_start_reason: Optional[str] = None
 
 
 class PortalAttendanceEntry(BaseModel):
     enrollment_id: str
-    status: Literal["present", "absent", "late"]
+    status: Literal["present", "absent", "late", "on_leave"]
 
 
 class PortalClassSessionComplete(BaseModel):
     attendance: list[PortalAttendanceEntry]
     session_report: Optional[str] = None
     covered_topic_ids: list[str] = Field(default_factory=list)
+    early_end_reason: Optional[str] = None
+
+
+class PortalAttendanceRecordOut(BaseModel):
+    id: str
+    class_session_id: str
+    enrollment_id: str
+    batch_id: Optional[str] = None
+    candidate_email: str
+    candidate_name: str
+    status: str
+    marked_at: datetime
+    session_title: Optional[str] = None
+    session_date: Optional[str] = None
+    session_start_time: Optional[str] = None
+    session_end_time: Optional[str] = None
+    session_report: Optional[str] = None
+    covered_topic_ids: list[str] = Field(default_factory=list)
+    late_start_reason: Optional[str] = None
+    early_end_reason: Optional[str] = None
+    instructor_name: Optional[str] = None
+
+
+# ── Leave requests ────────────────────────────────────────────────────────────
+
+class PortalLeaveRequestCreate(BaseModel):
+    session_id: Optional[str] = None
+    date: str
+    batch_id: Optional[str] = None
+    batch_name: Optional[str] = None
+    reason: str
+
+
+class PortalTeacherLeaveRequestCreate(BaseModel):
+    date: str
+    batch_id: Optional[str] = None
+    batch_name: Optional[str] = None
+    reason: str
+
+
+class PortalLeaveRequestReview(BaseModel):
+    status: Literal["approved", "rejected"]
+    review_note: Optional[str] = None
+
+
+class PortalLeaveRequestOut(BaseModel):
+    id: str
+    requester_type: str
+    candidate_email: Optional[str] = None
+    candidate_name: Optional[str] = None
+    teacher_email: Optional[str] = None
+    teacher_name: Optional[str] = None
+    session_id: Optional[str] = None
+    date: str
+    batch_id: Optional[str] = None
+    batch_name: Optional[str] = None
+    reason: str
+    status: str
+    reviewed_by_role: Optional[str] = None
+    review_note: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
 
 
 # ── Notifications ─────────────────────────────────────────────────────────────

@@ -7,6 +7,7 @@ from models.training_portal_candidate_notification import TrainingPortalCandidat
 from models.training_portal_payment import TrainingPortalPaymentSettings, TrainingPortalPaymentOrder
 from models.training_portal_transaction import TrainingPortalTransaction
 from models.training_portal_refund_request import TrainingPortalRefundRequest
+from models.training_portal_leave_request import TrainingPortalLeaveRequest
 from schemas.training_portal_runtime import (
     PortalEnrollmentOut,
     PortalBatchOut,
@@ -16,6 +17,7 @@ from schemas.training_portal_runtime import (
     PortalPaymentOrderOut,
     PortalTransactionOut,
     PortalRefundRequestOut,
+    PortalLeaveRequestOut,
 )
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -109,6 +111,9 @@ def session_to_out(row: TrainingPortalClassSession) -> PortalClassSessionOut:
         session_report=getattr(row, "session_report", None),
         covered_topic_ids=getattr(row, "covered_topic_ids", None) or [],
         reminder_sent=bool(getattr(row, "reminder_sent", False)),
+        reminder_15_sent=bool(getattr(row, "reminder_15_sent", False)),
+        late_start_reason=getattr(row, "late_start_reason", None),
+        early_end_reason=getattr(row, "early_end_reason", None),
         attendance_marked=bool(getattr(row, "attendance_marked", False)),
         created_at=row.created_at,
         updated_at=row.updated_at,
@@ -192,4 +197,25 @@ def refund_request_to_out(row: TrainingPortalRefundRequest) -> PortalRefundReque
         requested_at=row.requested_at,
         resolved_at=row.resolved_at,
         created_at=row.created_at,
+    )
+
+
+def leave_to_out(row: TrainingPortalLeaveRequest) -> PortalLeaveRequestOut:
+    return PortalLeaveRequestOut(
+        id=row.id,
+        requester_type=row.requester_type,
+        candidate_email=row.candidate_email,
+        candidate_name=row.candidate_name,
+        teacher_email=row.teacher_email,
+        teacher_name=row.teacher_name,
+        session_id=row.session_id,
+        date=row.date,
+        batch_id=row.batch_id,
+        batch_name=row.batch_name,
+        reason=row.reason,
+        status=row.status,
+        reviewed_by_role=row.reviewed_by_role,
+        review_note=row.review_note,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
     )

@@ -38,6 +38,7 @@ from models.training_portal_candidate_notification import TrainingPortalCandidat
 from models.training_portal_transaction import TrainingPortalTransaction
 from models.training_portal_refund_request import TrainingPortalRefundRequest
 from models.training_portal_attendance import TrainingPortalAttendanceRecord
+from models.training_portal_leave_request import TrainingPortalLeaveRequest
 
 __all__ = [
     "User", "UserRole", "JobType", "CompanyType", "ExternalCandidate", "ExternalCandidateMatch",
@@ -78,5 +79,6 @@ __all__ = [
     "TrainingPortalTransaction",
     "TrainingPortalRefundRequest",
     "TrainingPortalAttendanceRecord",
+    "TrainingPortalLeaveRequest",
 ]
 
