@@ -174,16 +174,16 @@ def _generate_html_resume(resume_text: str, polished_text: str, template: str, u
   .header {{ text-align:center; margin-bottom:30px; padding-bottom:20px; border-bottom:3px solid #2563eb; }}
   .header h1 {{ font-size:28px; color:#1e293b; letter-spacing:-0.5px; }}
   .header .subtitle {{ color:#2563eb; font-size:14px; font-weight:500; margin-top:4px; }}
-  .header .contact {{ color:#64748b; font-size:11px; margin-top:8px; }}
+  .header .contact {{ color:#64748b; font-size:13px; margin-top:8px; }}
   .header .contact a {{ color:#2563eb; text-decoration:none; }}
   .section {{ margin-bottom:22px; }}
   .section h2 {{ font-size:13px; color:#2563eb; border-bottom:2px solid #2563eb; padding-bottom:4px; margin-bottom:12px; text-transform:uppercase; letter-spacing:2px; font-weight:700; }}
   .section p {{ font-size:12px; color:#374151; }}
   .skills {{ display:flex; flex-wrap:wrap; gap:6px; }}
-  .skill-tag {{ background:linear-gradient(135deg,#eff6ff,#dbeafe); color:#1d4ed8; padding:4px 10px; border-radius:6px; font-size:11px; font-weight:600; border:1px solid #bfdbfe; }}
+  .skill-tag {{ background:linear-gradient(135deg,#eff6ff,#dbeafe); color:#1d4ed8; padding:4px 10px; border-radius:6px; font-size:13px; font-weight:600; border:1px solid #bfdbfe; }}
   .exp-item {{ margin-bottom:14px; padding-left:14px; border-left:3px solid #dbeafe; }}
   .exp-item h3 {{ font-size:14px; font-weight:700; color:#111827; }}
-  .exp-item .meta {{ color:#2563eb; font-size:11px; font-weight:500; }}
+  .exp-item .meta {{ color:#2563eb; font-size:13px; font-weight:500; }}
   .exp-item .desc {{ font-size:12px; color:#4b5563; margin-top:4px; }}
   ul {{ list-style:none; padding:0; }} li {{ font-size:12px; margin-bottom:3px; padding-left:12px; position:relative; }}
   li::before {{ content:'\\2022'; position:absolute; left:0; color:#2563eb; }}
@@ -207,7 +207,7 @@ def _generate_html_resume(resume_text: str, polished_text: str, template: str, u
   .header {{ text-align:center; margin-bottom:20px; padding-bottom:14px; border-top:3px double #333; border-bottom:3px double #333; }}
   .header h1 {{ font-size:26px; color:#1a1a2e; letter-spacing:3px; text-transform:uppercase; font-weight:normal; }}
   .header .subtitle {{ font-style:italic; color:#555; font-size:13px; margin-top:4px; }}
-  .header .contact {{ color:#666; font-size:11px; margin-top:8px; letter-spacing:0.5px; }}
+  .header .contact {{ color:#666; font-size:13px; margin-top:8px; letter-spacing:0.5px; }}
   .header .contact a {{ color:#1a1a2e; }}
   .section {{ margin-bottom:18px; }}
   .section h2 {{ font-size:14px; color:#1a1a2e; border-bottom:1px solid #999; padding-bottom:3px; margin-bottom:10px; text-transform:uppercase; letter-spacing:2px; font-weight:normal; font-variant:small-caps; font-size:16px; }}
@@ -215,7 +215,7 @@ def _generate_html_resume(resume_text: str, polished_text: str, template: str, u
   .skills-list {{ font-size:12px; color:#333; font-style:italic; }}
   .exp-item {{ margin-bottom:12px; }}
   .exp-item h3 {{ font-size:13px; font-weight:bold; color:#1a1a2e; }}
-  .exp-item .meta {{ color:#555; font-size:11px; font-style:italic; }}
+  .exp-item .meta {{ color:#555; font-size:13px; font-style:italic; }}
   .exp-item .desc {{ font-size:12px; color:#444; margin-top:3px; text-align:justify; }}
   ul {{ list-style:none; padding:0; }} li {{ font-size:12px; margin-bottom:3px; padding-left:14px; position:relative; }}
   li::before {{ content:'—'; position:absolute; left:0; color:#999; }}
@@ -249,7 +249,7 @@ def _generate_html_resume(resume_text: str, polished_text: str, template: str, u
   .skills-min {{ font-size:12px; color:#333; font-weight:300; }}
   .exp-item {{ margin-bottom:14px; }}
   .exp-item h3 {{ font-size:13px; font-weight:500; color:#111; }}
-  .exp-item .meta {{ color:#888; font-size:11px; font-weight:300; }}
+  .exp-item .meta {{ color:#888; font-size:13px; font-weight:300; }}
   .exp-item .desc {{ font-size:12px; color:#555; font-weight:300; margin-top:3px; }}
   ul {{ list-style:none; padding:0; }} li {{ font-size:12px; margin-bottom:3px; color:#555; font-weight:300; }}
 </style></head><body><div class="resume">
@@ -284,7 +284,7 @@ def _generate_html_resume(resume_text: str, polished_text: str, template: str, u
   .sidebar {{ width:260px; background:linear-gradient(180deg,#312e81,#4338ca); color:#fff; padding:35px 22px; flex-shrink:0; }}
   .sidebar h1 {{ font-size:22px; font-weight:700; margin-bottom:4px; }}
   .sidebar .subtitle {{ font-size:12px; opacity:0.8; margin-bottom:25px; font-weight:300; }}
-  .sidebar-section {{ margin-bottom:20px; font-size:11px; line-height:1.8; }}
+  .sidebar-section {{ margin-bottom:20px; font-size:13px; line-height:1.8; }}
   .sidebar-section strong {{ font-size:10px; text-transform:uppercase; letter-spacing:2px; display:block; margin-bottom:6px; opacity:0.7; }}
   .sidebar a {{ color:#c7d2fe; text-decoration:none; }}
   .main {{ flex:1; padding:35px 30px; }}
@@ -293,7 +293,7 @@ def _generate_html_resume(resume_text: str, polished_text: str, template: str, u
   .section p {{ font-size:12px; color:#444; }}
   .exp-item {{ margin-bottom:14px; }}
   .exp-item h3 {{ font-size:13px; font-weight:600; color:#1e1b4b; }}
-  .exp-item .meta {{ color:#6366f1; font-size:11px; font-weight:500; }}
+  .exp-item .meta {{ color:#6366f1; font-size:13px; font-weight:500; }}
   .exp-item .desc {{ font-size:12px; color:#555; margin-top:3px; }}
   ul {{ list-style:none; padding:0; }} li {{ font-size:12px; margin-bottom:3px; padding-left:12px; position:relative; }}
   li::before {{ content:'▸'; position:absolute; left:0; color:#6366f1; }}
@@ -318,17 +318,17 @@ def _generate_html_resume(resume_text: str, polished_text: str, template: str, u
   .header {{ background:#1a1a2e; color:#fff; padding:35px 40px; text-align:center; }}
   .header h1 {{ font-family:'Playfair Display',serif; font-size:30px; font-weight:700; letter-spacing:2px; }}
   .header .subtitle {{ color:#d4a855; font-size:13px; font-weight:300; margin-top:4px; letter-spacing:1px; }}
-  .header .contact {{ color:rgba(255,255,255,0.6); font-size:11px; margin-top:10px; }}
+  .header .contact {{ color:rgba(255,255,255,0.6); font-size:13px; margin-top:10px; }}
   .header .contact a {{ color:#d4a855; text-decoration:none; }}
   .gold-bar {{ height:4px; background:linear-gradient(90deg,#d4a855,#f0d78c,#d4a855); }}
   .content {{ padding:30px 40px; }}
   .section {{ margin-bottom:22px; }}
   .section h2 {{ font-family:'Playfair Display',serif; font-size:16px; color:#1a1a2e; border-bottom:2px solid #d4a855; padding-bottom:4px; margin-bottom:12px; letter-spacing:1px; }}
   .section p {{ font-size:12px; color:#444; }}
-  .skill-tag {{ display:inline-block; background:#fef3c7; color:#92400e; padding:3px 10px; border-radius:4px; font-size:11px; font-weight:600; margin-right:4px; margin-bottom:4px; }}
+  .skill-tag {{ display:inline-block; background:#fef3c7; color:#92400e; padding:3px 10px; border-radius:4px; font-size:13px; font-weight:600; margin-right:4px; margin-bottom:4px; }}
   .exp-item {{ margin-bottom:14px; padding-left:14px; border-left:3px solid #d4a855; }}
   .exp-item h3 {{ font-size:14px; font-weight:600; color:#1a1a2e; font-family:'Playfair Display',serif; }}
-  .exp-item .meta {{ color:#d4a855; font-size:11px; font-weight:600; }}
+  .exp-item .meta {{ color:#d4a855; font-size:13px; font-weight:600; }}
   .exp-item .desc {{ font-size:12px; color:#555; margin-top:4px; }}
   ul {{ list-style:none; padding:0; }} li {{ font-size:12px; margin-bottom:3px; padding-left:12px; position:relative; }}
   li::before {{ content:'◆'; position:absolute; left:0; color:#d4a855; font-size:8px; top:3px; }}

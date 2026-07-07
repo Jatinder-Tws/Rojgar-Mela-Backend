@@ -50,6 +50,8 @@ class SupportTicket(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
     resolved_at = Column(DateTime, nullable=True)
+    bot_handled = Column(Boolean, default=False, nullable=False)
+    escalated_at = Column(DateTime, nullable=True)
 
     user = relationship("User", back_populates="support_tickets")
     messages = relationship("TicketMessage", back_populates="ticket", cascade="all, delete-orphan", order_by="TicketMessage.created_at")
@@ -63,6 +65,7 @@ class TicketMessage(Base):
     author_id = Column(UUID(as_uuid=False), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     body = Column(Text, nullable=False)
     is_staff_reply = Column(Boolean, default=False, nullable=False)
+    is_bot_reply = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     ticket = relationship("SupportTicket", back_populates="messages")

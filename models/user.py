@@ -19,6 +19,7 @@ class UserRole(str, enum.Enum):
     seeker = "seeker"
     provider = "provider"
     superadmin = "superadmin"
+    teacher = "teacher"
 
 
 class JobType(str, enum.Enum):

@@ -223,6 +223,7 @@ class UserOut(BaseModel):
     role: Optional[str] = None
     is_verified: bool
     onboarding_complete: bool
+    is_super_admin: bool = False
     industry: Optional[str] = None
     job_role: Optional[str] = None
     job_type: Optional[str] = None

@@ -17,6 +17,9 @@ from schemas.super_admin import (
     ImportJobStatus, PlatformStatsResponse, SuperAdminChangePasswordRequest, SuperAdminLoginRequest,
     SuperAdminLoginResponse, SuperAdminProfileOut, SuperAdminProfileUpdate,
 )
+from schemas.super_admin_detail import (
+    AdminProviderDetailResponse, AdminSeekerDetailResponse,
+)
 from services.auth_service import require_super_admin
 from controllers.super_admin_controller import (
     super_admin_login as ctrl_login,
@@ -36,6 +39,7 @@ from controllers.super_admin_controller import (
     list_seekers as ctrl_list_seekers,
     create_seeker as ctrl_create_seeker,
     get_seeker as ctrl_get_seeker,
+    get_seeker_detail as ctrl_get_seeker_detail,
     update_seeker as ctrl_update_seeker,
     delete_seeker as ctrl_delete_seeker,
     set_seeker_password as ctrl_set_seeker_password,
@@ -43,6 +47,7 @@ from controllers.super_admin_controller import (
     list_providers as ctrl_list_providers,
     create_provider as ctrl_create_provider,
     get_provider as ctrl_get_provider,
+    get_provider_detail as ctrl_get_provider_detail,
     update_provider as ctrl_update_provider,
     delete_provider as ctrl_delete_provider,
     set_provider_password as ctrl_set_provider_password,
@@ -237,6 +242,24 @@ async def create_provider(body: AdminProviderCreate, admin: User = Depends(requi
 @router.get("/providers/{user_id}", response_model=AdminUserOut)
 async def get_provider(user_id: str, admin: User = Depends(require_super_admin), db: AsyncSession = Depends(get_db)):
     return await ctrl_get_provider(user_id, db)
+
+
+@router.get("/providers/{user_id}/detail", response_model=AdminProviderDetailResponse)
+async def get_provider_detail(
+    user_id: str,
+    admin: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_get_provider_detail(user_id, db)
+
+
+@router.get("/seekers/{user_id}/detail", response_model=AdminSeekerDetailResponse)
+async def get_seeker_detail(
+    user_id: str,
+    admin: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_get_seeker_detail(user_id, db)
 
 
 @router.put("/providers/{user_id}", response_model=AdminUserOut)

@@ -260,8 +260,13 @@ async def login(
                 detail={"general": "Password not set. Contact your administrator."},
             )
         if getattr(user, "is_super_admin", False):
-            expected_referer = f"{settings.FRONTEND_URL.rstrip('/')}/super-admin/login"
-            if not referer or not referer.startswith(expected_referer):
+            expected_fe_referer = f"{settings.FRONTEND_URL.rstrip('/')}/super-admin/login"
+            expected_tr_referer = f"{settings.TRAINING_URL.rstrip('/')}/login"
+            is_valid_referer = False
+            if referer:
+                if referer.startswith(expected_fe_referer) or referer.startswith(expected_tr_referer) or referer.startswith(settings.TRAINING_URL.rstrip('/')):
+                    is_valid_referer = True
+            if not is_valid_referer:
                 raise HTTPException(
                     status_code=400,
                     detail={"general": "Invalid login source for superadmin."},

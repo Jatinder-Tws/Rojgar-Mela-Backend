@@ -106,13 +106,27 @@ def _ticket_to_out(
 
 
 def _message_to_out(msg: TicketMessage, author: Optional[User] = None) -> TicketMessageOut:
+    if msg.is_bot_reply:
+        author_name = "AI Assistant"
+        author_role = "bot"
+    elif msg.is_staff_reply:
+        author_name = "Support Team"
+        author_role = "super_admin"
+    elif author:
+        author_name = _user_display_name(author)
+        author_role = _user_role_str(author)
+    else:
+        author_name = None
+        author_role = None
+
     return TicketMessageOut(
         id=msg.id,
         author_id=msg.author_id,
-        author_name=_user_display_name(author) if author else ("Support Team" if msg.is_staff_reply else None),
-        author_role=_user_role_str(author) if author else ("super_admin" if msg.is_staff_reply else None),
+        author_name=author_name,
+        author_role=author_role,
         body=msg.body,
         is_staff_reply=msg.is_staff_reply,
+        is_bot_reply=bool(getattr(msg, "is_bot_reply", False)),
         created_at=msg.created_at,
     )
 
