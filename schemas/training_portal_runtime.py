@@ -419,3 +419,35 @@ class PortalTransactionOut(BaseModel):
     batch_name: Optional[str] = None
     notes: Optional[str] = None
     created_at: datetime
+
+
+class PortalInvoiceLineItem(BaseModel):
+    label: str
+    amount: float
+
+
+class PortalPaymentInvoiceOut(BaseModel):
+    invoice_number: str
+    transaction_id: str
+    transaction_type: str
+    invoice_date: datetime
+    generated_at: datetime
+    candidate_name: str
+    candidate_email: str
+    candidate_phone: Optional[str] = None
+    program_title: str
+    batch_name: Optional[str] = None
+    payment_mode: Optional[str] = None
+    provider: Optional[str] = None
+    provider_transaction_id: Optional[str] = None
+    reference_order_id: Optional[str] = None
+    status: str
+    currency: str
+    amount: float
+    total_fee: float
+    paid_amount: float
+    balance_due: float
+    enrollment_date: str
+    notes: Optional[str] = None
+    issuer_label: str = "RojgarMela Training Portal"
+    line_items: list[PortalInvoiceLineItem] = Field(default_factory=list)

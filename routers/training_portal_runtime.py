@@ -54,6 +54,8 @@ from schemas.training_portal_runtime import (
     PortalRefundRequestResolve,
     PortalRefundRequestOut,
     PortalTransactionOut,
+    PortalPaymentInvoiceOut,
+    PortalInvoiceLineItem,
 )
 from services.auth_service import require_super_admin, require_training_portal_user
 from services.training_portal_mapper import (
@@ -113,6 +115,10 @@ def _user_display_name(user: User, fallback: str = "User") -> str:
     if email:
         return email.split("@")[0]
     return fallback
+
+
+def _make_invoice_number(transaction_id: str) -> str:
+    return f"INV-{transaction_id}"
 
 
 async def _batch_student_count(db: AsyncSession, batch_id: str) -> int:
@@ -271,6 +277,42 @@ async def _record_transaction(
     )
     db.add(row)
     return row
+
+
+def _build_invoice(
+    transaction: TrainingPortalTransaction,
+    enrollment: TrainingPortalEnrollment,
+) -> PortalPaymentInvoiceOut:
+    return PortalPaymentInvoiceOut(
+        invoice_number=_make_invoice_number(transaction.transaction_id),
+        transaction_id=transaction.transaction_id,
+        transaction_type=transaction.transaction_type,
+        invoice_date=transaction.created_at,
+        generated_at=datetime.utcnow(),
+        candidate_name=transaction.candidate_name,
+        candidate_email=transaction.candidate_email,
+        candidate_phone=enrollment.candidate_phone,
+        program_title=transaction.program_title,
+        batch_name=transaction.batch_name or enrollment.batch_name,
+        payment_mode=transaction.payment_mode or enrollment.payment_mode,
+        provider=transaction.provider,
+        provider_transaction_id=transaction.provider_transaction_id,
+        reference_order_id=transaction.reference_order_id,
+        status=transaction.status,
+        currency=transaction.currency,
+        amount=transaction.amount,
+        total_fee=enrollment.total_fee,
+        paid_amount=enrollment.paid_amount,
+        balance_due=enrollment.balance_due,
+        enrollment_date=enrollment.enrollment_date,
+        notes=transaction.notes or enrollment.notes,
+        line_items=[
+            PortalInvoiceLineItem(
+                label=f"{transaction.program_title} ({transaction.transaction_type.title()})",
+                amount=transaction.amount,
+            )
+        ],
+    )
 
 
 async def _assign_enrollments_to_batch(
@@ -1707,6 +1749,63 @@ async def list_transactions(
     return [transaction_to_out(row) for row in result.scalars().all()]
 
 
+@router.get("/transactions/{transaction_id}/invoice", response_model=PortalPaymentInvoiceOut)
+async def get_transaction_invoice(
+    transaction_id: str,
+    current_user: User = Depends(require_training_portal_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(TrainingPortalTransaction).where(TrainingPortalTransaction.transaction_id == transaction_id)
+    )
+    transaction = result.scalar_one_or_none()
+    if not transaction:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    if transaction.transaction_type != "payment":
+        raise HTTPException(status_code=400, detail="Invoice is available only for payment transactions")
+    if transaction.candidate_email != (current_user.email or "") and not getattr(current_user, "is_super_admin", False):
+        raise HTTPException(status_code=403, detail="Not authorized to view this invoice")
+    if not transaction.enrollment_id:
+        raise HTTPException(status_code=404, detail="Linked enrollment not found for this transaction")
+
+    enrollment_result = await db.execute(
+        select(TrainingPortalEnrollment).where(TrainingPortalEnrollment.id == transaction.enrollment_id)
+    )
+    enrollment = enrollment_result.scalar_one_or_none()
+    if not enrollment:
+        raise HTTPException(status_code=404, detail="Enrollment not found")
+    return _build_invoice(transaction, enrollment)
+
+
+@router.get("/enrollments/{enrollment_id}/invoice/latest", response_model=PortalPaymentInvoiceOut)
+async def get_latest_enrollment_invoice(
+    enrollment_id: str,
+    current_user: User = Depends(require_training_portal_user),
+    db: AsyncSession = Depends(get_db),
+):
+    enrollment_result = await db.execute(
+        select(TrainingPortalEnrollment).where(TrainingPortalEnrollment.id == enrollment_id)
+    )
+    enrollment = enrollment_result.scalar_one_or_none()
+    if not enrollment:
+        raise HTTPException(status_code=404, detail="Enrollment not found")
+    if enrollment.candidate_email != (current_user.email or "") and not getattr(current_user, "is_super_admin", False):
+        raise HTTPException(status_code=403, detail="Not authorized to view this invoice")
+
+    transaction_result = await db.execute(
+        select(TrainingPortalTransaction)
+        .where(
+            TrainingPortalTransaction.enrollment_id == enrollment_id,
+            TrainingPortalTransaction.transaction_type == "payment",
+        )
+        .order_by(TrainingPortalTransaction.created_at.desc())
+    )
+    transaction = transaction_result.scalars().first()
+    if not transaction:
+        raise HTTPException(status_code=404, detail="No payment invoice found for this enrollment")
+    return _build_invoice(transaction, enrollment)
+
+
 # ── Refund requests ───────────────────────────────────────────────────────────
 
 @router.get("/refund-requests/eligibility/{enrollment_id}")
@@ -1935,19 +2034,35 @@ async def verify_payment(
         order.amount_paise / 100.0,
         "online",
         provider="razorpay",
-        provider_transaction_id=body.provider_payment_id,
+        provider_transaction_id=payment_info["provider_payment_id"],
         reference_order_id=order.id,
-        created_by_id=current_user.id,
+        created_by_id=None,
     )
     await db.flush()
 
-    background_tasks.add_task(
-        send_training_portal_payment_success_email,
-        enrollment.candidate_email,
-        enrollment.candidate_name,
-        enrollment.title,
-        order.amount_paise / 100.0,
+    payment_txn_result = await db.execute(
+        select(TrainingPortalTransaction)
+        .where(
+            TrainingPortalTransaction.enrollment_id == enrollment.id,
+            TrainingPortalTransaction.transaction_type == "payment",
+        )
+        .order_by(TrainingPortalTransaction.created_at.desc())
     )
+    payment_txn = payment_txn_result.scalars().first()
+
+    if payment_txn:
+        background_tasks.add_task(
+            send_training_portal_payment_success_email,
+            enrollment.candidate_email,
+            enrollment.candidate_name,
+            enrollment.title,
+            order.amount_paise / 100.0,
+            _make_invoice_number(payment_txn.transaction_id),
+            payment_txn.created_at.strftime("%d %b %Y, %I:%M %p"),
+            payment_txn.payment_mode,
+            payment_txn.batch_name or enrollment.batch_name,
+            f"{settings.TRAINING_URL.rstrip('/')}/candidate/enrollments?invoice={payment_txn.transaction_id}",
+        )
     return enrollment_to_out(enrollment)
 
 

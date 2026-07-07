@@ -493,10 +493,27 @@ async def send_training_portal_payment_success_email(
     candidate_name: str,
     program_title: str,
     amount: float,
+    invoice_number: str,
+    invoice_date: str,
+    payment_mode: str | None = None,
+    batch_name: str | None = None,
+    invoice_url: str | None = None,
 ) -> None:
+    batch_html = f"<p><strong>Batch:</strong> {batch_name}</p>" if batch_name else ""
+    payment_mode_html = f"<p><strong>Payment mode:</strong> {payment_mode}</p>" if payment_mode else ""
+    invoice_url_html = (
+        f'<p>You can view and print your invoice here: <a href="{invoice_url}">Open Invoice</a></p>'
+        if invoice_url
+        else ""
+    )
     html = f"""
     <p>Hi {candidate_name},</p>
     <p>We received your payment of <strong>₹{amount:,.0f}</strong> for <strong>{program_title}</strong>.</p>
+    <p><strong>Invoice No:</strong> {invoice_number}</p>
+    <p><strong>Invoice Date:</strong> {invoice_date}</p>
+    {payment_mode_html}
+    {batch_html}
     <p>Your enrollment is now confirmed. Our admin team will contact you regarding batch assignment.</p>
+    {invoice_url_html}
     """
     await send_notification_email(to_email, candidate_name, "Payment Received – RojgarMela Training", html)
