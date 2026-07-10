@@ -1,12 +1,14 @@
 import uuid
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File
 from sqlalchemy import select, or_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config import settings
 from database import get_db
 from models.user import User
 from models.training_portal_course import TrainingPortalCourse
@@ -22,6 +24,35 @@ from services.auth_service import require_super_admin, require_training_portal_u
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/training-portal/courses", tags=["Training Portal Courses"])
+
+
+@router.post("/thumbnail", response_model=dict)
+async def upload_portal_course_thumbnail(
+    file: UploadFile = File(...),
+    current_user: User = Depends(require_super_admin),
+):
+    ext = Path(file.filename or "thumbnail").suffix.lower()
+    if ext not in {".jpg", ".jpeg", ".png", ".webp"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only image files (.jpg, .jpeg, .png, .webp) are allowed.",
+        )
+
+    base_dir = Path(settings.UPLOAD_DIR)
+    if not base_dir.is_absolute():
+        base_dir = Path(__file__).parent.parent / base_dir
+
+    thumbnail_dir = base_dir / "training_portal_course_thumbnails"
+    thumbnail_dir.mkdir(parents=True, exist_ok=True)
+
+    safe_name = f"{uuid.uuid4().hex}{ext}"
+    file_path = thumbnail_dir / safe_name
+
+    content = await file.read()
+    with open(file_path, "wb") as output_file:
+        output_file.write(content)
+
+    return {"thumbnail_url": f"/uploads/training_portal_course_thumbnails/{safe_name}"}
 
 
 def _to_out(

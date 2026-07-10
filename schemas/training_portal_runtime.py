@@ -56,6 +56,7 @@ class PortalEnrollmentCreate(BaseModel):
     paid_amount: float = 0
     balance_due: float = 0
     installments: list[dict[str, Any]] = Field(default_factory=list)
+    voter_card_url: Optional[str] = None
     notes: Optional[str] = None
     payment_method_route: Optional[Literal["upi", "card", "emi", "offline", "email"]] = None
     batch_id: Optional[str] = None
@@ -68,6 +69,7 @@ class PortalEnrollmentUpdate(BaseModel):
     payment_mode: Optional[str] = None
     paid_amount: Optional[float] = None
     balance_due: Optional[float] = None
+    voter_card_url: Optional[str] = None
     notes: Optional[str] = None
     status: Optional[Literal["active", "completed", "dropped", "pending"]] = None
     attendance_percentage: Optional[int] = None
@@ -100,6 +102,7 @@ class PortalEnrollmentOut(BaseModel):
     certificate_id: Optional[str] = None
     certificate_status: Optional[str] = None
     certificate_reason: Optional[str] = None
+    voter_card_url: Optional[str] = None
     notes: Optional[str] = None
     preferred_batch_id: Optional[str] = None
     created_at: datetime
@@ -212,6 +215,9 @@ class PortalClassSessionOut(BaseModel):
     postponed: bool
     teacher_unavailable: bool
     live_status: str = "scheduled"
+    live_occurrence_date: Optional[str] = None
+    occurrence_date: Optional[str] = None
+    can_start: bool = False
     started_at: Optional[datetime] = None
     ended_at: Optional[datetime] = None
     session_report: Optional[str] = None
@@ -266,6 +272,7 @@ class PortalAttendanceRecordOut(BaseModel):
     late_start_reason: Optional[str] = None
     early_end_reason: Optional[str] = None
     instructor_name: Optional[str] = None
+    occurrence_date: Optional[str] = None
 
 
 # ── Leave requests ────────────────────────────────────────────────────────────
@@ -305,6 +312,37 @@ class PortalLeaveRequestOut(BaseModel):
     status: str
     reviewed_by_role: Optional[str] = None
     review_note: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+# ── Behavior reports ──────────────────────────────────────────────────────────
+
+class PortalBehaviorReportCreate(BaseModel):
+    enrollment_id: str
+    discipline_rating: int
+    participation_rating: int
+    performance_rating: int
+    comments: str
+    report_date: Optional[str] = None
+
+
+class PortalBehaviorReportOut(BaseModel):
+    id: str
+    enrollment_id: Optional[str] = None
+    candidate_name: str
+    candidate_email: str
+    batch_id: Optional[str] = None
+    batch_name: Optional[str] = None
+    instructor_id: Optional[str] = None
+    instructor_name: str
+    teacher_email: Optional[str] = None
+    date: str
+    discipline_rating: int
+    participation_rating: int
+    performance_rating: int
+    comments: str
+    flagged_for_review: bool = False
     created_at: datetime
     updated_at: datetime
 

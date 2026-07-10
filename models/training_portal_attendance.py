@@ -14,7 +14,12 @@ def _uuid():
 class TrainingPortalAttendanceRecord(Base):
     __tablename__ = "training_portal_attendance_records"
     __table_args__ = (
-        UniqueConstraint("class_session_id", "enrollment_id", name="uq_session_enrollment_attendance"),
+        UniqueConstraint(
+            "class_session_id",
+            "enrollment_id",
+            "occurrence_date",
+            name="uq_session_enrollment_occurrence_attendance",
+        ),
     )
 
     id = Column(String(50), primary_key=True, default=_uuid)
@@ -30,6 +35,7 @@ class TrainingPortalAttendanceRecord(Base):
         nullable=False,
         index=True,
     )
+    occurrence_date = Column(String(50), nullable=False, default="")
     batch_id = Column(String(50), nullable=True, index=True)
     candidate_email = Column(String(200), nullable=False, index=True)
     candidate_name = Column(String(200), nullable=False)

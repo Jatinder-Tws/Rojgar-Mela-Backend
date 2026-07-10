@@ -1,6 +1,10 @@
 """Mappers between SQLAlchemy models and portal API schemas."""
 
-from models.training_portal_batch import TrainingPortalBatch
+from datetime import date, datetime
+from typing import Optional
+
+from sqlalchemy import select, func
+from sqlalchemy.ext.asyncio import AsyncSession
 from models.training_portal_enrollment import TrainingPortalEnrollment
 from models.training_portal_class_session import TrainingPortalClassSession
 from models.training_portal_candidate_notification import TrainingPortalCandidateNotification
@@ -8,6 +12,7 @@ from models.training_portal_payment import TrainingPortalPaymentSettings, Traini
 from models.training_portal_transaction import TrainingPortalTransaction
 from models.training_portal_refund_request import TrainingPortalRefundRequest
 from models.training_portal_leave_request import TrainingPortalLeaveRequest
+from models.training_portal_behavior_report import TrainingPortalBehaviorReport
 from schemas.training_portal_runtime import (
     PortalEnrollmentOut,
     PortalBatchOut,
@@ -18,9 +23,15 @@ from schemas.training_portal_runtime import (
     PortalTransactionOut,
     PortalRefundRequestOut,
     PortalLeaveRequestOut,
+    PortalBehaviorReportOut,
 )
-from sqlalchemy import select, func
-from sqlalchemy.ext.asyncio import AsyncSession
+from services.training_portal_class_live import (
+    effective_live_status,
+    should_show_start_button,
+    session_live_applies_to_date,
+)
+
+from models.training_portal_batch import TrainingPortalBatch
 
 
 def enrollment_to_out(row: TrainingPortalEnrollment) -> PortalEnrollmentOut:
@@ -49,6 +60,7 @@ def enrollment_to_out(row: TrainingPortalEnrollment) -> PortalEnrollmentOut:
         certificate_id=row.certificate_id,
         certificate_status=row.certificate_status,
         certificate_reason=row.certificate_reason,
+        voter_card_url=getattr(row, "voter_card_url", None),
         notes=row.notes,
         preferred_batch_id=getattr(row, "preferred_batch_id", None),
         created_at=row.created_at,
@@ -106,6 +118,7 @@ def session_to_out(row: TrainingPortalClassSession) -> PortalClassSessionOut:
         postponed=row.postponed,
         teacher_unavailable=row.teacher_unavailable,
         live_status=getattr(row, "live_status", None) or "scheduled",
+        live_occurrence_date=getattr(row, "live_occurrence_date", None),
         started_at=getattr(row, "started_at", None),
         ended_at=getattr(row, "ended_at", None),
         session_report=getattr(row, "session_report", None),
@@ -117,6 +130,33 @@ def session_to_out(row: TrainingPortalClassSession) -> PortalClassSessionOut:
         attendance_marked=bool(getattr(row, "attendance_marked", False)),
         created_at=row.created_at,
         updated_at=row.updated_at,
+    )
+
+
+def session_to_out_for_date(
+    row: TrainingPortalClassSession,
+    target: date,
+    now: Optional[datetime] = None,
+) -> PortalClassSessionOut:
+    from services.training_portal_class_live import now_ist
+
+    current = now or now_ist()
+    effective = effective_live_status(row, current, target)
+    applies = session_live_applies_to_date(row, target)
+    base = session_to_out(row)
+    return base.model_copy(
+        update={
+            "live_status": effective,
+            "occurrence_date": target.isoformat(),
+            "can_start": should_show_start_button(row, current, target),
+            "started_at": getattr(row, "started_at", None) if applies and effective in {"live", "completed"} else None,
+            "ended_at": getattr(row, "ended_at", None) if applies and effective == "completed" else None,
+            "session_report": getattr(row, "session_report", None) if applies and effective == "completed" else None,
+            "covered_topic_ids": (getattr(row, "covered_topic_ids", None) or []) if applies and effective == "completed" else [],
+            "late_start_reason": getattr(row, "late_start_reason", None) if applies and effective in {"live", "completed"} else None,
+            "early_end_reason": getattr(row, "early_end_reason", None) if applies and effective == "completed" else None,
+            "attendance_marked": bool(getattr(row, "attendance_marked", False)) and applies and effective == "completed",
+        }
     )
 
 
@@ -216,6 +256,28 @@ def leave_to_out(row: TrainingPortalLeaveRequest) -> PortalLeaveRequestOut:
         status=row.status,
         reviewed_by_role=row.reviewed_by_role,
         review_note=row.review_note,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def behavior_report_to_out(row: TrainingPortalBehaviorReport) -> PortalBehaviorReportOut:
+    return PortalBehaviorReportOut(
+        id=row.id,
+        enrollment_id=row.enrollment_id,
+        candidate_name=row.candidate_name,
+        candidate_email=row.candidate_email,
+        batch_id=row.batch_id,
+        batch_name=row.batch_name,
+        instructor_id=row.instructor_id,
+        instructor_name=row.instructor_name,
+        teacher_email=row.teacher_email,
+        date=row.report_date,
+        discipline_rating=row.discipline_rating,
+        participation_rating=row.participation_rating,
+        performance_rating=row.performance_rating,
+        comments=row.comments,
+        flagged_for_review=row.flagged_for_review,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )

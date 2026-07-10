@@ -28,6 +28,9 @@ class AudienceType(str, enum.Enum):
     industry_seekers = "industry_seekers"
     industry_providers = "industry_providers"
     specific_users = "specific_users"
+    csv_import = "csv_import"
+    job_fair_seekers = "job_fair_seekers"
+    job_fair_providers = "job_fair_providers"
 
 
 class RecipientStatus(str, enum.Enum):

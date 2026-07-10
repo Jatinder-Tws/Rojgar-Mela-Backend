@@ -39,7 +39,7 @@ async def init_db():
     """Create all tables and enable pgvector extension."""
     async with engine.begin() as conn:
         await conn.execute(__import__("sqlalchemy").text("CREATE EXTENSION IF NOT EXISTS vector"))
-        from models import user, resume, job, match, application, notification, otp, interview, provider_interview_settings, provider_availability_window, assessment, portfolio, master, ai_interview, roadmap, ai_coach, imported_user_password, attendance, job_fair, email_template, email_campaign, support_ticket, platform_feedback, contact_inquiry, company_internship, training_course, training_portal_course, training_portal_category, training_portal_teacher, training_portal_internship, training_portal_batch, training_portal_enrollment, training_portal_class_session, training_portal_payment, training_portal_candidate_notification, training_portal_transaction, training_portal_refund_request, training_portal_attendance, training_portal_leave_request  # noqa
+        from models import user, resume, job, match, application, notification, otp, interview, provider_interview_settings, provider_availability_window, assessment, portfolio, master, ai_interview, roadmap, ai_coach, imported_user_password, attendance, job_fair, email_template, email_campaign, support_ticket, platform_feedback, contact_inquiry, company_internship, training_course, training_portal_course, training_portal_category, training_portal_teacher, training_portal_internship, training_portal_batch, training_portal_enrollment, training_portal_class_session, training_portal_payment, training_portal_candidate_notification, training_portal_transaction, training_portal_refund_request, training_portal_attendance, training_portal_leave_request, training_portal_behavior_report  # noqa
         await conn.run_sync(Base.metadata.create_all)
 
 
@@ -85,10 +85,16 @@ async def patch_email_admin_schema():
         "ALTER TABLE email_campaigns ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP",
         "ALTER TABLE email_campaigns ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW()",
         "ALTER TABLE email_campaigns ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW()",
+        "ALTER TYPE audiencetype ADD VALUE IF NOT EXISTS 'csv_import'",
+        "ALTER TYPE audiencetype ADD VALUE IF NOT EXISTS 'job_fair_seekers'",
+        "ALTER TYPE audiencetype ADD VALUE IF NOT EXISTS 'job_fair_providers'",
     ]
     async with engine.begin() as conn:
         for sql in statements:
-            await conn.execute(text(sql))
+            try:
+                await conn.execute(text(sql))
+            except Exception:
+                pass
 
 
 async def patch_support_bot_schema():
@@ -341,6 +347,7 @@ async def patch_training_portal_schema():
         "ALTER TABLE training_portal_enrollments ADD COLUMN IF NOT EXISTS certificate_id VARCHAR(100)",
         "ALTER TABLE training_portal_enrollments ADD COLUMN IF NOT EXISTS certificate_status VARCHAR(30)",
         "ALTER TABLE training_portal_enrollments ADD COLUMN IF NOT EXISTS certificate_reason TEXT",
+        "ALTER TABLE training_portal_enrollments ADD COLUMN IF NOT EXISTS voter_card_url VARCHAR(500)",
         "ALTER TABLE training_portal_enrollments ADD COLUMN IF NOT EXISTS notes TEXT",
         "ALTER TABLE training_portal_enrollments ADD COLUMN IF NOT EXISTS preferred_batch_id VARCHAR(50)",
         "ALTER TABLE training_portal_enrollments ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW()",
@@ -484,7 +491,11 @@ async def patch_training_portal_schema():
         "CREATE INDEX IF NOT EXISTS idx_tpar_enrollment_id ON training_portal_attendance_records(enrollment_id)",
         "CREATE INDEX IF NOT EXISTS idx_tpar_batch_id ON training_portal_attendance_records(batch_id)",
         "CREATE INDEX IF NOT EXISTS idx_tpar_candidate_email ON training_portal_attendance_records(candidate_email)",
-        "CREATE UNIQUE INDEX IF NOT EXISTS uq_session_enrollment_attendance ON training_portal_attendance_records(class_session_id, enrollment_id)",
+        "ALTER TABLE training_portal_attendance_records ADD COLUMN IF NOT EXISTS occurrence_date VARCHAR(50) NOT NULL DEFAULT ''",
+        "ALTER TABLE training_portal_attendance_records DROP CONSTRAINT IF EXISTS uq_session_enrollment_attendance",
+        "DROP INDEX IF EXISTS uq_session_enrollment_attendance",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_session_enrollment_occurrence_attendance ON training_portal_attendance_records(class_session_id, enrollment_id, occurrence_date)",
+        "ALTER TABLE training_portal_class_sessions ADD COLUMN IF NOT EXISTS live_occurrence_date VARCHAR(50)",
 
         # training_portal_leave_requests
         "ALTER TABLE training_portal_leave_requests ADD COLUMN IF NOT EXISTS requester_type VARCHAR(20) NOT NULL DEFAULT 'student'",

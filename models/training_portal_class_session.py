@@ -29,6 +29,7 @@ class TrainingPortalClassSession(Base):
     postponed = Column(Boolean, nullable=False, default=False)
     teacher_unavailable = Column(Boolean, nullable=False, default=False)
     live_status = Column(String(20), nullable=False, default="scheduled", index=True)
+    live_occurrence_date = Column(String(50), nullable=True)
     started_at = Column(DateTime, nullable=True)
     ended_at = Column(DateTime, nullable=True)
     session_report = Column(Text, nullable=True)
