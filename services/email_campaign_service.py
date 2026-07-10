@@ -1,4 +1,5 @@
 """Email campaign audience resolution and bulk sending."""
+import re
 from datetime import datetime
 from typing import Any, Optional
 
@@ -14,11 +15,14 @@ from models.email_campaign import (
     RecipientStatus,
 )
 from models.email_template import EmailTemplate
+from models.job_fair import JobFairCompany, JobFairSeeker
 from models.user import User, UserRole
 from services.email_campaign_job_store import create_campaign_job, get_job, update_job
 from config import settings
 from services.email_service import send_campaign_email
 from services.email_template_service import build_user_context, render_email_template
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def _full_name(user: User) -> str:
@@ -28,6 +32,27 @@ def _full_name(user: User) -> str:
 
 def _audience_filter_dict(audience_filter: Optional[dict[str, Any]]) -> dict[str, Any]:
     return audience_filter or {}
+
+
+def _normalize_imported_emails(audience_filter: Optional[dict[str, Any]]) -> list[dict[str, str]]:
+    filt = _audience_filter_dict(audience_filter)
+    rows = filt.get("imported_emails") or []
+    seen: set[str] = set()
+    out: list[dict[str, str]] = []
+    for row in rows:
+        if isinstance(row, str):
+            email = row.strip().lower()
+            name = ""
+        else:
+            email = (row.get("email") or "").strip().lower()
+            name = (row.get("name") or "").strip()
+        if not email or not _EMAIL_RE.match(email):
+            continue
+        if email in seen:
+            continue
+        seen.add(email)
+        out.append({"email": email, "name": name})
+    return out
 
 
 async def build_audience_query(
@@ -63,6 +88,34 @@ async def build_audience_query(
             q = q.where(false())
         else:
             q = q.where(User.id.in_(user_ids))
+    elif audience_type == AudienceType.job_fair_seekers.value:
+        job_fair_id = filt.get("job_fair_id")
+        if not job_fair_id:
+            q = q.where(false())
+        else:
+            q = (
+                q.join(JobFairSeeker, JobFairSeeker.seeker_id == User.id)
+                .where(
+                    JobFairSeeker.job_fair_id == job_fair_id,
+                    User.role == UserRole.seeker,
+                )
+                .distinct()
+            )
+    elif audience_type == AudienceType.job_fair_providers.value:
+        job_fair_id = filt.get("job_fair_id")
+        if not job_fair_id:
+            q = q.where(false())
+        else:
+            q = (
+                q.join(JobFairCompany, JobFairCompany.provider_id == User.id)
+                .where(
+                    JobFairCompany.job_fair_id == job_fair_id,
+                    User.role == UserRole.provider,
+                )
+                .distinct()
+            )
+    elif audience_type == AudienceType.csv_import.value:
+        q = q.where(false())
     else:
         q = q.where(false())
 
@@ -77,9 +130,73 @@ async def count_audience(
     audience_type: str,
     audience_filter: Optional[dict[str, Any]] = None,
 ) -> int:
+    if audience_type == AudienceType.csv_import.value:
+        return len(_normalize_imported_emails(audience_filter))
     q = await build_audience_query(audience_type, audience_filter)
     count_q = select(func.count()).select_from(q.subquery())
     return (await db.execute(count_q)).scalar() or 0
+
+
+async def resolve_campaign_recipients(
+    db: AsyncSession,
+    audience_type: str,
+    audience_filter: Optional[dict[str, Any]] = None,
+) -> list[tuple[Optional[User], str, str]]:
+    """Return (user_or_none, email, recipient_name) for each campaign recipient."""
+    if audience_type == AudienceType.csv_import.value:
+        rows = _normalize_imported_emails(audience_filter)
+        if not rows:
+            return []
+        emails = [row["email"] for row in rows]
+        users_by_email: dict[str, User] = {}
+        user_rows = (
+            await db.execute(select(User).where(func.lower(User.email).in_(emails)))
+        ).scalars().all()
+        for user in user_rows:
+            if user.email:
+                users_by_email[user.email.strip().lower()] = user
+
+        recipients: list[tuple[Optional[User], str, str]] = []
+        for row in rows:
+            email = row["email"]
+            user = users_by_email.get(email)
+            name = row.get("name") or (user and _full_name(user)) or email.split("@")[0]
+            recipients.append((user, email, name))
+        return recipients
+
+    audience_q = await build_audience_query(audience_type, audience_filter)
+    users = (await db.execute(audience_q)).scalars().all()
+    return [(user, user.email, _full_name(user)) for user in users]
+
+
+async def get_audience_sample(
+    db: AsyncSession,
+    audience_type: str,
+    audience_filter: Optional[dict[str, Any]] = None,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    if audience_type == AudienceType.csv_import.value:
+        rows = _normalize_imported_emails(audience_filter)[:limit]
+        return [
+            {
+                "id": "",
+                "name": row.get("name") or row["email"],
+                "email": row["email"],
+                "role": "",
+            }
+            for row in rows
+        ]
+
+    users, _ = await get_audience_users(db, audience_type, audience_filter, page=1, page_size=limit)
+    return [
+        {
+            "id": user.id,
+            "name": f"{user.first_name or ''} {user.last_name or ''}".strip(),
+            "email": user.email,
+            "role": user.role.value if user.role else "",
+        }
+        for user in users
+    ]
 
 
 def build_picker_users_query(
@@ -220,13 +337,18 @@ async def _run_campaign_send_job_inner(job_id: str, campaign_id: str) -> None:
             update_job(job_id, status="failed", message="Template not found or inactive", progress=100)
             return
 
-        audience_q = await build_audience_query(
-            campaign.audience_type.value if hasattr(campaign.audience_type, "value") else campaign.audience_type,
+        audience_type = (
+            campaign.audience_type.value
+            if hasattr(campaign.audience_type, "value")
+            else campaign.audience_type
+        )
+        recipients = await resolve_campaign_recipients(
+            db,
+            audience_type,
             campaign.audience_filter,
         )
-        users = (await db.execute(audience_q)).scalars().all()
 
-        total = len(users)
+        total = len(recipients)
         campaign.status = CampaignStatus.running
         campaign.started_at = datetime.utcnow()
         campaign.total_recipients = total
@@ -240,12 +362,11 @@ async def _run_campaign_send_job_inner(job_id: str, campaign_id: str) -> None:
         failed = 0
         batch_size = 25
 
-        for idx, user in enumerate(users):
-            recipient_name = _full_name(user)
+        for idx, (user, email, recipient_name) in enumerate(recipients):
             recipient = EmailCampaignRecipient(
                 campaign_id=campaign.id,
-                user_id=user.id,
-                email=user.email,
+                user_id=user.id if user else None,
+                email=email,
                 recipient_name=recipient_name,
                 status=RecipientStatus.pending,
             )
@@ -253,9 +374,9 @@ async def _run_campaign_send_job_inner(job_id: str, campaign_id: str) -> None:
             await db.flush()
 
             try:
-                context = build_user_context(user)
+                context = _build_recipient_context(recipient, user)
                 subject, html_body = render_email_template(template, context)
-                await send_campaign_email(user.email, subject, html_body, raise_on_error=True)
+                await send_campaign_email(email, subject, html_body, raise_on_error=True)
                 recipient.status = RecipientStatus.sent
                 recipient.sent_at = datetime.utcnow()
                 sent += 1

@@ -70,16 +70,58 @@ def minutes_until_start(session: TrainingPortalClassSession, now: datetime, targ
     return (start - now).total_seconds() / 60.0
 
 
+def session_live_applies_to_date(session: TrainingPortalClassSession, target: date) -> bool:
+    occ = (getattr(session, "live_occurrence_date", None) or "").strip()
+    return occ == target.isoformat()
+
+
+def effective_live_status(
+    session: TrainingPortalClassSession,
+    now: datetime,
+    target: date,
+) -> str:
+    """Per-day live status — recurring sessions reset when the occurrence date changes."""
+    stored = (getattr(session, "live_status", None) or "scheduled").strip().lower()
+    if not session_live_applies_to_date(session, target):
+        return "missed" if is_session_missed(session, now, target) else "scheduled"
+    if stored in {"live", "completed"}:
+        return stored
+    if is_session_missed(session, now, target):
+        return "missed"
+    return "scheduled"
+
+
+def is_session_missed(session: TrainingPortalClassSession, now: datetime, target: date) -> bool:
+    if session.postponed or session.teacher_unavailable:
+        return False
+    if not session_occurs_on_date(session, target):
+        return False
+    status = (getattr(session, "live_status", None) or "scheduled").strip().lower()
+    if session_live_applies_to_date(session, target) and status in {"live", "completed"}:
+        return False
+    end = session_end_datetime(session, target)
+    if not end:
+        return False
+    return now > end
+
+
 def should_show_start_button(session: TrainingPortalClassSession, now: datetime, target: date) -> bool:
-    if session.live_status != "scheduled":
+    if effective_live_status(session, now, target) != "scheduled":
         return False
     start = session_start_datetime(session, target)
+    end = session_end_datetime(session, target)
     if not start:
         return False
-    return now >= start
+    if now < start:
+        return False
+    if end and now > end:
+        return False
+    return True
 
 
 def is_late_start(session: TrainingPortalClassSession, now: datetime, target: date) -> bool:
+    if not should_show_start_button(session, now, target):
+        return False
     start = session_start_datetime(session, target)
     if not start:
         return False
@@ -94,7 +136,7 @@ def is_early_end(session: TrainingPortalClassSession, now: datetime, target: dat
 
 
 def pending_reminder_tier(session: TrainingPortalClassSession, now: datetime, target: date) -> Optional[ReminderTier]:
-    if session.live_status == "completed":
+    if effective_live_status(session, now, target) in {"completed", "missed"}:
         return None
     mins = minutes_until_start(session, now, target)
     if mins is None or mins <= 0:
@@ -121,5 +163,5 @@ def format_duration(seconds: int) -> str:
 def elapsed_class_seconds(started_at: Optional[datetime], now: Optional[datetime] = None) -> int:
     if not started_at:
         return 0
-    end = now or datetime.utcnow()
+    end = now or now_ist()
     return int((end - started_at).total_seconds())

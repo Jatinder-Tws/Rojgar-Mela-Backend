@@ -41,6 +41,7 @@ from services.auth_service import require_super_admin
 from services.email_campaign_job_store import get_job
 from services.email_campaign_service import (
     count_audience,
+    get_audience_sample,
     get_audience_users,
     get_picker_user_ids,
     list_picker_users,
@@ -312,6 +313,8 @@ async def create_email_campaign(
 
     audience_filter = body.audience_filter.model_dump() if body.audience_filter else None
     count = await count_audience(db, body.audience_type, audience_filter)
+    if count == 0:
+        raise HTTPException(status_code=400, detail="Audience has no recipients")
 
     campaign = EmailCampaign(
         name=body.name,
@@ -334,16 +337,7 @@ async def estimate_audience(
 ):
     audience_filter = body.audience_filter.model_dump() if body.audience_filter else None
     count = await count_audience(db, body.audience_type, audience_filter)
-    users, _ = await get_audience_users(db, body.audience_type, audience_filter, page=1, page_size=5)
-    sample = [
-        {
-            "id": u.id,
-            "name": f"{u.first_name or ''} {u.last_name or ''}".strip(),
-            "email": u.email,
-            "role": u.role.value if u.role else "",
-        }
-        for u in users
-    ]
+    sample = await get_audience_sample(db, body.audience_type, audience_filter, limit=5)
     return AudienceEstimateResponse(count=count, sample_users=sample)
 
 

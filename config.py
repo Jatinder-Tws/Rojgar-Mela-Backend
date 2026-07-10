@@ -97,6 +97,7 @@ def get_cors_allow_origins() -> list[str]:
         out.append(u)
 
     add(settings.FRONTEND_URL)
+    add(settings.TRAINING_URL)
     for part in settings.CORS_ORIGINS.split(","):
         add(part.strip())
     for dev in (

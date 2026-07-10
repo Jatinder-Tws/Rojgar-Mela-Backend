@@ -431,11 +431,15 @@ class AdminAssessmentListResponse(BaseModel):
 
 class DashboardAnalyticsResponse(BaseModel):
     generated_at: str
+    reporting_period: dict = {}
     today_kpis: List[DashboardKpiItem]
     summary_columns: dict
     recruitment_funnel: List[DashboardFunnelStage]
+    funnel_velocity: List[dict] = []
+    funnel_highlight: Optional[str] = None
     ai_matching: DashboardAiMatching
     candidate_growth: dict
+    provider_growth: dict = {}
     experience_breakdown: List[DashboardExperienceLevel]
     industry_distribution: List[DashboardIndustryDist]
     top_skills: List[DashboardSkill]
