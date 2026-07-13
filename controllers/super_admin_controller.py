@@ -204,7 +204,12 @@ async def upload_super_admin_profile_pic(file: UploadFile, admin: User, db: Asyn
 
 
 async def list_platform_jobs(
-    db: AsyncSession, page: int, page_size: int, search: Optional[str] = None, industry: Optional[str] = None
+    db: AsyncSession,
+    page: int,
+    page_size: int,
+    search: Optional[str] = None,
+    industry: Optional[str] = None,
+    is_active: Optional[bool] = None,
 ) -> AdminJobListResponse:
     base = (
         select(JobPosting, User)
@@ -218,6 +223,8 @@ async def list_platform_jobs(
         filters.append(or_(JobPosting.title.ilike(term), User.company_name.ilike(term)))
     if industry:
         filters.append(JobPosting.industry.ilike(f"%{industry.strip()}%"))
+    if is_active is not None:
+        filters.append(JobPosting.is_active.is_(is_active))
 
     if filters:
         base = base.where(and_(*filters))
@@ -324,13 +331,66 @@ async def list_platform_applications(
                 id=str(app.id),
                 candidate_name=candidate,
                 candidate_email=app.candidate_email or (seeker.email if seeker else None),
+                candidate_phone=app.candidate_phone or (seeker.phone if seeker else None),
+                seeker_id=str(app.seeker_id) if app.seeker_id else None,
+                job_id=str(job.id),
                 job_title=job.title,
                 company=provider.company_name or _user_display_name(provider, "Provider"),
                 status=str(app.status.value if hasattr(app.status, "value") else app.status),
                 applied_at=app.applied_at,
+                updated_at=app.updated_at,
             )
         )
     return AdminApplicationListResponse(items=items, total=int(total), page=page, page_size=page_size)
+
+
+async def update_platform_application_status(
+    db: AsyncSession,
+    app_id: str,
+    status: str,
+    rejection_reason: Optional[str] = None,
+) -> AdminApplicationListItem:
+    result = await db.execute(select(Application).where(Application.id == app_id))
+    app = result.scalar_one_or_none()
+    if not app:
+        raise HTTPException(status_code=404, detail="Application not found")
+
+    allowed = {s.value for s in ApplicationStatus}
+    if status not in allowed:
+        raise HTTPException(status_code=400, detail=f"Invalid status. Allowed: {', '.join(sorted(allowed))}")
+
+    app.status = ApplicationStatus(status)
+    if status == "rejected":
+        app.rejection_reason = rejection_reason or "Not specified"
+    elif status != "rejected":
+        app.rejection_reason = None
+
+    await db.commit()
+    await db.refresh(app)
+
+    job_result = await db.execute(select(JobPosting).where(JobPosting.id == app.job_id))
+    job = job_result.scalar_one_or_none()
+    provider = None
+    if job:
+        provider_result = await db.execute(select(User).where(User.id == job.provider_id))
+        provider = provider_result.scalar_one_or_none()
+    seeker_result = await db.execute(select(User).where(User.id == app.seeker_id)) if app.seeker_id else None
+    seeker = seeker_result.scalar_one_or_none() if app.seeker_id else None
+    candidate = app.candidate_name or _user_display_name(seeker, "Candidate")
+
+    return AdminApplicationListItem(
+        id=str(app.id),
+        candidate_name=candidate,
+        candidate_email=app.candidate_email or (seeker.email if seeker else None),
+        candidate_phone=app.candidate_phone or (seeker.phone if seeker else None),
+        seeker_id=str(app.seeker_id) if app.seeker_id else None,
+        job_id=str(app.job_id),
+        job_title=job.title if job else "—",
+        company=provider.company_name or _user_display_name(provider, "Provider") if provider else "—",
+        status=str(app.status.value if hasattr(app.status, "value") else app.status),
+        applied_at=app.applied_at,
+        updated_at=app.updated_at,
+    )
 
 
 async def list_platform_interviews(

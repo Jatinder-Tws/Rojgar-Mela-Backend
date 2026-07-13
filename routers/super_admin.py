@@ -4,13 +4,13 @@ Business logic lives in controllers/super_admin_controller.py
 """
 from datetime import datetime
 from typing import Optional
-from fastapi import APIRouter, Depends, File, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 from models.user import User
 from schemas.super_admin import (
-    AdminApplicationListResponse, AdminAssessmentListResponse, AdminInterviewListResponse,
+    AdminApplicationListItem, AdminApplicationListResponse, AdminAssessmentListResponse, AdminInterviewListResponse,
     AdminJobListResponse, AdminMatchListResponse, AdminProviderCreate, AdminProviderUpdate,
     AdminSeekerCreate, AdminSeekerUpdate, AdminSetPasswordRequest, AdminUserListResponse,
     AdminUserOut, BulkImportJobStarted, DashboardAnalyticsResponse, DetailedPlatformAnalytics,
@@ -30,6 +30,7 @@ from controllers.super_admin_controller import (
     list_platform_jobs as ctrl_list_jobs,
     list_platform_matches as ctrl_list_matches,
     list_platform_applications as ctrl_list_applications,
+    update_platform_application_status as ctrl_update_application_status,
     list_platform_interviews as ctrl_list_interviews,
     list_platform_assessments as ctrl_list_assessments,
     platform_stats as ctrl_platform_stats,
@@ -102,8 +103,9 @@ async def list_jobs(
     page_size: int = Query(20, ge=1, le=100),
     search: Optional[str] = None,
     industry: Optional[str] = Query(None),
+    is_active: Optional[bool] = Query(None),
 ):
-    return await ctrl_list_jobs(db, page, page_size, search, industry)
+    return await ctrl_list_jobs(db, page, page_size, search, industry, is_active)
 
 
 @router.get("/matches", response_model=AdminMatchListResponse)
@@ -127,6 +129,24 @@ async def list_applications(
     status: Optional[str] = Query(None),
 ):
     return await ctrl_list_applications(db, page, page_size, search, status)
+
+
+@router.patch("/applications/{app_id}/status", response_model=AdminApplicationListItem)
+async def update_application_status(
+    app_id: str,
+    body: dict,
+    admin: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    status = body.get("status")
+    if not status:
+        raise HTTPException(status_code=400, detail="status is required")
+    return await ctrl_update_application_status(
+        db,
+        app_id,
+        str(status),
+        rejection_reason=body.get("rejection_reason"),
+    )
 
 
 @router.get("/interviews", response_model=AdminInterviewListResponse)
