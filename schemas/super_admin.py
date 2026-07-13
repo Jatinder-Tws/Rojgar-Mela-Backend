@@ -367,10 +367,14 @@ class AdminApplicationListItem(BaseModel):
     id: str
     candidate_name: str
     candidate_email: Optional[str] = None
+    candidate_phone: Optional[str] = None
+    seeker_id: Optional[str] = None
+    job_id: str
     job_title: str
     company: str
     status: str
     applied_at: datetime
+    updated_at: datetime
 
 
 class AdminInterviewListItem(BaseModel):
