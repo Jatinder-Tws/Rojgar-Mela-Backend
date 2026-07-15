@@ -166,7 +166,7 @@ def _apply_common_headers(msg: MIMEMultipart, to_email: str, subject: str, *, is
     msg["From"] = settings.SMTP_FROM
     msg["To"] = to_email
     msg["Message-ID"] = _message_id()
-    msg["Reply-To"] = settings.SMTP_USER or parseaddr(settings.SMTP_FROM)[1]
+    msg["Reply-To"] = settings.SMTP_FROM or parseaddr(settings.SMTP_FROM)[1]
     if is_bulk:
         msg["Precedence"] = "bulk"
         reply_addr = parseaddr(settings.SMTP_FROM)[1] or settings.SMTP_USER
