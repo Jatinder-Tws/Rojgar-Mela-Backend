@@ -5,31 +5,43 @@ import re
 
 
 class RegisterRequest(BaseModel):
-    first_name: str
-    last_name: str
+    full_name: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
     email: EmailStr
-    phone: str
+    phone: Optional[str] = None
     role: str = "seeker"
-    password: Optional[str] = None
+    password: str
+    company_name: Optional[str] = None
+    work_status: Optional[str] = None  # "experienced" | "fresher"
+    current_city: Optional[str] = None
 
-    @field_validator("first_name", "last_name")
+    @field_validator("full_name", "first_name", "last_name", "company_name", "current_city")
     @classmethod
-    def validate_name(cls, v: str) -> str:
+    def validate_optional_text(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
         v = v.strip()
-        if not v:
-            raise ValueError("This field is required")
-        if len(v) > 50:
-            raise ValueError("Max 50 characters")
-        if re.search(r"[0-9!@#$%^&*(),.?\":{}|<>]", v):
-            raise ValueError("No numbers or special characters allowed")
-        return v
+        return v or None
 
     @field_validator("phone")
     @classmethod
-    def validate_phone(cls, v: str) -> str:
+    def validate_phone(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or not str(v).strip():
+            return None
         v = re.sub(r"\D", "", v)
         if len(v) != 10:
             raise ValueError("Phone number must be exactly 10 digits")
+        return v
+
+    @field_validator("work_status")
+    @classmethod
+    def validate_work_status(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        v = v.strip().lower()
+        if v not in {"experienced", "fresher"}:
+            raise ValueError("Work status must be experienced or fresher")
         return v
 
     @field_validator("password")
@@ -48,6 +60,24 @@ class RegisterRequest(BaseModel):
         if not re.search(r"[!@#$%^&*(),.?\":{}|<>\-_=+\[\];:'\\]", v):
             raise ValueError("Password must contain at least one symbol (!@#$%^&*etc)")
         return v
+
+    @model_validator(mode="after")
+    def validate_role_fields(self) -> "RegisterRequest":
+        if self.role == "provider":
+            if not self.company_name:
+                raise ValueError("Company name is required")
+            return self
+
+        name = (self.full_name or f"{self.first_name or ''} {self.last_name or ''}").strip()
+        if not name:
+            raise ValueError("Full name is required")
+        if not self.phone:
+            raise ValueError("Phone number is required")
+        if not self.work_status:
+            raise ValueError("Work status is required")
+        if self.work_status == "fresher" and not self.current_city:
+            raise ValueError("Current city is required for freshers")
+        return self
 
 
 class RegisterResponse(BaseModel):
@@ -219,7 +249,7 @@ class UserOut(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     email: Optional[str] = None
-    phone: str
+    phone: Optional[str] = None
     role: Optional[str] = None
     is_verified: bool
     onboarding_complete: bool

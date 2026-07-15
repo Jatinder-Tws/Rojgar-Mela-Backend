@@ -1,10 +1,10 @@
-from fastapi import APIRouter, Depends, BackgroundTasks, Request
+from fastapi import APIRouter, Depends, BackgroundTasks, Request, File, UploadFile, Form
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 from models.user import User
 from schemas.auth import (
-    RegisterRequest, VerifyOtpRequest, ResendOtpRequest, LoginRequest,
+    RegisterRequest, RegisterResponse, VerifyOtpRequest, ResendOtpRequest, LoginRequest,
     UserOut, SendPhoneOtpRequest, VerifyPhoneOtpRequest, TOTPVerifyRequest,
     LoginResponse, TokenResponse, TOTPSetupResponse, TOTPStatusResponse,
     TOTPLoginRequest, CreateTestUserRequest, CreateTestUserResponse,
@@ -36,9 +36,31 @@ from controllers.auth_controller import (
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-@router.post("/register", response_model=LoginResponse, status_code=201)
-async def register(body: RegisterRequest, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db)):
-    return await ctrl_register(body, background_tasks, db)
+@router.post("/register", response_model=RegisterResponse, status_code=201)
+async def register(
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    email: str = Form(...),
+    password: str = Form(...),
+    role: str = Form("seeker"),
+    full_name: str | None = Form(None),
+    phone: str | None = Form(None),
+    company_name: str | None = Form(None),
+    work_status: str | None = Form(None),
+    current_city: str | None = Form(None),
+    resume: UploadFile | None = File(None),
+):
+    body = RegisterRequest(
+        full_name=full_name,
+        email=email,
+        password=password,
+        role=role,
+        phone=phone,
+        company_name=company_name,
+        work_status=work_status,
+        current_city=current_city,
+    )
+    return await ctrl_register(body, background_tasks, db, resume_file=resume)
 
 
 @router.post("/verify-otp", response_model=TokenResponse)
