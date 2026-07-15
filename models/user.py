@@ -44,7 +44,7 @@ class User(Base):
     first_name = Column(String(50), nullable=True)
     last_name = Column(String(50), nullable=True)
     email = Column(String(255), unique=True, nullable=True, index=True)
-    phone = Column(String(15), nullable=False)
+    phone = Column(String(15), nullable=True)
     hashed_password = Column(String(255), nullable=True)
     profile_pic_url = Column(Text, nullable=True)
 

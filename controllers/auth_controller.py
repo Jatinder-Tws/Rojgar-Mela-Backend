@@ -2,7 +2,7 @@ from datetime import datetime
 import secrets
 import string
 import pyotp
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException, BackgroundTasks
 
@@ -11,6 +11,7 @@ from models.user import User
 from models.otp import OTPRecord
 from schemas.auth import (
     RegisterRequest,
+    RegisterResponse,
     VerifyOtpRequest,
     ResendOtpRequest,
     LoginRequest,
@@ -60,37 +61,70 @@ def _generate_temp_password(length: int = 12) -> str:
     return "".join(password_list)
 
 
+def _split_full_name(full_name: str) -> tuple[str, str]:
+    parts = [p for p in full_name.strip().split() if p]
+    if not parts:
+        return "", ""
+    if len(parts) == 1:
+        return parts[0], ""
+    return parts[0], " ".join(parts[1:])
+
+
 async def register(
     body: RegisterRequest,
     background_tasks: BackgroundTasks,
     db: AsyncSession,
-) -> LoginResponse:
-    existing = await db.execute(
-        select(User).where((User.email == body.email) | (User.phone == body.phone))
-    )
+    resume_file=None,
+) -> RegisterResponse:
+    duplicate_filters = [User.email == body.email]
+    if body.phone:
+        duplicate_filters.append(User.phone == body.phone)
+    existing = await db.execute(select(User).where(or_(*duplicate_filters)))
     if existing.scalar_one_or_none():
         raise HTTPException(
             status_code=409, detail="An account with this email or phone already exists"
         )
 
-    secret = totp_service.generate_secret()
+    if body.role == "provider":
+        first_name = body.company_name or ""
+        last_name = ""
+        company_name = body.company_name
+        phone = None
+        experience = None
+        preferred_locations = None
+    else:
+        full_name = (body.full_name or f"{body.first_name or ''} {body.last_name or ''}").strip()
+        first_name, last_name = _split_full_name(full_name)
+        company_name = None
+        phone = body.phone
+        experience = body.work_status
+        preferred_locations = [body.current_city] if body.work_status == "fresher" and body.current_city else None
+
     user = User(
-        first_name=body.first_name,
-        last_name=body.last_name,
+        first_name=first_name,
+        last_name=last_name,
         email=body.email,
-        phone=body.phone,
+        phone=phone,
         role=body.role,
-        totp_secret=secret,
+        company_name=company_name,
+        experience=experience,
+        preferred_locations=preferred_locations,
         is_verified=False,
         onboarding_complete=False,
         is_assessment_done=(body.role == "seeker"),
+        hashed_password=hash_password(body.password),
     )
-    if body.password:
-        user.hashed_password = hash_password(body.password)
 
     db.add(user)
     await db.commit()
     await db.refresh(user)
+
+    if resume_file and body.role == "seeker":
+        try:
+            from controllers.resumes_controller import upload_resume
+            await upload_resume(background_tasks, resume_file, user, db)
+        except Exception as e:
+            print(f"[REGISTER] Optional resume upload failed: {e}")
 
     if user.email:
         otp_code = generate_otp()
@@ -100,18 +134,10 @@ async def register(
         db.add(otp_record)
         await db.commit()
         background_tasks.add_task(send_otp_email, user.email, otp_code, user.first_name)
-        print(user.email)
-        print(otp_code)
-        print(user.first_name)
 
-    uri = totp_service.get_provisioning_uri(user.email or user.phone, secret)
-    qr_base64 = totp_service.generate_qr_base64(uri)
-
-    return LoginResponse(
-        message="Registration initiated. Please check your email for the OTP and scan the QR code to set up TOTP.",
-        requires_setup=True,
-        qr_code_base64=f"data:image/png;base64,{qr_base64}",
-        user=UserOut.model_validate(user),
+    return RegisterResponse(
+        message="Registration successful. Please check your email for the verification code.",
+        requires_otp=True,
     )
 
 

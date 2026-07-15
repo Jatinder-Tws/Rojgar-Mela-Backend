@@ -1,8 +1,9 @@
 import uuid
 from datetime import datetime
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, File, UploadFile, Form
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, File, UploadFile, Form, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 from database import get_db
 from models.application import Application, ApplicationStatus
 from models.external_candidate import ExternalCandidate
@@ -13,6 +14,13 @@ from models.imported_user_password import ImportedUserPassword
 from schemas.external_candidate import ExternalCandidateCreate, ExternalCandidateOut, ExternalCandidateMatchOut
 from services.auth_service import hash_password, generate_secure_password
 from services.email_service import send_job_fair_welcome_email, send_welcome_email
+from services.public_jobs_service import (
+    search_public_jobs,
+    get_job_suggestions,
+    serialize_public_job_detail,
+    get_similar_jobs,
+    get_job_filter_facets,
+)
 from config import settings
 from typing import List
 
@@ -228,51 +236,144 @@ async def apply_for_job(
         await db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/jobs", response_model=List[dict])
-async def get_public_jobs(db: AsyncSession = Depends(get_db)):
-    """
-    Returns a list of all active jobs for public viewing.
-    """
-    result = await db.execute(select(JobPosting).filter(JobPosting.is_active == True))
-    jobs = result.scalars().all()
-    return [
-        {
-            "id": job.id,
-            "title": job.title,
-            "location": job.location,
-            "salary_range": job.salary_range,
-            "job_type": job.job_type,
-            "experience_required": job.experience_required,
-            "industry": job.industry,
-            "posted_at": job.created_at
-        }
-        for job in jobs
-    ]
+@router.get("/jobs/suggestions")
+async def public_job_suggestions(
+    type: str = Query("title"),
+    q: str = Query(""),
+    limit: int = Query(8, ge=1, le=20),
+    db: AsyncSession = Depends(get_db),
+):
+    """Autocomplete suggestions for job title or location search."""
+    suggest_type = "location" if type == "location" else "title"
+    return await get_job_suggestions(db, suggest_type=suggest_type, q=q, limit=limit)
 
-@router.get("/jobs/{job_id}", response_model=dict)
+
+@router.get("/jobs/facets")
+async def public_job_filter_facets(
+    q: str | None = Query(None),
+    loc: str | None = Query(None),
+    exp_years: int | None = Query(None, ge=0, le=31),
+    salary_min: int = Query(0, ge=0),
+    salary_max: int = Query(50, ge=0),
+    work_mode: str | None = Query(None),
+    work_type: str | None = Query(None),
+    work_shift: str | None = Query(None),
+    education: str | None = Query(None),
+    english: str | None = Query(None),
+    gender: str | None = Query(None),
+    industry: str | None = Query(None),
+    date_filter: str = Query("all"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Filter option counts for public job search sidebar."""
+    modes = [m.strip() for m in work_mode.split(",") if m.strip()] if work_mode else []
+    types = [t.strip() for t in work_type.split(",") if t.strip()] if work_type else []
+    shifts = [s.strip() for s in work_shift.split(",") if s.strip()] if work_shift else []
+    edu = [e.strip() for e in education.split(",") if e.strip()] if education else []
+    eng = [e.strip() for e in english.split(",") if e.strip()] if english else []
+    gen = [g.strip() for g in gender.split(",") if g.strip()] if gender else []
+    ind = [i.strip() for i in industry.split(",") if i.strip()] if industry else []
+    return await get_job_filter_facets(
+        db,
+        q=q,
+        loc=loc,
+        exp_years=exp_years,
+        salary_min=salary_min,
+        salary_max=salary_max,
+        work_modes=modes,
+        work_types=types,
+        work_shifts=shifts,
+        education=edu,
+        english=eng,
+        gender=gen,
+        industries=ind,
+        date_filter=date_filter,
+    )
+
+
+@router.get("/jobs")
+async def get_public_jobs(
+    q: str | None = Query(None),
+    loc: str | None = Query(None),
+    exp: str | None = Query(None),
+    exp_years: int | None = Query(None, ge=0, le=31),
+    date_filter: str = Query("all"),
+    min_salary: int = Query(0, ge=0),
+    salary_min: int = Query(0, ge=0),
+    salary_max: int = Query(50, ge=0),
+    work_mode: str | None = Query(None),
+    work_type: str | None = Query(None),
+    work_shift: str | None = Query(None),
+    department: str | None = Query(None),
+    education: str | None = Query(None),
+    english: str | None = Query(None),
+    gender: str | None = Query(None),
+    industry: str | None = Query(None),
+    sort: str = Query("relevant"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=50),
+    db: AsyncSession = Depends(get_db),
+):
+    """Paginated public job search with filters."""
+    modes = [m.strip() for m in work_mode.split(",") if m.strip()] if work_mode else []
+    types = [t.strip() for t in work_type.split(",") if t.strip()] if work_type else []
+    shifts = [s.strip() for s in work_shift.split(",") if s.strip()] if work_shift else []
+    edu = [e.strip() for e in education.split(",") if e.strip()] if education else []
+    eng = [e.strip() for e in english.split(",") if e.strip()] if english else []
+    gen = [g.strip() for g in gender.split(",") if g.strip()] if gender else []
+    ind = [i.strip() for i in industry.split(",") if i.strip()] if industry else []
+    return await search_public_jobs(
+        db,
+        q=q,
+        loc=loc,
+        exp=exp,
+        exp_years=exp_years,
+        date_filter=date_filter,
+        min_salary=min_salary,
+        salary_min=salary_min,
+        salary_max=salary_max,
+        work_modes=modes,
+        work_types=types,
+        work_shifts=shifts,
+        department=department,
+        education=edu,
+        english=eng,
+        gender=gen,
+        industries=ind,
+        sort=sort,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@router.get("/jobs/{job_id}/similar")
+async def get_public_job_similar(job_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(JobPosting)
+        .options(selectinload(JobPosting.provider))
+        .filter(JobPosting.id == job_id, JobPosting.is_active == True)
+    )
+    job = result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found or inactive")
+    return await get_similar_jobs(db, job)
+
+
+@router.get("/jobs/{job_id}")
 async def get_public_job_detail(job_id: str, db: AsyncSession = Depends(get_db)):
     """
     Returns detailed information for a specific job for public viewing.
     """
     result = await db.execute(
-        select(JobPosting).filter(JobPosting.id == job_id, JobPosting.is_active == True)
+        select(JobPosting)
+        .options(selectinload(JobPosting.provider))
+        .filter(JobPosting.id == job_id, JobPosting.is_active == True)
     )
     job = result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found or inactive")
-    
-    return {
-        "id": job.id,
-        "title": job.title,
-        "description": job.description,
-        "required_skills": job.required_skills,
-        "experience_required": job.experience_required,
-        "job_type": job.job_type,
-        "salary_range": job.salary_range,
-        "location": job.location,
-        "employment_type": job.employment_type,
-        "posted_at": job.created_at
-    }
+
+    return serialize_public_job_detail(job)
 
 @router.post("/upload")
 async def upload_public_file(
