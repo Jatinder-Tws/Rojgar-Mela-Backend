@@ -75,6 +75,7 @@ async def register(
     background_tasks: BackgroundTasks,
     db: AsyncSession,
     resume_file=None,
+    registration_ip: str | None = None,
 ) -> RegisterResponse:
     duplicate_filters = [User.email == body.email]
     if body.phone:
@@ -109,6 +110,7 @@ async def register(
         company_name=company_name,
         experience=experience,
         preferred_locations=preferred_locations,
+        registration_ip=registration_ip,
         is_verified=False,
         onboarding_complete=False,
         is_assessment_done=(body.role == "seeker"),

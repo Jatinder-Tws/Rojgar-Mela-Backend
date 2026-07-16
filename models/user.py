@@ -94,6 +94,9 @@ class User(Base):
     welcome_email_status = Column(String(20), nullable=True)  # pending | sent | failed
     welcome_email_error = Column(Text, nullable=True)
 
+    # Registration audit
+    registration_ip = Column(String(45), nullable=True)
+
     # Profile embedding for similarity (1536 dims = text-embedding-3-small)
     if VECTOR_AVAILABLE:
         profile_embedding = Column(Vector(3072), nullable=True)

@@ -529,6 +529,22 @@ async def patch_training_portal_schema():
                 pass
 
 
+async def patch_users_registration_schema():
+    """Allow nullable phone for providers and store registration IP."""
+    from sqlalchemy import text
+
+    statements = [
+        "ALTER TABLE users ALTER COLUMN phone DROP NOT NULL",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS registration_ip VARCHAR(45)",
+    ]
+    async with engine.begin() as conn:
+        for sql in statements:
+            try:
+                await conn.execute(text(sql))
+            except Exception:
+                pass
+
+
 async def patch_teacher_role_schema():
     """Add teacher to userrole enum and apply training table indexes."""
     from sqlalchemy import text
