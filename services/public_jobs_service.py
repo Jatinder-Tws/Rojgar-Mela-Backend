@@ -550,6 +550,37 @@ def _salary_sort_key(salary_range: Optional[str]) -> int:
     return val
 
 
+_STREET_PART_RE = re.compile(
+    r"\b("
+    r"road|rd\.?|street|st\.?|lane|ln\.?|colony|nagar|sector|plot|phase|"
+    r"near|opp\.?|opposite|floor|building|tower|complex|market|chowk|"
+    r"avenue|marg|gali|bypass|highway|nh-?\d+"
+    r")\b",
+    re.IGNORECASE,
+)
+_PINCODE_RE = re.compile(r"\s*[-–]?\s*\b\d{6}\b")
+
+
+def _extract_city_state(location: str) -> Optional[str]:
+    """Normalize a free-text job location to 'City' or 'City, State'."""
+    text = _PINCODE_RE.sub("", (location or "").strip())
+    text = re.sub(r"\s+", " ", text).strip(" ,-|/")
+    if not text:
+        return None
+
+    parts = [p.strip(" ,-|/") for p in text.split(",") if p.strip(" ,-|/")]
+    if not parts:
+        return None
+
+    place_parts = [p for p in parts if not _STREET_PART_RE.search(p)]
+    if not place_parts:
+        place_parts = [parts[-1]]
+
+    if len(place_parts) >= 2:
+        return f"{place_parts[-2]}, {place_parts[-1]}"
+    return place_parts[0]
+
+
 async def get_job_suggestions(
     db: AsyncSession,
     *,
@@ -569,19 +600,25 @@ async def get_job_suggestions(
     if term:
         query = query.filter(func.lower(col).like(f"%{term}%"))
 
-    result = await db.execute(query.limit(100))
+    result = await db.execute(query.limit(200))
     jobs = result.scalars().all()
 
     seen: set[str] = set()
     out: list[str] = []
     for job in jobs:
-        val = (job.location if suggest_type == "location" else job.title) or ""
-        val = val.strip()
-        if not val or val.lower() in seen:
+        if suggest_type == "location":
+            val = _extract_city_state(job.location or "") or ""
+        else:
+            val = (job.title or "").strip()
+
+        if not val:
             continue
-        if term and term not in val.lower():
+        key = val.lower()
+        if key in seen:
             continue
-        seen.add(val.lower())
+        if term and term not in key:
+            continue
+        seen.add(key)
         out.append(val)
         if len(out) >= limit:
             break

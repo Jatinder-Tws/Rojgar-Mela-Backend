@@ -22,7 +22,6 @@ from schemas.email_admin import (
     CampaignDeliveryStats,
     CampaignRecipientListResponse,
     CampaignRecipientOut,
-    ResendFailedResponse,
     ResendRecipientResponse,
     EmailCampaignCreate,
     EmailCampaignListResponse,
@@ -45,8 +44,8 @@ from services.email_campaign_service import (
     get_audience_users,
     get_picker_user_ids,
     list_picker_users,
-    resend_all_failed,
     resend_to_recipient,
+    run_campaign_resend_failed_job,
     run_campaign_send_job,
     start_campaign_job,
 )
@@ -532,7 +531,7 @@ def _recipient_to_out(r: EmailCampaignRecipient) -> CampaignRecipientOut:
     )
 
 
-@router.post("/email-campaigns/{campaign_id}/resend-failed", response_model=ResendFailedResponse)
+@router.post("/email-campaigns/{campaign_id}/resend-failed", response_model=CampaignJobStarted)
 async def resend_failed_campaign_emails(
     campaign_id: str,
     db: AsyncSession = Depends(get_db),
@@ -541,22 +540,31 @@ async def resend_failed_campaign_emails(
     campaign = (await db.execute(select(EmailCampaign).where(EmailCampaign.id == campaign_id))).scalar_one_or_none()
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
-    if campaign.status == CampaignStatus.running:
-        raise HTTPException(status_code=400, detail="Campaign is still sending")
+    if campaign.status in (CampaignStatus.running, CampaignStatus.queued):
+        raise HTTPException(status_code=400, detail="Campaign is already sending")
 
-    try:
-        total, sent, still_failed = await resend_all_failed(db, campaign_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    failed_count = (
+        await db.execute(
+            select(func.count()).where(
+                EmailCampaignRecipient.campaign_id == campaign_id,
+                EmailCampaignRecipient.status == RecipientStatus.failed,
+            )
+        )
+    ).scalar() or 0
 
-    if total == 0:
-        return ResendFailedResponse(total=0, sent=0, failed=0, message="No failed emails to resend")
+    if failed_count == 0:
+        raise HTTPException(status_code=400, detail="No failed emails to resend")
 
-    return ResendFailedResponse(
-        total=total,
-        sent=sent,
-        failed=still_failed,
-        message=f"Resent {sent} of {total} failed email(s)",
+    job_id = start_campaign_job(campaign_id)
+    campaign.status = CampaignStatus.queued
+    campaign.job_id = job_id
+    await db.flush()
+
+    asyncio.create_task(run_campaign_resend_failed_job(job_id, campaign_id))
+    return CampaignJobStarted(
+        job_id=job_id,
+        campaign_id=campaign_id,
+        message=f"Resending {failed_count} failed email(s)…",
     )
 
 
@@ -601,7 +609,11 @@ async def list_campaign_recipients(
 
     q = select(EmailCampaignRecipient).where(EmailCampaignRecipient.campaign_id == campaign_id)
     if status_filter:
-        q = q.where(EmailCampaignRecipient.status == status_filter)
+        try:
+            status_enum = RecipientStatus(status_filter)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid status filter") from exc
+        q = q.where(EmailCampaignRecipient.status == status_enum)
 
     count_q = select(func.count()).select_from(q.subquery())
     total = (await db.execute(count_q)).scalar() or 0
