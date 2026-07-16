@@ -90,7 +90,7 @@ class AdminUserOut(BaseModel):
     last_name: Optional[str] = None
     email: Optional[str] = None
     profile_pic_url: Optional[str] = None
-    phone: str
+    phone: Optional[str] = None
     role: str
     has_password: bool = False
     is_verified: bool
