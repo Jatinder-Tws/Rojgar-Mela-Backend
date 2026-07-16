@@ -501,6 +501,7 @@ async def resend_to_recipient(
 
 
 async def resend_all_failed(db: AsyncSession, campaign_id: str) -> tuple[int, int, int]:
+    """Synchronous resend (legacy). Prefer run_campaign_resend_failed_job for bulk resend."""
     campaign, template = await _get_campaign_template(db, campaign_id)
     failed_recipients = (
         await db.execute(
@@ -535,3 +536,116 @@ async def resend_all_failed(db: AsyncSession, campaign_id: str) -> tuple[int, in
 
     await db.flush()
     return total, sent, still_failed
+
+
+async def run_campaign_resend_failed_job(job_id: str, campaign_id: str) -> None:
+    try:
+        await _run_campaign_resend_failed_job_inner(job_id, campaign_id)
+    except Exception as exc:
+        update_job(job_id, status="failed", message=str(exc), progress=100)
+        async with AsyncSessionLocal() as db:
+            campaign = (await db.execute(
+                select(EmailCampaign).where(EmailCampaign.id == campaign_id)
+            )).scalar_one_or_none()
+            if campaign and campaign.status == CampaignStatus.running:
+                campaign.status = CampaignStatus.completed
+                await db.commit()
+
+
+async def _run_campaign_resend_failed_job_inner(job_id: str, campaign_id: str) -> None:
+    async with AsyncSessionLocal() as db:
+        try:
+            campaign, template = await _get_campaign_template(db, campaign_id)
+        except ValueError as exc:
+            update_job(job_id, status="failed", message=str(exc), progress=100)
+            return
+
+        failed_recipients = (
+            await db.execute(
+                select(EmailCampaignRecipient).where(
+                    EmailCampaignRecipient.campaign_id == campaign_id,
+                    EmailCampaignRecipient.status == RecipientStatus.failed,
+                )
+            )
+        ).scalars().all()
+
+        total = len(failed_recipients)
+        if total == 0:
+            update_job(
+                job_id,
+                status="completed",
+                progress=100,
+                total=0,
+                processed=0,
+                sent=0,
+                failed=0,
+                message="No failed emails to resend",
+            )
+            return
+
+        campaign.status = CampaignStatus.running
+        campaign.job_id = job_id
+        campaign.started_at = datetime.utcnow()
+        await db.commit()
+
+        update_job(
+            job_id,
+            status="running",
+            total=total,
+            processed=0,
+            sent=0,
+            failed=0,
+            progress=0,
+            message=f"Resending {total} failed email(s)…",
+        )
+
+        sent = 0
+        still_failed = 0
+        batch_size = 25
+
+        for idx, recipient in enumerate(failed_recipients):
+            user = None
+            if recipient.user_id:
+                user = (
+                    await db.execute(select(User).where(User.id == recipient.user_id))
+                ).scalar_one_or_none()
+            try:
+                context = _build_recipient_context(recipient, user)
+                subject, html_body = render_email_template(template, context)
+                await send_campaign_email(recipient.email, subject, html_body, raise_on_error=True)
+                recipient.status = RecipientStatus.sent
+                recipient.error = None
+                recipient.sent_at = datetime.utcnow()
+                campaign.failed_count = max(0, campaign.failed_count - 1)
+                campaign.sent_count += 1
+                sent += 1
+            except Exception as exc:
+                recipient.status = RecipientStatus.failed
+                recipient.error = str(exc)
+                still_failed += 1
+
+            if (idx + 1) % batch_size == 0 or idx + 1 == total:
+                await db.commit()
+                progress = int(((idx + 1) / total) * 100) if total else 100
+                update_job(
+                    job_id,
+                    processed=idx + 1,
+                    sent=sent,
+                    failed=still_failed,
+                    progress=progress,
+                    message=f"Resent {sent} of {total} failed email(s)…",
+                )
+
+        campaign.status = CampaignStatus.completed
+        campaign.completed_at = datetime.utcnow()
+        await db.commit()
+
+        update_job(
+            job_id,
+            status="completed",
+            progress=100,
+            processed=total,
+            sent=sent,
+            failed=still_failed,
+            message=f"Resend complete: {sent} sent, {still_failed} still failed",
+        )
