@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, BackgroundTasks, Request, File, UploadFile, Form
+from fastapi import APIRouter, Depends, BackgroundTasks, Request, File, UploadFile, Form, HTTPException
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
@@ -36,8 +37,35 @@ from controllers.auth_controller import (
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
+def _client_ip(request: Request) -> str | None:
+    forwarded_for = request.headers.get("X-Forwarded-For")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip() or None
+    if request.client:
+        return request.client.host
+    return None
+
+
+def _validation_error_detail(exc: ValidationError) -> dict:
+    errors: dict[str, str] = {}
+    for error in exc.errors():
+        field = error["loc"][-1] if error["loc"] else "general"
+        msg = error["msg"]
+        if field == "email" and "valid email" in msg.lower():
+            msg = "Please enter a valid email address"
+        elif msg.startswith("Value error, "):
+            msg = msg.removeprefix("Value error, ")
+        key = field if field in {
+            "email", "password", "full_name", "phone", "company_name",
+            "work_status", "current_city", "role",
+        } else "general"
+        errors[key] = msg
+    return errors or {"general": "Invalid input"}
+
+
 @router.post("/register", response_model=RegisterResponse, status_code=201)
 async def register(
+    request: Request,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     email: str = Form(...),
@@ -50,17 +78,26 @@ async def register(
     current_city: str | None = Form(None),
     resume: UploadFile | None = File(None),
 ):
-    body = RegisterRequest(
-        full_name=full_name,
-        email=email,
-        password=password,
-        role=role,
-        phone=phone,
-        company_name=company_name,
-        work_status=work_status,
-        current_city=current_city,
+    try:
+        body = RegisterRequest(
+            full_name=full_name,
+            email=email,
+            password=password,
+            role=role,
+            phone=phone,
+            company_name=company_name,
+            work_status=work_status,
+            current_city=current_city,
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail=_validation_error_detail(exc)) from exc
+    return await ctrl_register(
+        body,
+        background_tasks,
+        db,
+        resume_file=resume,
+        registration_ip=_client_ip(request),
     )
-    return await ctrl_register(body, background_tasks, db, resume_file=resume)
 
 
 @router.post("/verify-otp", response_model=TokenResponse)

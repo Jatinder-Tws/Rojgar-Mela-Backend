@@ -45,7 +45,7 @@ services:
       - .:/app
       - uploads_data_prod:/app/uploads
     # In production, we typically don't use --reload.
-    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips='*'
 
   celery-worker:
     build:

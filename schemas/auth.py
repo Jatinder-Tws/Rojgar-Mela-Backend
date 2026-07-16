@@ -44,21 +44,19 @@ class RegisterRequest(BaseModel):
             raise ValueError("Work status must be experienced or fresher")
         return v
 
+    @field_validator("role")
+    @classmethod
+    def validate_role(cls, v: str) -> str:
+        v = (v or "seeker").strip().lower()
+        if v not in {"seeker", "provider"}:
+            raise ValueError("Role must be seeker or provider")
+        return v
+
     @field_validator("password")
     @classmethod
     def validate_password(cls, v: str) -> str:
         if len(v) < 8:
             raise ValueError("Password must be at least 8 characters")
-        if len(v) > 15:
-            raise ValueError("Password must not exceed 15 characters")
-        if not re.search(r"[A-Z]", v):
-            raise ValueError("Password must contain at least one uppercase letter")
-        if not re.search(r"[a-z]", v):
-            raise ValueError("Password must contain at least one lowercase letter")
-        if not re.search(r"[0-9]", v):
-            raise ValueError("Password must contain at least one number")
-        if not re.search(r"[!@#$%^&*(),.?\":{}|<>\-_=+\[\];:'\\]", v):
-            raise ValueError("Password must contain at least one symbol (!@#$%^&*etc)")
         return v
 
     @model_validator(mode="after")
