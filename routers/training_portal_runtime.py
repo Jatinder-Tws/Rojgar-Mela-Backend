@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status, UploadFile, File
-from sqlalchemy import select, func, update, or_, and_
+from sqlalchemy import select, func, update, or_, and_, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
@@ -615,6 +615,17 @@ async def create_enrollment(
     name = body.candidate_name or f"{current_user.first_name or ''} {current_user.last_name or ''}".strip() or email.split("@")[0]
     phone = body.candidate_phone or current_user.phone
 
+    # Delete any stale initiated enrollments that never completed payment
+    await db.execute(
+        delete(TrainingPortalEnrollment).where(
+            TrainingPortalEnrollment.candidate_email == email,
+            TrainingPortalEnrollment.enrollment_type == body.enrollment_type,
+            TrainingPortalEnrollment.item_id == body.item_id,
+            TrainingPortalEnrollment.status == "payment_initiated",
+        )
+    )
+    await db.flush()
+
     dup = await db.execute(
         select(TrainingPortalEnrollment).where(
             TrainingPortalEnrollment.candidate_email == email,
@@ -682,7 +693,7 @@ async def create_enrollment(
         installments=body.installments,
         voter_card_url=body.voter_card_url,
         notes=body.notes,
-        status="active" if body.payment_status in ("paid_online", "paid_offline", "free") else "pending",
+        status="payment_initiated" if body.payment_status == "initiated" else ("active" if body.payment_status in ("paid_online", "paid_offline", "free") else "pending"),
     )
     db.add(enrollment)
     await db.flush()
@@ -2299,7 +2310,7 @@ async def verify_payment(
         order.amount_paise / 100.0,
         "online",
         provider="razorpay",
-        provider_transaction_id=payment_info["provider_payment_id"],
+        provider_transaction_id=body.provider_payment_id,
         reference_order_id=order.id,
         created_by_id=None,
     )
@@ -2408,9 +2419,9 @@ async def razorpay_webhook(request: Request, db: AsyncSession = Depends(get_db))
         order.amount_paise / 100.0,
         "online",
         provider="razorpay",
-        provider_transaction_id=body.provider_payment_id,
+        provider_transaction_id=payment_info["provider_payment_id"],
         reference_order_id=order.id,
-        created_by_id=current_user.id,
+        created_by_id=None,
     )
     await db.flush()
     return {"status": "ok"}

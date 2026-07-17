@@ -190,7 +190,7 @@ async def create_ticket(body: TicketCreate, user: User, db: AsyncSession) -> Tic
     await db.commit()
     await db.refresh(ticket)
 
-    role_label = "Job Seeker" if _user_role_str(user) == "seeker" else "Provider"
+    role_label = "Job Seeker" if _user_role_str(user) == "seeker" else ("Teacher" if _user_role_str(user) == "teacher" else "Provider")
     await notify_super_admins(
         db,
         title="New Support Ticket",
@@ -204,7 +204,7 @@ async def create_ticket(body: TicketCreate, user: User, db: AsyncSession) -> Tic
     await broadcast_ticket_update(db, ticket, action="created")
 
     return TicketDetailOut(
-        **_ticket_to_out(ticket, message_count=1, last_message_at=initial_msg.created_at).model_dump(),
+        **_ticket_to_out(ticket, message_count=1, last_message_at=initial_msg.created_at, ticket_user=user).model_dump(),
         messages=[initial_out],
     )
 
@@ -230,7 +230,7 @@ async def list_my_tickets(user: User, db: AsyncSession) -> List[TicketOut]:
         .limit(100)
     )
     rows = result.all()
-    return [_ticket_to_out(t, int(mc or 0), lm) for t, mc, lm in rows]
+    return [_ticket_to_out(t, int(mc or 0), lm, ticket_user=user) for t, mc, lm in rows]
 
 
 async def get_my_ticket(ticket_id: str, user: User, db: AsyncSession) -> TicketDetailOut:
@@ -255,7 +255,7 @@ async def get_my_ticket(ticket_id: str, user: User, db: AsyncSession) -> TicketD
     ]
     last_at = messages[-1].created_at if messages else None
     return TicketDetailOut(
-        **_ticket_to_out(ticket, message_count=len(messages), last_message_at=last_at).model_dump(),
+        **_ticket_to_out(ticket, message_count=len(messages), last_message_at=last_at, ticket_user=user).model_dump(),
         messages=messages,
     )
 
@@ -310,7 +310,7 @@ async def submit_feedback(body: FeedbackCreate, user: User, db: AsyncSession) ->
     await db.commit()
     await db.refresh(fb)
 
-    role_label = "Job Seeker" if _user_role_str(user) == "seeker" else "Provider"
+    role_label = "Job Seeker" if _user_role_str(user) == "seeker" else ("Teacher" if _user_role_str(user) == "teacher" else "Provider")
     await notify_super_admins(
         db,
         title="New Platform Feedback",
