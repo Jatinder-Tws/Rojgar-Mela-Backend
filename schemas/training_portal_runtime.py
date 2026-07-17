@@ -50,7 +50,7 @@ class PortalEnrollmentCreate(BaseModel):
     candidate_email: Optional[str] = None
     candidate_phone: Optional[str] = None
     payment_type: Literal["Free", "Full Payment", "EMI"] = "Full Payment"
-    payment_status: Literal["paid_online", "paid_offline", "pending", "free", "overdue", "refunded"] = "pending"
+    payment_status: Literal["paid_online", "paid_offline", "pending", "free", "overdue", "refunded", "initiated"] = "pending"
     payment_mode: Optional[str] = None
     total_fee: float = 0
     paid_amount: float = 0
@@ -65,7 +65,7 @@ class PortalEnrollmentCreate(BaseModel):
 class PortalEnrollmentUpdate(BaseModel):
     batch_id: Optional[str] = None
     batch_name: Optional[str] = None
-    payment_status: Optional[Literal["paid_online", "paid_offline", "pending", "free", "overdue", "refunded"]] = None
+    payment_status: Optional[Literal["paid_online", "paid_offline", "pending", "free", "overdue", "refunded", "initiated"]] = None
     payment_mode: Optional[str] = None
     paid_amount: Optional[float] = None
     balance_due: Optional[float] = None
