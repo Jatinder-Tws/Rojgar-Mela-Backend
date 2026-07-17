@@ -75,6 +75,20 @@ class Settings(BaseSettings):
     RAZORPAY_KEY_SECRET: str = ""
     RAZORPAY_WEBHOOK_SECRET: str = ""
 
+    # Google Calendar integration (training class schedule sync)
+    # Leave OAuth keys empty to disable per-user auto-sync; ICS email invites
+    # still work as long as SMTP is configured.
+    GOOGLE_CALENDAR_ICS_ENABLED: bool = True
+    GOOGLE_CALENDAR_CLIENT_ID: str = ""
+    GOOGLE_CALENDAR_CLIENT_SECRET: str = ""
+    # Must exactly match an Authorized redirect URI in the Google Cloud OAuth client.
+    GOOGLE_CALENDAR_REDIRECT_URI: str = "http://localhost:8000/google-calendar/callback"
+    # Where users land after connecting (training portal). Empty = TRAINING_URL.
+    GOOGLE_CALENDAR_POST_CONNECT_URL: str = ""
+
+    def google_calendar_oauth_configured(self) -> bool:
+        return bool(self.GOOGLE_CALENDAR_CLIENT_ID and self.GOOGLE_CALENDAR_CLIENT_SECRET)
+
 
 @lru_cache()
 def get_settings() -> Settings:

@@ -89,6 +89,11 @@ from services.email_service import (
     send_training_portal_payment_link_email,
     send_training_portal_payment_success_email,
 )
+from services.class_calendar_sync import (
+    run_class_sync,
+    run_class_cancel,
+    build_cancel_snapshot,
+)
 from services.training_portal_class_live import (
     session_occurs_on_date,
     session_live_applies_to_date,
@@ -1194,6 +1199,7 @@ async def list_class_sessions(
 @router.post("/class-sessions", response_model=PortalClassSessionOut, status_code=status.HTTP_201_CREATED)
 async def create_class_session(
     body: PortalClassSessionCreate,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(require_super_admin),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1227,6 +1233,7 @@ async def create_class_session(
     )
     db.add(session)
     await db.flush()
+    background_tasks.add_task(run_class_sync, session.id)
     return session_to_out(session)
 
 
@@ -1234,6 +1241,7 @@ async def create_class_session(
 async def update_class_session(
     session_id: str,
     body: PortalClassSessionUpdate,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(require_super_admin),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1261,12 +1269,14 @@ async def update_class_session(
         setattr(session, field, value)
     session.updated_at = datetime.utcnow()
     await db.flush()
+    background_tasks.add_task(run_class_sync, session.id)
     return session_to_out(session)
 
 
 @router.delete("/class-sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_class_session(
     session_id: str,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(require_super_admin),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1276,8 +1286,12 @@ async def delete_class_session(
     session = result.scalar_one_or_none()
     if not session:
         raise HTTPException(status_code=404, detail="Class session not found")
+    # Capture calendar data before the row (and its calendar links) are deleted.
+    cancel_snapshot = await build_cancel_snapshot(db, session_id)
     await db.delete(session)
     await db.flush()
+    if cancel_snapshot:
+        background_tasks.add_task(run_class_cancel, cancel_snapshot)
     return None
 
 

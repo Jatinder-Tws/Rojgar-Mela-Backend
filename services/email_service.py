@@ -8,6 +8,7 @@ import aiosmtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.image import MIMEImage
+from email.mime.application import MIMEApplication
 from email.utils import parseaddr
 from jinja2 import Environment, FileSystemLoader
 
@@ -486,6 +487,64 @@ async def send_training_portal_payment_link_email(
     <p><a href="{pay_url}">Pay Now</a></p>
     """
     await send_notification_email(to_email, candidate_name, "Complete Your Training Payment", html)
+
+
+async def send_class_calendar_invite_email(
+    to_email: str,
+    recipient_name: str,
+    class_title: str,
+    schedule_line: str,
+    venue: str,
+    ics_content: str,
+    *,
+    method: str = "REQUEST",
+    role_label: str = "class",
+) -> None:
+    """Email an .ics calendar invite so the class appears in the recipient's calendar.
+
+    method="REQUEST" adds/updates the event; method="CANCEL" removes it. Gmail
+    surfaces an "add to calendar" card automatically for REQUEST invites.
+    """
+    cancelled = method.upper() == "CANCEL"
+    if cancelled:
+        subject = f"Cancelled: {class_title}"
+        intro = f"The following {role_label} has been <strong>cancelled</strong> and removed from your calendar:"
+    else:
+        subject = f"Class scheduled: {class_title}"
+        intro = f"A {role_label} has been scheduled. It has been added to your calendar:"
+
+    html = f"""
+    <p>Hi {recipient_name},</p>
+    <p>{intro}</p>
+    <ul>
+      <li><strong>Class:</strong> {class_title}</li>
+      <li><strong>When:</strong> {schedule_line}</li>
+      <li><strong>Venue:</strong> {venue}</li>
+    </ul>
+    <p>{'This event will disappear from your calendar automatically.' if cancelled else 'Accept the invite to keep it in your Google Calendar. You will get reminders 30 and 15 minutes before class.'}</p>
+    <p>— RojgarMela Training</p>
+    """
+    text_body = _html_to_plain_text(html)
+
+    msg = MIMEMultipart("mixed")
+    _apply_common_headers(msg, to_email, subject)
+
+    alt = MIMEMultipart("alternative")
+    alt.attach(MIMEText(text_body, "plain", "utf-8"))
+    alt.attach(MIMEText(html, "html", "utf-8"))
+    # Inline calendar part drives the Gmail/Google Calendar auto-add card.
+    ical_part = MIMEText(ics_content, f"calendar; method={method.upper()}; charset=UTF-8")
+    ical_part.add_header("Content-Class", "urn:content-classes:calendarmessage")
+    alt.attach(ical_part)
+    msg.attach(alt)
+
+    # File attachment fallback for clients that ignore the inline part.
+    ics_attachment = MIMEApplication(ics_content.encode("utf-8"), _subtype="ics")
+    ics_attachment.add_header("Content-Disposition", "attachment", filename="invite.ics")
+    ics_attachment.add_header("Content-Type", f"text/calendar; method={method.upper()}; name=invite.ics")
+    msg.attach(ics_attachment)
+
+    await _deliver_message(msg, to_email)
 
 
 async def send_training_portal_payment_success_email(
