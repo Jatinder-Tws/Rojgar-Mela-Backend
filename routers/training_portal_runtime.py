@@ -1,9 +1,12 @@
 import json
 import logging
 import uuid
+import csv
+import io
 from datetime import datetime, timedelta, date
 from pathlib import Path
 from typing import List, Optional
+from fastapi.responses import StreamingResponse
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status, UploadFile, File
 from sqlalchemy import select, func, update, or_, and_, delete
@@ -88,6 +91,7 @@ from services.email_service import (
     send_training_portal_batch_assigned_email,
     send_training_portal_payment_link_email,
     send_training_portal_payment_success_email,
+    send_notification_email,
 )
 from services.class_calendar_sync import (
     run_class_sync,
@@ -599,6 +603,355 @@ async def list_enrollments(
 
     result = await db.execute(query)
     return [enrollment_to_out(row) for row in result.scalars().all()]
+
+
+@router.post("/enrollments/export-csv")
+async def export_students_csv(
+    body: dict = {},
+    current_user: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    emails = body.get("emails")
+    
+    # Fetch all enrollments
+    query = select(TrainingPortalEnrollment)
+    res_en = await db.execute(query)
+    db_enrollments = res_en.scalars().all()
+    
+    # Fetch all leave requests
+    res_lv = await db.execute(select(TrainingPortalLeaveRequest))
+    db_leaves = res_lv.scalars().all()
+    
+    # Group enrollments by candidate_email
+    by_email = {}
+    for e in db_enrollments:
+        by_email.setdefault(e.candidate_email, []).append(e)
+        
+    # Group leave requests by candidate_email
+    leaves_by_email = {}
+    for l in db_leaves:
+        leaves_by_email.setdefault(l.candidate_email, []).append(l)
+        
+    # Build directory entries
+    targets = []
+    for email, st_enrollments in by_email.items():
+        if emails is not None and email not in emails:
+            continue
+            
+        active = [e for e in st_enrollments if e.status == "active"]
+        total_fee = sum(e.total_fee for e in st_enrollments)
+        total_paid = sum(e.paid_amount for e in st_enrollments)
+        total_balance_due = sum(e.balance_due for e in st_enrollments)
+        
+        avg_attendance = 0
+        if len(st_enrollments) > 0:
+            avg_attendance = round(sum(e.attendance_percentage for e in st_enrollments) / len(st_enrollments))
+            
+        primary_status = "completed"
+        if len(active) > 0:
+            primary_status = "active"
+        elif any(e.status == "pending" for e in st_enrollments):
+            primary_status = "pending"
+        elif any(e.status == "dropped" for e in st_enrollments):
+            primary_status = "dropped"
+            
+        has_confirmed_course = any(
+            e.enrollment_type == "course" and e.status not in ("pending", "dropped")
+            for e in st_enrollments
+        )
+        
+        phone = st_enrollments[0].candidate_phone
+        name = st_enrollments[0].candidate_name
+        
+        local_part = email.split('@')[0].upper() if '@' in email else "UNKNOWN"
+        student_code = f"STU-{local_part}"
+        
+        st_leaves = leaves_by_email.get(email, [])
+        pending_slips = len([l for l in st_leaves if l.status == "Pending"])
+        
+        laptop_confirmed = has_confirmed_course or any(
+            e.enrollment_type == "course" and e.status == "active"
+            for e in st_enrollments
+        )
+        
+        targets.append({
+            "name": name,
+            "studentCode": student_code,
+            "email": email,
+            "phone": phone or "",
+            "laptopConfirmed": "Yes" if laptop_confirmed else "No",
+            "avgAttendance": avg_attendance,
+            "status": primary_status,
+            "enrolledBatchesCount": len([e for e in st_enrollments if e.batch_id or e.enrollment_type == "internship"]),
+            "pendingAbsenceSlips": pending_slips,
+        })
+        
+    targets.sort(key=lambda x: x["name"])
+    
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        'Student Name',
+        'Student Code',
+        'Email',
+        'Phone',
+        'Laptop Confirmed',
+        'Avg Attendance (%)',
+        'Status',
+        'Enrolled Batches Count',
+        'Pending Absence Slips',
+    ])
+    
+    for t in targets:
+        writer.writerow([
+            t["name"],
+            t["studentCode"],
+            t["email"],
+            t["phone"],
+            t["laptopConfirmed"],
+            t["avgAttendance"],
+            t["status"],
+            t["enrolledBatchesCount"],
+            t["pendingAbsenceSlips"],
+        ])
+        
+    csv_data = output.getvalue()
+    output.close()
+    
+    return StreamingResponse(
+        io.BytesIO(csv_data.encode("utf-8")),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f"attachment; filename=students_export_{datetime.utcnow().strftime('%Y-%m-%d')}.csv"
+        }
+    )
+
+
+@router.post("/enrollments/send-reminder")
+async def send_reminder_to_students(
+    body: dict,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    emails = body.get("emails")
+    if not emails:
+        raise HTTPException(status_code=400, detail="No emails provided")
+        
+    result = await db.execute(
+        select(TrainingPortalEnrollment.candidate_email, TrainingPortalEnrollment.candidate_name)
+        .where(TrainingPortalEnrollment.candidate_email.in_(emails))
+    )
+    email_to_name = {row[0]: row[1] for row in result.all()}
+    
+    for email in emails:
+        name = email_to_name.get(email, "Trainee")
+        
+        notif = TrainingPortalCandidateNotification(
+            id=str(uuid.uuid4()),
+            candidate_email=email,
+            notification_type="admin_reminder",
+            title="Training Portal Reminder",
+            description="You have a new reminder from the portal administrator. Please check your dashboard or email for updates.",
+            event_date=datetime.utcnow().strftime("%Y-%m-%d"),
+            severity="info",
+        )
+        db.add(notif)
+        
+        background_tasks.add_task(
+            send_notification_email,
+            email,
+            name,
+            "Admin Training Reminder",
+            "This is a reminder from the training portal administrator. Please log in to your training portal dashboard to view updates or contact the administration if you have questions."
+        )
+        
+    await db.flush()
+    return {"status": "ok", "message": f"Reminders queued for {len(emails)} student(s)."}
+
+
+@router.post("/enrollments/bulk-delete")
+async def bulk_delete_students(
+    body: dict,
+    current_user: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    emails = body.get("emails")
+    if not emails:
+        raise HTTPException(status_code=400, detail="No emails provided")
+        
+    # Get enrollment IDs to clean up transactions
+    res_en = await db.execute(
+        select(TrainingPortalEnrollment.id).where(TrainingPortalEnrollment.candidate_email.in_(emails))
+    )
+    enrollment_ids = [row[0] for row in res_en.all()]
+    if enrollment_ids:
+        await db.execute(
+            delete(TrainingPortalTransaction).where(TrainingPortalTransaction.enrollment_id.in_(enrollment_ids))
+        )
+        
+    # Delete enrollments
+    await db.execute(
+        delete(TrainingPortalEnrollment).where(TrainingPortalEnrollment.candidate_email.in_(emails))
+    )
+    # Delete leave requests
+    await db.execute(
+        delete(TrainingPortalLeaveRequest).where(TrainingPortalLeaveRequest.candidate_email.in_(emails))
+    )
+    # Delete behavior reports
+    await db.execute(
+        delete(TrainingPortalBehaviorReport).where(TrainingPortalBehaviorReport.candidate_email.in_(emails))
+    )
+    # Delete notifications
+    await db.execute(
+        delete(TrainingPortalCandidateNotification).where(TrainingPortalCandidateNotification.candidate_email.in_(emails))
+    )
+    
+    await db.flush()
+    return {"status": "ok", "message": f"Successfully deleted records for {len(emails)} student(s)."}
+
+
+@router.post("/export-csv")
+async def generic_export_csv(
+    body: dict,
+    current_user: User = Depends(require_training_portal_user),
+    db: AsyncSession = Depends(get_db),
+):
+    entity = body.get("entity")
+    ids = body.get("ids")
+    
+    if not entity:
+        raise HTTPException(status_code=400, detail="Entity type is required")
+        
+    output = io.StringIO()
+    writer = csv.writer(output)
+    filename = f"{entity}_export_{datetime.utcnow().strftime('%Y-%m-%d')}.csv"
+    
+    if entity == "batches":
+        query = select(TrainingPortalBatch).order_by(TrainingPortalBatch.created_at.desc())
+        if ids:
+            query = query.where(TrainingPortalBatch.id.in_(ids))
+        res = await db.execute(query)
+        batches = res.scalars().all()
+        
+        courses_res = await db.execute(select(TrainingPortalCourse))
+        courses_map = {c.id: c.title for c in courses_res.scalars().all()}
+        
+        writer.writerow([
+            'Batch Name', 'Course Title', 'Instructor', 'Schedule', 'Days', 'Venue', 
+            'Max Seats', 'Delivery Mode', 'Status'
+        ])
+        for b in batches:
+            days_str = ", ".join(b.days) if b.days else "—"
+            course_title = courses_map.get(b.course_id, "Unknown Course")
+            writer.writerow([
+                b.batch_name, course_title, b.instructor_name or "—", b.time_slot or "—",
+                days_str, b.venue or "—", b.max_seats, b.delivery_mode, b.status
+            ])
+            
+    elif entity == "ledger":
+        query = select(TrainingPortalEnrollment).where(TrainingPortalEnrollment.enrollment_type == "course")
+        if ids:
+            query = query.where(or_(
+                TrainingPortalEnrollment.id.in_(ids),
+                TrainingPortalEnrollment.candidate_email.in_(ids)
+            ))
+        res = await db.execute(query)
+        enrollments = res.scalars().all()
+        
+        writer.writerow([
+            'Student Name', 'Email', 'Course/Program', 'Payment Type', 'Total Fee',
+            'Paid Amount', 'Balance Due', 'Payment Status'
+        ])
+        for e in enrollments:
+            writer.writerow([
+                e.candidate_name, e.candidate_email, e.title, e.payment_type,
+                e.total_fee, e.paid_amount, e.balance_due, e.payment_status
+            ])
+            
+    elif entity == "transactions":
+        query = select(TrainingPortalTransaction).order_by(TrainingPortalTransaction.created_at.desc())
+        if ids:
+            query = query.where(TrainingPortalTransaction.id.in_(ids))
+        res = await db.execute(query)
+        txns = res.scalars().all()
+        
+        writer.writerow([
+            'Transaction ID', 'Date', 'Student Name', 'Email', 'Program',
+            'Type', 'Amount', 'Payment Mode', 'Status', 'Notes'
+        ])
+        for t in txns:
+            date_str = t.created_at.strftime("%Y-%m-%d %H:%M") if t.created_at else "—"
+            writer.writerow([
+                t.transaction_id, date_str, t.candidate_name, t.candidate_email, t.program_title,
+                t.transaction_type, t.amount, t.payment_mode or "—", t.status, t.notes or ""
+            ])
+            
+    elif entity == "attendance":
+        query = select(TrainingPortalAttendanceRecord).order_by(TrainingPortalAttendanceRecord.created_at.desc())
+        if ids:
+            query = query.where(TrainingPortalAttendanceRecord.id.in_(ids))
+        res = await db.execute(query)
+        records = res.scalars().all()
+        
+        writer.writerow([
+            'Trainee Name', 'Email', 'Batch Name', 'Session Title', 'Date', 'Status', 'Duration (mins)'
+        ])
+        for r in records:
+            writer.writerow([
+                r.candidate_name, r.candidate_email, r.batch_name or "—", r.session_title or "—",
+                r.date, r.status, r.duration_minutes
+            ])
+            
+    elif entity == "leaves":
+        query = select(TrainingPortalLeaveRequest).order_by(TrainingPortalLeaveRequest.created_at.desc())
+        if ids:
+            query = query.where(TrainingPortalLeaveRequest.id.in_(ids))
+        res = await db.execute(query)
+        leaves = res.scalars().all()
+        
+        writer.writerow([
+            'Requester Name', 'Email', 'Date', 'Status', 'Reason', 'Reviewed By'
+        ])
+        for l in leaves:
+            requester = l.candidate_name or l.teacher_name or "Unknown"
+            email = l.candidate_email or l.teacher_email or "—"
+            writer.writerow([
+                requester, email, l.date, l.status, l.reason, l.reviewed_by_id or "—"
+            ])
+            
+    elif entity == "certificates":
+        query = select(TrainingPortalEnrollment)
+        if ids:
+            query = query.where(TrainingPortalEnrollment.id.in_(ids))
+        else:
+            query = query.where(TrainingPortalEnrollment.is_certificate_issued == True)
+        res = await db.execute(query)
+        enrollments = res.scalars().all()
+        
+        writer.writerow([
+            'Recipient Name', 'Email', 'Course Title', 'Issue Date', 'Certificate ID', 'Status'
+        ])
+        for e in enrollments:
+            issue_date = e.updated_at.strftime("%Y-%m-%d") if (e.is_certificate_issued and e.updated_at) else "—"
+            status = e.certificate_status or ("Issued" if e.is_certificate_issued else "Pending")
+            writer.writerow([
+                e.candidate_name, e.candidate_email, e.title, issue_date, e.certificate_id or "—", status
+            ])
+            
+    else:
+        raise HTTPException(status_code=400, detail="Invalid entity type")
+        
+    csv_data = output.getvalue()
+    output.close()
+    
+    return StreamingResponse(
+        io.BytesIO(csv_data.encode("utf-8")),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f"attachment; filename={filename}"
+        }
+    )
 
 
 @router.post("/enrollments", response_model=PortalEnrollmentOut, status_code=status.HTTP_201_CREATED)
