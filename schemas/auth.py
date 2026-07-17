@@ -206,7 +206,9 @@ class ResetPasswordResponse(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    email: EmailStr
+    # Accepts a normal account email OR a training-portal teacher login username
+    # (usernames are not always email-shaped), so kept as a plain string.
+    email: str
     password: str
 
 

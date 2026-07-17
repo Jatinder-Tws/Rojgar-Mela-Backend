@@ -510,6 +510,15 @@ async def get_campaign_delivery_stats(
     if total == 0:
         total = campaign.total_recipients
 
+    # Reconcile the campaign's denormalized counters with the live recipient
+    # counts. These can drift (e.g. recipient statuses change without the
+    # campaign row being updated), which makes the campaign detail endpoint
+    # disagree with these delivery stats.
+    if total > 0 and (campaign.sent_count != sent or campaign.failed_count != failed):
+        campaign.sent_count = sent
+        campaign.failed_count = failed
+        await db.commit()
+
     return CampaignDeliveryStats(
         total=total,
         sent=sent,

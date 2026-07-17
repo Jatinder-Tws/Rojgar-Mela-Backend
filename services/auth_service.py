@@ -152,8 +152,8 @@ async def require_seeker_or_provider(user: User = Depends(require_verified)) -> 
     if user.role is None:
         raise HTTPException(status_code=403, detail="Please complete onboarding first")
     role_str = user.role.value if hasattr(user.role, "value") else str(user.role)
-    if role_str not in ("seeker", "provider"):
-        raise HTTPException(status_code=403, detail="Only job seekers and providers can access support")
+    if role_str not in ("seeker", "provider", "teacher"):
+        raise HTTPException(status_code=403, detail="Only job seekers, providers, and teachers can access support")
     return user
 
 

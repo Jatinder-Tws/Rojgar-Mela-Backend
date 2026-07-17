@@ -2,7 +2,7 @@ from datetime import datetime
 import secrets
 import string
 import pyotp
-from sqlalchemy import select, and_, or_
+from sqlalchemy import select, and_, or_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException, BackgroundTasks
 
@@ -274,12 +274,28 @@ async def login(
     referer: str | None = None,
 ) -> LoginResponse:
     try:
-        result = await db.execute(select(User).where(User.email == body.email))
+        identifier = (body.email or "").strip()
+        result = await db.execute(select(User).where(func.lower(User.email) == identifier.lower()))
         user = result.scalar_one_or_none()
+
+        # Fallback: training-portal teachers are issued a login username that may
+        # differ from their account email. Resolve it to the linked user account.
+        if not user:
+            from models.training_portal_teacher import TrainingPortalTeacher
+
+            teacher_res = await db.execute(
+                select(TrainingPortalTeacher).where(
+                    func.lower(TrainingPortalTeacher.login_username) == identifier.lower()
+                )
+            )
+            teacher = teacher_res.scalar_one_or_none()
+            if teacher and teacher.user_id:
+                user_res = await db.execute(select(User).where(User.id == teacher.user_id))
+                user = user_res.scalar_one_or_none()
 
         if not user:
             raise HTTPException(
-                status_code=400, detail={"email": "No account found with this email"}
+                status_code=400, detail={"email": "No account found with this email or username"}
             )
 
         if not user.hashed_password:

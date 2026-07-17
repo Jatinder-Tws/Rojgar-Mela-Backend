@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
 from config import settings, get_cors_allow_origins, get_cors_origin_regex
-from database import init_db, patch_email_admin_schema, patch_interview_application_schema, patch_dashboard_indexes, patch_support_bot_schema, patch_company_internships_schema, patch_teacher_role_schema, patch_training_portal_schema, patch_users_registration_schema, AsyncSessionLocal, engine
+from database import init_db, patch_email_admin_schema, patch_interview_application_schema, patch_dashboard_indexes, patch_support_bot_schema, patch_company_internships_schema, patch_teacher_role_schema, patch_training_portal_schema, patch_users_registration_schema, patch_google_calendar_schema, AsyncSessionLocal, engine
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +30,7 @@ async def ensure_db_tables():
     await patch_teacher_role_schema()
     await patch_training_portal_schema()
     await patch_users_registration_schema()
+    await patch_google_calendar_schema()
     from controllers.super_admin_controller import ensure_super_admin_user
     await ensure_super_admin_user()
 
@@ -71,7 +72,7 @@ app.add_middleware(
 )
 
 # ── Routers ─────────────────────────────────────────────────────────────────
-from routers import auth, users, jobs, resumes, matches, applications, notifications, interviews, assessment, portfolio, analytics, resume_builder, onboarding, master, ai_interview, roadmap, external_candidate, master_data, ai_coach ,interview_scheduling, import_users, superadmin, super_admin, super_admin_support, support, help_desk_bot, attendance, job_fair, email_admin, dashboard, company_internships, training_courses, training_portal_courses, training_portal_categories, training_portal_teachers, training_portal_internships, training_portal_runtime # noqa
+from routers import auth, users, jobs, resumes, matches, applications, notifications, interviews, assessment, portfolio, analytics, resume_builder, onboarding, master, ai_interview, roadmap, external_candidate, master_data, ai_coach ,interview_scheduling, import_users, superadmin, super_admin, super_admin_support, support, help_desk_bot, attendance, job_fair, email_admin, dashboard, company_internships, training_courses, training_portal_courses, training_portal_categories, training_portal_teachers, training_portal_internships, training_portal_runtime, google_calendar # noqa
 
 
 API_PREFIX = ""
@@ -109,6 +110,7 @@ routers = [
     training_portal_teachers.router,
     training_portal_internships.router,
     training_portal_runtime.router,
+    google_calendar.router,
 ]
 
 app.include_router(auth.router)

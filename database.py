@@ -1,6 +1,7 @@
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 from config import settings
+from sqlalchemy import text
 
 engine = create_async_engine(
     settings.DATABASE_URL,
@@ -39,13 +40,13 @@ async def init_db():
     """Create all tables and enable pgvector extension."""
     async with engine.begin() as conn:
         await conn.execute(__import__("sqlalchemy").text("CREATE EXTENSION IF NOT EXISTS vector"))
-        from models import user, resume, job, match, application, notification, otp, interview, provider_interview_settings, provider_availability_window, assessment, portfolio, master, ai_interview, roadmap, ai_coach, imported_user_password, attendance, job_fair, email_template, email_campaign, support_ticket, platform_feedback, contact_inquiry, company_internship, training_course, training_portal_course, training_portal_category, training_portal_teacher, training_portal_internship, training_portal_batch, training_portal_enrollment, training_portal_class_session, training_portal_payment, training_portal_candidate_notification, training_portal_transaction, training_portal_refund_request, training_portal_attendance, training_portal_leave_request, training_portal_behavior_report  # noqa
+        from models import user, resume, job, match, application, notification, otp, interview, provider_interview_settings, provider_availability_window, assessment, portfolio, master, ai_interview, roadmap, ai_coach, imported_user_password, attendance, job_fair, email_template, email_campaign, support_ticket, platform_feedback, contact_inquiry, company_internship, training_course, training_portal_course, training_portal_category, training_portal_teacher, training_portal_internship, training_portal_batch, training_portal_enrollment, training_portal_class_session, training_portal_payment, training_portal_candidate_notification, training_portal_transaction, training_portal_refund_request, training_portal_attendance, training_portal_leave_request, training_portal_behavior_report, google_calendar_token, training_portal_class_calendar_link  # noqa
         await conn.run_sync(Base.metadata.create_all)
 
 
 async def patch_interview_application_schema():
     """Add interview lifecycle columns and application status enum values."""
-    from sqlalchemy import text
+    
 
     statements = [
         "ALTER TYPE applicationstatus ADD VALUE IF NOT EXISTS 'interviewing'",
@@ -65,7 +66,7 @@ async def patch_interview_application_schema():
 
 async def patch_email_admin_schema():
     """Add columns missing from older email_templates / email_campaigns tables."""
-    from sqlalchemy import text
+    
 
     statements = [
         "ALTER TABLE email_templates ADD COLUMN IF NOT EXISTS description TEXT",
@@ -99,7 +100,7 @@ async def patch_email_admin_schema():
 
 async def patch_support_bot_schema():
     """Add help desk bot columns to support tables."""
-    from sqlalchemy import text
+    
 
     statements = [
         "ALTER TABLE support_tickets ADD COLUMN IF NOT EXISTS bot_handled BOOLEAN NOT NULL DEFAULT FALSE",
@@ -116,7 +117,7 @@ async def patch_support_bot_schema():
 
 async def patch_dashboard_indexes():
     """Create indexes for dashboard analytics optimization if they do not exist."""
-    from sqlalchemy import text
+    
 
     statements = [
         "CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)",
@@ -140,7 +141,7 @@ async def patch_dashboard_indexes():
 
 async def patch_company_internships_schema():
     """Ensure all columns exist for company internships and training course models."""
-    from sqlalchemy import text
+    
     statements = [
         # company_internships columns
         "ALTER TABLE company_internships ADD COLUMN IF NOT EXISTS provider_id UUID",
@@ -230,7 +231,7 @@ async def patch_company_internships_schema():
 
 async def patch_training_portal_schema():
     """Ensure all training portal tables and columns exist (LMS portal models)."""
-    from sqlalchemy import text
+    
 
     statements = [
         # training_portal_courses
@@ -545,9 +546,45 @@ async def patch_users_registration_schema():
                 pass
 
 
+async def patch_google_calendar_schema():
+    """Ensure Google Calendar sync tables/columns exist."""
+    from sqlalchemy import text
+
+    statements = [
+        # google_calendar_tokens
+        "ALTER TABLE google_calendar_tokens ADD COLUMN IF NOT EXISTS user_id UUID",
+        "ALTER TABLE google_calendar_tokens ADD COLUMN IF NOT EXISTS google_email VARCHAR(255)",
+        "ALTER TABLE google_calendar_tokens ADD COLUMN IF NOT EXISTS access_token TEXT",
+        "ALTER TABLE google_calendar_tokens ADD COLUMN IF NOT EXISTS refresh_token TEXT",
+        "ALTER TABLE google_calendar_tokens ADD COLUMN IF NOT EXISTS token_uri VARCHAR(255) NOT NULL DEFAULT 'https://oauth2.googleapis.com/token'",
+        "ALTER TABLE google_calendar_tokens ADD COLUMN IF NOT EXISTS scopes TEXT",
+        "ALTER TABLE google_calendar_tokens ADD COLUMN IF NOT EXISTS expiry TIMESTAMP",
+        "ALTER TABLE google_calendar_tokens ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW()",
+        "ALTER TABLE google_calendar_tokens ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW()",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_gct_user_id ON google_calendar_tokens(user_id)",
+
+        # training_portal_class_calendar_links
+        "ALTER TABLE training_portal_class_calendar_links ADD COLUMN IF NOT EXISTS session_id VARCHAR(50)",
+        "ALTER TABLE training_portal_class_calendar_links ADD COLUMN IF NOT EXISTS user_id UUID",
+        "ALTER TABLE training_portal_class_calendar_links ADD COLUMN IF NOT EXISTS calendar_id VARCHAR(255) NOT NULL DEFAULT 'primary'",
+        "ALTER TABLE training_portal_class_calendar_links ADD COLUMN IF NOT EXISTS google_event_id VARCHAR(255)",
+        "ALTER TABLE training_portal_class_calendar_links ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW()",
+        "ALTER TABLE training_portal_class_calendar_links ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW()",
+        "CREATE INDEX IF NOT EXISTS idx_tpccl_session_id ON training_portal_class_calendar_links(session_id)",
+        "CREATE INDEX IF NOT EXISTS idx_tpccl_user_id ON training_portal_class_calendar_links(user_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_class_calendar_session_user ON training_portal_class_calendar_links(session_id, user_id)",
+    ]
+    async with engine.begin() as conn:
+        for sql in statements:
+            try:
+                await conn.execute(text(sql))
+            except Exception:
+                pass
+
+
 async def patch_teacher_role_schema():
     """Add teacher to userrole enum and apply training table indexes."""
-    from sqlalchemy import text
+    
     statements = [
         "ALTER TYPE userrole ADD VALUE IF NOT EXISTS 'teacher'",
         "CREATE INDEX IF NOT EXISTS idx_tc_status_created ON training_courses(is_active, created_at DESC)",

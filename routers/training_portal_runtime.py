@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status, UploadFile, File
-from sqlalchemy import select, func, update, or_, and_
+from sqlalchemy import select, func, update, or_, and_, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
@@ -88,6 +88,11 @@ from services.email_service import (
     send_training_portal_batch_assigned_email,
     send_training_portal_payment_link_email,
     send_training_portal_payment_success_email,
+)
+from services.class_calendar_sync import (
+    run_class_sync,
+    run_class_cancel,
+    build_cancel_snapshot,
 )
 from services.training_portal_class_live import (
     session_occurs_on_date,
@@ -610,6 +615,17 @@ async def create_enrollment(
     name = body.candidate_name or f"{current_user.first_name or ''} {current_user.last_name or ''}".strip() or email.split("@")[0]
     phone = body.candidate_phone or current_user.phone
 
+    # Delete any stale initiated enrollments that never completed payment
+    await db.execute(
+        delete(TrainingPortalEnrollment).where(
+            TrainingPortalEnrollment.candidate_email == email,
+            TrainingPortalEnrollment.enrollment_type == body.enrollment_type,
+            TrainingPortalEnrollment.item_id == body.item_id,
+            TrainingPortalEnrollment.status == "payment_initiated",
+        )
+    )
+    await db.flush()
+
     dup = await db.execute(
         select(TrainingPortalEnrollment).where(
             TrainingPortalEnrollment.candidate_email == email,
@@ -677,7 +693,7 @@ async def create_enrollment(
         installments=body.installments,
         voter_card_url=body.voter_card_url,
         notes=body.notes,
-        status="active" if body.payment_status in ("paid_online", "paid_offline", "free") else "pending",
+        status="payment_initiated" if body.payment_status == "initiated" else ("active" if body.payment_status in ("paid_online", "paid_offline", "free") else "pending"),
     )
     db.add(enrollment)
     await db.flush()
@@ -1194,6 +1210,7 @@ async def list_class_sessions(
 @router.post("/class-sessions", response_model=PortalClassSessionOut, status_code=status.HTTP_201_CREATED)
 async def create_class_session(
     body: PortalClassSessionCreate,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(require_super_admin),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1227,6 +1244,7 @@ async def create_class_session(
     )
     db.add(session)
     await db.flush()
+    background_tasks.add_task(run_class_sync, session.id)
     return session_to_out(session)
 
 
@@ -1234,6 +1252,7 @@ async def create_class_session(
 async def update_class_session(
     session_id: str,
     body: PortalClassSessionUpdate,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(require_super_admin),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1261,12 +1280,14 @@ async def update_class_session(
         setattr(session, field, value)
     session.updated_at = datetime.utcnow()
     await db.flush()
+    background_tasks.add_task(run_class_sync, session.id)
     return session_to_out(session)
 
 
 @router.delete("/class-sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_class_session(
     session_id: str,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(require_super_admin),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1276,8 +1297,12 @@ async def delete_class_session(
     session = result.scalar_one_or_none()
     if not session:
         raise HTTPException(status_code=404, detail="Class session not found")
+    # Capture calendar data before the row (and its calendar links) are deleted.
+    cancel_snapshot = await build_cancel_snapshot(db, session_id)
     await db.delete(session)
     await db.flush()
+    if cancel_snapshot:
+        background_tasks.add_task(run_class_cancel, cancel_snapshot)
     return None
 
 
@@ -2285,7 +2310,7 @@ async def verify_payment(
         order.amount_paise / 100.0,
         "online",
         provider="razorpay",
-        provider_transaction_id=payment_info["provider_payment_id"],
+        provider_transaction_id=body.provider_payment_id,
         reference_order_id=order.id,
         created_by_id=None,
     )
@@ -2394,9 +2419,9 @@ async def razorpay_webhook(request: Request, db: AsyncSession = Depends(get_db))
         order.amount_paise / 100.0,
         "online",
         provider="razorpay",
-        provider_transaction_id=body.provider_payment_id,
+        provider_transaction_id=payment_info["provider_payment_id"],
         reference_order_id=order.id,
-        created_by_id=current_user.id,
+        created_by_id=None,
     )
     await db.flush()
     return {"status": "ok"}
