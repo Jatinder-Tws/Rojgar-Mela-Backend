@@ -1,6 +1,7 @@
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 from config import settings
+from sqlalchemy import text
 
 engine = create_async_engine(
     settings.DATABASE_URL,
@@ -45,7 +46,7 @@ async def init_db():
 
 async def patch_interview_application_schema():
     """Add interview lifecycle columns and application status enum values."""
-    from sqlalchemy import text
+    
 
     statements = [
         "ALTER TYPE applicationstatus ADD VALUE IF NOT EXISTS 'interviewing'",
@@ -65,7 +66,7 @@ async def patch_interview_application_schema():
 
 async def patch_email_admin_schema():
     """Add columns missing from older email_templates / email_campaigns tables."""
-    from sqlalchemy import text
+    
 
     statements = [
         "ALTER TABLE email_templates ADD COLUMN IF NOT EXISTS description TEXT",
@@ -99,7 +100,7 @@ async def patch_email_admin_schema():
 
 async def patch_support_bot_schema():
     """Add help desk bot columns to support tables."""
-    from sqlalchemy import text
+    
 
     statements = [
         "ALTER TABLE support_tickets ADD COLUMN IF NOT EXISTS bot_handled BOOLEAN NOT NULL DEFAULT FALSE",
@@ -116,7 +117,7 @@ async def patch_support_bot_schema():
 
 async def patch_dashboard_indexes():
     """Create indexes for dashboard analytics optimization if they do not exist."""
-    from sqlalchemy import text
+    
 
     statements = [
         "CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)",
@@ -140,7 +141,7 @@ async def patch_dashboard_indexes():
 
 async def patch_company_internships_schema():
     """Ensure all columns exist for company internships and training course models."""
-    from sqlalchemy import text
+    
     statements = [
         # company_internships columns
         "ALTER TABLE company_internships ADD COLUMN IF NOT EXISTS provider_id UUID",
@@ -230,7 +231,7 @@ async def patch_company_internships_schema():
 
 async def patch_training_portal_schema():
     """Ensure all training portal tables and columns exist (LMS portal models)."""
-    from sqlalchemy import text
+    
 
     statements = [
         # training_portal_courses
@@ -531,7 +532,7 @@ async def patch_training_portal_schema():
 
 async def patch_teacher_role_schema():
     """Add teacher to userrole enum and apply training table indexes."""
-    from sqlalchemy import text
+    
     statements = [
         "ALTER TYPE userrole ADD VALUE IF NOT EXISTS 'teacher'",
         "CREATE INDEX IF NOT EXISTS idx_tc_status_created ON training_courses(is_active, created_at DESC)",
