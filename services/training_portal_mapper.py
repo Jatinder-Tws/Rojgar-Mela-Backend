@@ -164,6 +164,8 @@ def notification_to_out(row: TrainingPortalCandidateNotification) -> PortalNotif
     return PortalNotificationOut(
         id=row.id,
         candidate_email=row.candidate_email,
+        recipient_role=row.recipient_role,
+        is_read=row.is_read,
         type=row.notification_type,
         title=row.title,
         description=row.description,
@@ -172,6 +174,7 @@ def notification_to_out(row: TrainingPortalCandidateNotification) -> PortalNotif
         severity=row.severity,
         created_at=row.created_at,
     )
+
 
 
 def payment_settings_to_out(row: TrainingPortalPaymentSettings) -> PortalPaymentSettingsOut:

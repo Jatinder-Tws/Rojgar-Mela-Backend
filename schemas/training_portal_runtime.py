@@ -352,6 +352,8 @@ class PortalBehaviorReportOut(BaseModel):
 class PortalNotificationOut(BaseModel):
     id: str
     candidate_email: str
+    recipient_role: str
+    is_read: bool
     type: str
     title: str
     description: str
@@ -359,6 +361,11 @@ class PortalNotificationOut(BaseModel):
     date: str
     severity: str
     created_at: datetime
+
+
+class PortalNotificationMarkRead(BaseModel):
+    notification_ids: Optional[list[str]] = None
+
 
 
 # ── Payments ──────────────────────────────────────────────────────────────────
@@ -489,3 +496,26 @@ class PortalPaymentInvoiceOut(BaseModel):
     notes: Optional[str] = None
     issuer_label: str = "RojgarMela Training Portal"
     line_items: list[PortalInvoiceLineItem] = Field(default_factory=list)
+
+
+# ── Notifications ─────────────────────────────────────────────────────────────
+
+class PortalNotificationOut(BaseModel):
+    id: str
+    candidate_email: str
+    recipient_role: str
+    is_read: bool
+    notification_type: str
+    title: str
+    description: str
+    detail: Optional[str] = None
+    event_date: str
+    severity: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class PortalNotificationMarkRead(BaseModel):
+    notification_ids: Optional[list[str]] = None

@@ -424,6 +424,8 @@ async def patch_training_portal_schema():
 
         # training_portal_candidate_notifications
         "ALTER TABLE training_portal_candidate_notifications ADD COLUMN IF NOT EXISTS candidate_email VARCHAR(200)",
+        "ALTER TABLE training_portal_candidate_notifications ADD COLUMN IF NOT EXISTS recipient_role VARCHAR(30) NOT NULL DEFAULT 'candidate'",
+        "ALTER TABLE training_portal_candidate_notifications ADD COLUMN IF NOT EXISTS is_read BOOLEAN NOT NULL DEFAULT FALSE",
         "ALTER TABLE training_portal_candidate_notifications ADD COLUMN IF NOT EXISTS notification_type VARCHAR(50)",
         "ALTER TABLE training_portal_candidate_notifications ADD COLUMN IF NOT EXISTS title VARCHAR(300)",
         "ALTER TABLE training_portal_candidate_notifications ADD COLUMN IF NOT EXISTS description TEXT",
@@ -432,6 +434,8 @@ async def patch_training_portal_schema():
         "ALTER TABLE training_portal_candidate_notifications ADD COLUMN IF NOT EXISTS severity VARCHAR(20) NOT NULL DEFAULT 'info'",
         "ALTER TABLE training_portal_candidate_notifications ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW()",
         "CREATE INDEX IF NOT EXISTS idx_tpcn_candidate_email ON training_portal_candidate_notifications(candidate_email)",
+        "CREATE INDEX IF NOT EXISTS idx_tpcn_recipient_role ON training_portal_candidate_notifications(recipient_role)",
+        "CREATE INDEX IF NOT EXISTS idx_tpcn_is_read ON training_portal_candidate_notifications(is_read)",
 
         # training_portal_transactions
         "ALTER TABLE training_portal_transactions ADD COLUMN IF NOT EXISTS transaction_id VARCHAR(80)",
