@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 from typing import Any, Literal, Optional
 
@@ -165,6 +166,31 @@ class PortalBatchUpdate(BaseModel):
 
 # ── Class sessions ────────────────────────────────────────────────────────────
 
+# Calendar Week view only renders an 8:00 AM–8:00 PM grid (ScheduleCalendar.tsx),
+# so scheduled times must stay within that window or they render clipped/hidden.
+WORKING_HOURS_START_MINUTES = 8 * 60
+WORKING_HOURS_END_MINUTES = 20 * 60
+
+_TIME_12H_PATTERN = re.compile(r"^(\d{1,2}):(\d{2})\s*(AM|PM)$", re.IGNORECASE)
+
+
+def time_within_working_hours(value: str) -> bool:
+    match = _TIME_12H_PATTERN.match(value.strip())
+    if not match:
+        return False
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    period = match.group(3).upper()
+    if hour < 1 or hour > 12 or minute < 0 or minute > 59:
+        return False
+    if period == "PM" and hour != 12:
+        hour += 12
+    if period == "AM" and hour == 12:
+        hour = 0
+    minutes = hour * 60 + minute
+    return WORKING_HOURS_START_MINUTES <= minutes <= WORKING_HOURS_END_MINUTES
+
+
 class PortalClassSessionCreate(BaseModel):
     batch_id: Optional[str] = None
     item_id: str
@@ -222,8 +248,11 @@ class PortalClassSessionOut(BaseModel):
     ended_at: Optional[datetime] = None
     session_report: Optional[str] = None
     covered_topic_ids: list[str] = Field(default_factory=list)
+    attachment_url: Optional[str] = None
+    attachment_filename: Optional[str] = None
     reminder_sent: bool = False
     reminder_15_sent: bool = False
+    end_reminder_sent: bool = False
     late_start_reason: Optional[str] = None
     early_end_reason: Optional[str] = None
     attendance_marked: bool = False
@@ -269,6 +298,8 @@ class PortalAttendanceRecordOut(BaseModel):
     session_end_time: Optional[str] = None
     session_report: Optional[str] = None
     covered_topic_ids: list[str] = Field(default_factory=list)
+    attachment_url: Optional[str] = None
+    attachment_filename: Optional[str] = None
     late_start_reason: Optional[str] = None
     early_end_reason: Optional[str] = None
     instructor_name: Optional[str] = None
@@ -352,6 +383,8 @@ class PortalBehaviorReportOut(BaseModel):
 class PortalNotificationOut(BaseModel):
     id: str
     candidate_email: str
+    recipient_role: str
+    is_read: bool
     type: str
     title: str
     description: str
@@ -359,6 +392,11 @@ class PortalNotificationOut(BaseModel):
     date: str
     severity: str
     created_at: datetime
+
+
+class PortalNotificationMarkRead(BaseModel):
+    notification_ids: Optional[list[str]] = None
+
 
 
 # ── Payments ──────────────────────────────────────────────────────────────────
@@ -489,3 +527,4 @@ class PortalPaymentInvoiceOut(BaseModel):
     notes: Optional[str] = None
     issuer_label: str = "RojgarMela Training Portal"
     line_items: list[PortalInvoiceLineItem] = Field(default_factory=list)
+
