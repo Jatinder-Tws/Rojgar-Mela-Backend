@@ -123,8 +123,11 @@ def session_to_out(row: TrainingPortalClassSession) -> PortalClassSessionOut:
         ended_at=getattr(row, "ended_at", None),
         session_report=getattr(row, "session_report", None),
         covered_topic_ids=getattr(row, "covered_topic_ids", None) or [],
+        attachment_url=getattr(row, "attachment_url", None),
+        attachment_filename=getattr(row, "attachment_filename", None),
         reminder_sent=bool(getattr(row, "reminder_sent", False)),
         reminder_15_sent=bool(getattr(row, "reminder_15_sent", False)),
+        end_reminder_sent=bool(getattr(row, "end_reminder_sent", False)),
         late_start_reason=getattr(row, "late_start_reason", None),
         early_end_reason=getattr(row, "early_end_reason", None),
         attendance_marked=bool(getattr(row, "attendance_marked", False)),
@@ -153,6 +156,8 @@ def session_to_out_for_date(
             "ended_at": getattr(row, "ended_at", None) if applies and effective == "completed" else None,
             "session_report": getattr(row, "session_report", None) if applies and effective == "completed" else None,
             "covered_topic_ids": (getattr(row, "covered_topic_ids", None) or []) if applies and effective == "completed" else [],
+            "attachment_url": getattr(row, "attachment_url", None) if applies and effective == "completed" else None,
+            "attachment_filename": getattr(row, "attachment_filename", None) if applies and effective == "completed" else None,
             "late_start_reason": getattr(row, "late_start_reason", None) if applies and effective in {"live", "completed"} else None,
             "early_end_reason": getattr(row, "early_end_reason", None) if applies and effective == "completed" else None,
             "attendance_marked": bool(getattr(row, "attendance_marked", False)) and applies and effective == "completed",
@@ -164,6 +169,8 @@ def notification_to_out(row: TrainingPortalCandidateNotification) -> PortalNotif
     return PortalNotificationOut(
         id=row.id,
         candidate_email=row.candidate_email,
+        recipient_role=row.recipient_role,
+        is_read=row.is_read,
         type=row.notification_type,
         title=row.title,
         description=row.description,
@@ -172,6 +179,7 @@ def notification_to_out(row: TrainingPortalCandidateNotification) -> PortalNotif
         severity=row.severity,
         created_at=row.created_at,
     )
+
 
 
 def payment_settings_to_out(row: TrainingPortalPaymentSettings) -> PortalPaymentSettingsOut:

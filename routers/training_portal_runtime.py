@@ -1,9 +1,12 @@
 import json
 import logging
 import uuid
+import csv
+import io
 from datetime import datetime, timedelta, date
 from pathlib import Path
 from typing import List, Optional
+from fastapi.responses import StreamingResponse
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status, UploadFile, File
 from sqlalchemy import select, func, update, or_, and_, delete
@@ -60,8 +63,10 @@ from schemas.training_portal_runtime import (
     PortalTransactionOut,
     PortalPaymentInvoiceOut,
     PortalInvoiceLineItem,
+    PortalNotificationMarkRead,
+    time_within_working_hours,
 )
-from services.auth_service import require_super_admin, require_training_portal_user
+from services.auth_service import require_super_admin, require_training_portal_user, require_teacher_or_super_admin
 from services.training_portal_mapper import (
     enrollment_to_out,
     batch_to_out,
@@ -88,6 +93,7 @@ from services.email_service import (
     send_training_portal_batch_assigned_email,
     send_training_portal_payment_link_email,
     send_training_portal_payment_success_email,
+    send_notification_email,
 )
 from services.class_calendar_sync import (
     run_class_sync,
@@ -105,6 +111,8 @@ from services.training_portal_class_live import (
     is_early_end,
     now_ist,
     today_ist,
+    session_end_datetime,
+    _parse_time_12h,
 )
 
 logger = logging.getLogger(__name__)
@@ -474,6 +482,36 @@ async def _get_or_create_payment_settings(db: AsyncSession) -> TrainingPortalPay
     return row
 
 
+async def _notify_admins(
+    db: AsyncSession,
+    notification_type: str,
+    title: str,
+    description: str,
+    detail: Optional[str] = None,
+    severity: str = "info",
+) -> None:
+    admin_result = await db.execute(
+        select(User.email).where(User.is_super_admin.is_(True))
+    )
+    admin_emails = admin_result.scalars().all()
+    today_str = datetime.utcnow().strftime("%Y-%m-%d")
+    for email in admin_emails:
+        if email:
+            db.add(
+                TrainingPortalCandidateNotification(
+                    id=str(uuid.uuid4()),
+                    candidate_email=email.strip().lower(),
+                    recipient_role="admin",
+                    notification_type=notification_type,
+                    title=title,
+                    description=description,
+                    detail=detail,
+                    event_date=today_str,
+                    severity=severity,
+                )
+            )
+
+
 async def _refresh_internship_seats(db: AsyncSession, internship_id: str) -> None:
     result = await db.execute(
         select(TrainingPortalInternship).where(TrainingPortalInternship.id == internship_id)
@@ -503,6 +541,7 @@ async def _mark_enrollment_paid(
     reference_order_id: Optional[str] = None,
     created_by_id: Optional[str] = None,
 ) -> None:
+    old_status = enrollment.status
     enrollment.paid_amount = paid_amount
     enrollment.balance_due = max(0.0, enrollment.total_fee - paid_amount)
     enrollment.payment_status = "paid_online" if payment_mode == "online" else "paid_offline"
@@ -522,6 +561,37 @@ async def _mark_enrollment_paid(
         notes="Online payment captured" if payment_mode == "online" else "Offline payment recorded",
         created_by_id=created_by_id,
     )
+
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    db.add(
+        TrainingPortalCandidateNotification(
+            id=str(uuid.uuid4()),
+            candidate_email=enrollment.candidate_email.strip().lower(),
+            recipient_role="candidate",
+            notification_type="payment_confirmed",
+            title="Payment Confirmed",
+            description=f"Your payment of ₹{paid_amount:,.2f} for {enrollment.title} was confirmed.",
+            detail=f"Payment Mode: {payment_mode.title()}. Transaction ID: {provider_transaction_id or 'N/A'}.",
+            event_date=today,
+            severity="success",
+        )
+    )
+
+    if old_status != "active":
+        db.add(
+            TrainingPortalCandidateNotification(
+                id=str(uuid.uuid4()),
+                candidate_email=enrollment.candidate_email.strip().lower(),
+                recipient_role="candidate",
+                notification_type="enrollment_confirmed",
+                title="Enrollment Confirmed",
+                description=f"Welcome! Your enrollment in {enrollment.title} is now active.",
+                detail="Please choose a batch from your dashboard if you haven't already.",
+                event_date=today,
+                severity="success",
+            )
+        )
+
 
 
 # ── Payment settings ──────────────────────────────────────────────────────────
@@ -599,6 +669,436 @@ async def list_enrollments(
 
     result = await db.execute(query)
     return [enrollment_to_out(row) for row in result.scalars().all()]
+
+
+@router.post("/enrollments/export-csv")
+async def export_students_csv(
+    body: dict = {},
+    current_user: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    emails = body.get("emails")
+    
+    # Fetch all enrollments
+    query = select(TrainingPortalEnrollment)
+    res_en = await db.execute(query)
+    db_enrollments = res_en.scalars().all()
+    
+    # Fetch all leave requests
+    res_lv = await db.execute(select(TrainingPortalLeaveRequest))
+    db_leaves = res_lv.scalars().all()
+    
+    # Group enrollments by candidate_email
+    by_email = {}
+    for e in db_enrollments:
+        by_email.setdefault(e.candidate_email, []).append(e)
+        
+    # Group leave requests by candidate_email
+    leaves_by_email = {}
+    for l in db_leaves:
+        leaves_by_email.setdefault(l.candidate_email, []).append(l)
+        
+    # Build directory entries
+    targets = []
+    for email, st_enrollments in by_email.items():
+        if emails is not None and email not in emails:
+            continue
+            
+        active = [e for e in st_enrollments if e.status == "active"]
+        total_fee = sum(e.total_fee for e in st_enrollments)
+        total_paid = sum(e.paid_amount for e in st_enrollments)
+        total_balance_due = sum(e.balance_due for e in st_enrollments)
+        
+        avg_attendance = 0
+        if len(st_enrollments) > 0:
+            avg_attendance = round(sum(e.attendance_percentage for e in st_enrollments) / len(st_enrollments))
+            
+        primary_status = "completed"
+        if len(active) > 0:
+            primary_status = "active"
+        elif any(e.status == "pending" for e in st_enrollments):
+            primary_status = "pending"
+        elif any(e.status == "dropped" for e in st_enrollments):
+            primary_status = "dropped"
+            
+        has_confirmed_course = any(
+            e.enrollment_type == "course" and e.status not in ("pending", "dropped")
+            for e in st_enrollments
+        )
+        
+        phone = st_enrollments[0].candidate_phone
+        name = st_enrollments[0].candidate_name
+        
+        local_part = email.split('@')[0].upper() if '@' in email else "UNKNOWN"
+        student_code = f"STU-{local_part}"
+        
+        st_leaves = leaves_by_email.get(email, [])
+        pending_slips = len([l for l in st_leaves if l.status == "Pending"])
+        
+        laptop_confirmed = has_confirmed_course or any(
+            e.enrollment_type == "course" and e.status == "active"
+            for e in st_enrollments
+        )
+        
+        targets.append({
+            "name": name,
+            "studentCode": student_code,
+            "email": email,
+            "phone": phone or "",
+            "laptopConfirmed": "Yes" if laptop_confirmed else "No",
+            "avgAttendance": avg_attendance,
+            "status": primary_status,
+            "enrolledBatchesCount": len([e for e in st_enrollments if e.batch_id or e.enrollment_type == "internship"]),
+            "pendingAbsenceSlips": pending_slips,
+        })
+        
+    targets.sort(key=lambda x: x["name"])
+    
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        'Student Name',
+        'Student Code',
+        'Email',
+        'Phone',
+        'Laptop Confirmed',
+        'Avg Attendance (%)',
+        'Status',
+        'Enrolled Batches Count',
+        'Pending Absence Slips',
+    ])
+    
+    for t in targets:
+        writer.writerow([
+            t["name"],
+            t["studentCode"],
+            t["email"],
+            t["phone"],
+            t["laptopConfirmed"],
+            t["avgAttendance"],
+            t["status"],
+            t["enrolledBatchesCount"],
+            t["pendingAbsenceSlips"],
+        ])
+        
+    csv_data = output.getvalue()
+    output.close()
+    
+    return StreamingResponse(
+        io.BytesIO(csv_data.encode("utf-8")),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f"attachment; filename=students_export_{datetime.utcnow().strftime('%Y-%m-%d')}.csv"
+        }
+    )
+
+
+@router.post("/enrollments/send-reminder")
+async def send_reminder_to_students(
+    body: dict,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    emails = body.get("emails")
+    if not emails:
+        raise HTTPException(status_code=400, detail="No emails provided")
+        
+    result = await db.execute(
+        select(TrainingPortalEnrollment.candidate_email, TrainingPortalEnrollment.candidate_name)
+        .where(TrainingPortalEnrollment.candidate_email.in_(emails))
+    )
+    email_to_name = {row[0]: row[1] for row in result.all()}
+    
+    for email in emails:
+        name = email_to_name.get(email, "Trainee")
+        
+        notif = TrainingPortalCandidateNotification(
+            id=str(uuid.uuid4()),
+            candidate_email=email,
+            notification_type="admin_reminder",
+            title="Training Portal Reminder",
+            description="You have a new reminder from the portal administrator. Please check your dashboard or email for updates.",
+            event_date=datetime.utcnow().strftime("%Y-%m-%d"),
+            severity="info",
+        )
+        db.add(notif)
+        
+        background_tasks.add_task(
+            send_notification_email,
+            email,
+            name,
+            "Admin Training Reminder",
+            "This is a reminder from the training portal administrator. Please log in to your training portal dashboard to view updates or contact the administration if you have questions."
+        )
+        
+    await db.flush()
+    return {"status": "ok", "message": f"Reminders queued for {len(emails)} student(s)."}
+
+
+@router.post("/enrollments/bulk-delete")
+async def bulk_delete_students(
+    body: dict,
+    current_user: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    emails = body.get("emails")
+    if not emails:
+        raise HTTPException(status_code=400, detail="No emails provided")
+        
+    # Get enrollment IDs to clean up transactions
+    res_en = await db.execute(
+        select(TrainingPortalEnrollment.id).where(TrainingPortalEnrollment.candidate_email.in_(emails))
+    )
+    enrollment_ids = [row[0] for row in res_en.all()]
+    if enrollment_ids:
+        await db.execute(
+            delete(TrainingPortalTransaction).where(TrainingPortalTransaction.enrollment_id.in_(enrollment_ids))
+        )
+        
+    # Delete enrollments
+    await db.execute(
+        delete(TrainingPortalEnrollment).where(TrainingPortalEnrollment.candidate_email.in_(emails))
+    )
+    # Delete leave requests
+    await db.execute(
+        delete(TrainingPortalLeaveRequest).where(TrainingPortalLeaveRequest.candidate_email.in_(emails))
+    )
+    # Delete behavior reports
+    await db.execute(
+        delete(TrainingPortalBehaviorReport).where(TrainingPortalBehaviorReport.candidate_email.in_(emails))
+    )
+    # Delete notifications
+    await db.execute(
+        delete(TrainingPortalCandidateNotification).where(TrainingPortalCandidateNotification.candidate_email.in_(emails))
+    )
+    
+    await db.flush()
+    return {"status": "ok", "message": f"Successfully deleted records for {len(emails)} student(s)."}
+
+
+def _calculate_duration_minutes(start_str: str, end_str: str) -> str:
+    if not start_str or not end_str:
+        return "—"
+    try:
+        s_val = start_str.strip().upper()
+        e_val = end_str.strip().upper()
+        
+        from datetime import datetime
+        formats = ["%H:%M:%S", "%H:%M", "%I:%M %p", "%I:%M%p"]
+        t_start, t_end = None, None
+        for fmt in formats:
+            if not t_start:
+                try:
+                    t_start = datetime.strptime(s_val, fmt)
+                except ValueError:
+                    pass
+            if not t_end:
+                try:
+                    t_end = datetime.strptime(e_val, fmt)
+                except ValueError:
+                    pass
+        if t_start and t_end:
+            diff = t_end - t_start
+            minutes = int(diff.total_seconds() / 60)
+            if minutes < 0:
+                minutes += 24 * 60
+            return f"{minutes} mins"
+    except Exception:
+        pass
+    return "—"
+
+
+@router.post("/export-csv")
+async def generic_export_csv(
+    body: dict,
+    current_user: User = Depends(require_training_portal_user),
+    db: AsyncSession = Depends(get_db),
+):
+    entity = body.get("entity")
+    ids = body.get("ids")
+    
+    if not entity:
+        raise HTTPException(status_code=400, detail="Entity type is required")
+        
+    output = io.StringIO()
+    writer = csv.writer(output)
+    filename = f"{entity}_export_{datetime.utcnow().strftime('%Y-%m-%d')}.csv"
+    
+    if entity == "batches":
+        query = select(TrainingPortalBatch).order_by(TrainingPortalBatch.created_at.desc())
+        if ids:
+            query = query.where(TrainingPortalBatch.id.in_(ids))
+        res = await db.execute(query)
+        batches = res.scalars().all()
+        
+        courses_res = await db.execute(select(TrainingPortalCourse))
+        courses_map = {c.id: c.title for c in courses_res.scalars().all()}
+        
+        writer.writerow([
+            'Batch Name', 'Course Title', 'Instructor', 'Schedule', 'Days', 'Venue', 
+            'Max Seats', 'Delivery Mode', 'Status'
+        ])
+        for b in batches:
+            days_str = ", ".join(b.days) if b.days else "—"
+            course_title = courses_map.get(b.course_id, "Unknown Course")
+            writer.writerow([
+                b.batch_name, course_title, b.instructor_name or "—", b.time_slot or "—",
+                days_str, b.venue or "—", b.max_seats, b.delivery_mode, b.status
+            ])
+            
+    elif entity == "ledger":
+        query = select(TrainingPortalEnrollment).where(TrainingPortalEnrollment.enrollment_type == "course")
+        if ids:
+            query = query.where(or_(
+                TrainingPortalEnrollment.id.in_(ids),
+                TrainingPortalEnrollment.candidate_email.in_(ids)
+            ))
+        res = await db.execute(query)
+        enrollments = res.scalars().all()
+        
+        writer.writerow([
+            'Student Name', 'Email', 'Course/Program', 'Payment Type', 'Total Fee',
+            'Paid Amount', 'Balance Due', 'Payment Status'
+        ])
+        for e in enrollments:
+            writer.writerow([
+                e.candidate_name, e.candidate_email, e.title, e.payment_type,
+                e.total_fee, e.paid_amount, e.balance_due, e.payment_status
+            ])
+            
+    elif entity == "transactions":
+        query = select(TrainingPortalTransaction).order_by(TrainingPortalTransaction.created_at.desc())
+        if ids:
+            query = query.where(TrainingPortalTransaction.id.in_(ids))
+        res = await db.execute(query)
+        txns = res.scalars().all()
+        
+        writer.writerow([
+            'Transaction ID', 'Date', 'Student Name', 'Email', 'Program',
+            'Type', 'Amount', 'Payment Mode', 'Status', 'Notes'
+        ])
+        for t in txns:
+            date_str = t.created_at.strftime("%Y-%m-%d %H:%M") if t.created_at else "—"
+            writer.writerow([
+                t.transaction_id, date_str, t.candidate_name, t.candidate_email, t.program_title,
+                t.transaction_type, t.amount, t.payment_mode or "—", t.status, t.notes or ""
+            ])
+            
+    elif entity == "attendance":
+        is_admin = getattr(current_user, "is_super_admin", False)
+        user_role = getattr(current_user, "role", None)
+        
+        teacher_batch_ids = None
+        if user_role == "teacher" and not is_admin:
+            teacher_batch_ids = await _teacher_batch_ids_for_user(db, current_user)
+            if not teacher_batch_ids:
+                writer.writerow([
+                    'Trainee Name', 'Email', 'Batch Name', 'Session Title', 'Date', 'Status', 'Duration'
+                ])
+                csv_data = output.getvalue()
+                output.close()
+                return StreamingResponse(
+                    io.BytesIO(csv_data.encode("utf-8")),
+                    media_type="text/csv",
+                    headers={"Content-Disposition": f"attachment; filename={filename}"}
+                )
+
+        query = (
+            select(
+                TrainingPortalAttendanceRecord,
+                TrainingPortalClassSession,
+                TrainingPortalBatch.batch_name
+            )
+            .join(
+                TrainingPortalClassSession,
+                TrainingPortalAttendanceRecord.class_session_id == TrainingPortalClassSession.id,
+            )
+            .outerjoin(
+                TrainingPortalBatch,
+                TrainingPortalAttendanceRecord.batch_id == TrainingPortalBatch.id,
+            )
+            .order_by(TrainingPortalAttendanceRecord.marked_at.desc())
+        )
+        if ids:
+            query = query.where(TrainingPortalAttendanceRecord.id.in_(ids))
+
+        if teacher_batch_ids is not None:
+            query = query.where(TrainingPortalAttendanceRecord.batch_id.in_(teacher_batch_ids))
+
+        is_student = not is_admin and teacher_batch_ids is None
+        if is_student:
+            user_email = (current_user.email or "").lower()
+            query = query.where(TrainingPortalAttendanceRecord.candidate_email == user_email)
+
+        res = await db.execute(query)
+        rows = res.all()
+
+        writer.writerow([
+            'Trainee Name', 'Email', 'Batch Name', 'Session Title', 'Date', 'Status', 'Duration'
+        ])
+        for record, session, batch_name in rows:
+            session_date = record.occurrence_date or session.date
+            duration = _calculate_duration_minutes(session.start_time, session.end_time)
+            writer.writerow([
+                record.candidate_name,
+                record.candidate_email,
+                batch_name or "—",
+                session.title or "—",
+                session_date,
+                record.status.replace("_", " ").title(),
+                duration
+            ])
+            
+    elif entity == "leaves":
+        query = select(TrainingPortalLeaveRequest).order_by(TrainingPortalLeaveRequest.created_at.desc())
+        if ids:
+            query = query.where(TrainingPortalLeaveRequest.id.in_(ids))
+        res = await db.execute(query)
+        leaves = res.scalars().all()
+        
+        writer.writerow([
+            'Requester Name', 'Email', 'Date', 'Status', 'Reason', 'Reviewed By'
+        ])
+        for l in leaves:
+            requester = l.candidate_name or l.teacher_name or "Unknown"
+            email = l.candidate_email or l.teacher_email or "—"
+            writer.writerow([
+                requester, email, l.date, l.status, l.reason, l.reviewed_by_id or "—"
+            ])
+            
+    elif entity == "certificates":
+        query = select(TrainingPortalEnrollment)
+        if ids:
+            query = query.where(TrainingPortalEnrollment.id.in_(ids))
+        else:
+            query = query.where(TrainingPortalEnrollment.is_certificate_issued == True)
+        res = await db.execute(query)
+        enrollments = res.scalars().all()
+        
+        writer.writerow([
+            'Recipient Name', 'Email', 'Course Title', 'Issue Date', 'Certificate ID', 'Status'
+        ])
+        for e in enrollments:
+            issue_date = e.updated_at.strftime("%Y-%m-%d") if (e.is_certificate_issued and e.updated_at) else "—"
+            status = e.certificate_status or ("Issued" if e.is_certificate_issued else "Pending")
+            writer.writerow([
+                e.candidate_name, e.candidate_email, e.title, issue_date, e.certificate_id or "—", status
+            ])
+            
+    else:
+        raise HTTPException(status_code=400, detail="Invalid entity type")
+        
+    csv_data = output.getvalue()
+    output.close()
+    
+    return StreamingResponse(
+        io.BytesIO(csv_data.encode("utf-8")),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f"attachment; filename={filename}"
+        }
+    )
 
 
 @router.post("/enrollments", response_model=PortalEnrollmentOut, status_code=status.HTTP_201_CREATED)
@@ -728,6 +1228,30 @@ async def create_enrollment(
                 severity="info",
             )
         )
+
+    if enrollment.status != "payment_initiated":
+        await _notify_admins(
+            db=db,
+            notification_type="new_enrollment",
+            title="New Enrollment Registered",
+            description=f"{name} registered for {body.title}.",
+            detail=f"Status: {enrollment.status}. Payment Type: {body.payment_type}.",
+            severity="info",
+        )
+        if enrollment.status == "active":
+            db.add(
+                TrainingPortalCandidateNotification(
+                    id=str(uuid.uuid4()),
+                    candidate_email=email,
+                    recipient_role="candidate",
+                    notification_type="enrollment_confirmed",
+                    title="Enrollment Confirmed",
+                    description=f"Welcome! Your enrollment in {body.title} is now active.",
+                    detail="Please choose a batch from your dashboard if you haven't already.",
+                    event_date=today,
+                    severity="success",
+                )
+            )
 
     if body.enrollment_type == "internship":
         await _refresh_internship_seats(db, body.item_id)
@@ -956,6 +1480,23 @@ async def create_batch(
     db.add(batch)
     await db.flush()
 
+    if batch.instructor_name:
+        teacher_email = await _lookup_teacher_email(db, batch.instructor_name)
+        if teacher_email:
+            db.add(
+                TrainingPortalCandidateNotification(
+                    id=str(uuid.uuid4()),
+                    candidate_email=teacher_email.lower(),
+                    recipient_role="teacher",
+                    notification_type="batch_assigned",
+                    title="New Cohort Assigned",
+                    description=f'You have been assigned to teach batch "{batch.batch_name}".',
+                    detail=f"Start Date: {batch.start_date}. Days: {', '.join(batch.days or [])}.",
+                    event_date=datetime.utcnow().strftime("%Y-%m-%d"),
+                    severity="info",
+                )
+            )
+
     if body.enrollment_ids:
         await _assign_enrollments_to_batch(db, batch, body.enrollment_ids, background_tasks)
 
@@ -997,7 +1538,7 @@ async def update_batch(
     batch = result.scalar_one_or_none()
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
-
+    old_instructor_name = batch.instructor_name
     if body.batch_name is not None:
         batch.batch_name = body.batch_name.strip()
     if body.instructor_id is not None:
@@ -1035,6 +1576,23 @@ async def update_batch(
 
     if body.enrollment_ids is not None:
         await _sync_batch_enrollments(db, batch, body.enrollment_ids, background_tasks)
+
+    if body.instructor_name is not None and body.instructor_name.strip().lower() != (old_instructor_name or "").strip().lower():
+        teacher_email = await _lookup_teacher_email(db, batch.instructor_name)
+        if teacher_email:
+            db.add(
+                TrainingPortalCandidateNotification(
+                    id=str(uuid.uuid4()),
+                    candidate_email=teacher_email.lower(),
+                    recipient_role="teacher",
+                    notification_type="batch_assigned",
+                    title="New Cohort Assigned",
+                    description=f'You have been assigned to teach batch "{batch.batch_name}".',
+                    detail=f"Start Date: {batch.start_date}. Days: {', '.join(batch.days or [])}.",
+                    event_date=datetime.utcnow().strftime("%Y-%m-%d"),
+                    severity="info",
+                )
+            )
 
     await db.flush()
     return await batch_to_out(db, batch)
@@ -1121,6 +1679,7 @@ async def _notify_class_reminder(
             TrainingPortalCandidateNotification(
                 id=str(uuid.uuid4()),
                 candidate_email=teacher_email.lower(),
+                recipient_role="teacher",
                 notification_type="class_reminder",
                 title=f"Class in {tier} min: {session.title}",
                 description=f"Your class is scheduled today at {time_label}.",
@@ -1142,12 +1701,114 @@ async def _notify_class_reminder(
                 TrainingPortalCandidateNotification(
                     id=str(uuid.uuid4()),
                     candidate_email=enrollment.candidate_email,
+                    recipient_role="candidate",
                     notification_type="class_reminder",
                     title=f"Class in {tier} min: {session.title}",
                     description=f"Your batch class is today at {time_label}.",
                     detail=detail,
                     event_date=event_date,
                     severity="warning" if tier == 15 else "info",
+                )
+            )
+
+
+async def _notify_class_ending_soon(
+    db: AsyncSession,
+    session: TrainingPortalClassSession,
+    batch: Optional[TrainingPortalBatch],
+    target: date,
+):
+    if getattr(session, "end_reminder_sent", False):
+        return
+    session.end_reminder_sent = True
+    session.updated_at = datetime.utcnow()
+
+    event_date = target.isoformat()
+    detail = "This class session will close automatically in 15 minutes."
+
+    teacher_email = await _lookup_teacher_email(db, session.instructor_name)
+    if teacher_email:
+        db.add(
+            TrainingPortalCandidateNotification(
+                id=str(uuid.uuid4()),
+                candidate_email=teacher_email.lower(),
+                recipient_role="teacher",
+                notification_type="class_reminder",
+                title=f"Class ending soon: {session.title}",
+                description=f"Your live class will end automatically at {session.end_time} (in 15 minutes).",
+                detail=detail,
+                event_date=event_date,
+                severity="warning",
+            )
+        )
+
+    if batch:
+        enrollments_result = await db.execute(
+            select(TrainingPortalEnrollment).where(
+                TrainingPortalEnrollment.batch_id == batch.id,
+                TrainingPortalEnrollment.status != "dropped",
+            )
+        )
+        for enrollment in enrollments_result.scalars().all():
+            db.add(
+                TrainingPortalCandidateNotification(
+                    id=str(uuid.uuid4()),
+                    candidate_email=enrollment.candidate_email,
+                    recipient_role="candidate",
+                    notification_type="class_reminder",
+                    title=f"Class ending soon: {session.title}",
+                    description=f"Your live class will end automatically at {session.end_time} (in 15 minutes).",
+                    detail=detail,
+                    event_date=event_date,
+                    severity="warning",
+                )
+            )
+
+
+async def _notify_class_ended_automatically(
+    db: AsyncSession,
+    session: TrainingPortalClassSession,
+    batch: Optional[TrainingPortalBatch],
+    target: date,
+):
+    event_date = target.isoformat()
+    detail = "This class session was completed automatically as it exceeded its scheduled duration."
+
+    teacher_email = await _lookup_teacher_email(db, session.instructor_name)
+    if teacher_email:
+        db.add(
+            TrainingPortalCandidateNotification(
+                id=str(uuid.uuid4()),
+                candidate_email=teacher_email.lower(),
+                recipient_role="teacher",
+                notification_type="class_reminder",
+                title=f"Class ended automatically: {session.title}",
+                description=f"Your class has automatically closed as the scheduled time ({session.end_time}) was reached.",
+                detail=detail,
+                event_date=event_date,
+                severity="info",
+            )
+        )
+
+    if batch:
+        enrollments_result = await db.execute(
+            select(TrainingPortalEnrollment).where(
+                TrainingPortalEnrollment.batch_id == batch.id,
+                TrainingPortalEnrollment.status != "dropped",
+            )
+        )
+        for enrollment in enrollments_result.scalars().all():
+            db.add(
+                TrainingPortalCandidateNotification(
+                    id=str(uuid.uuid4()),
+                    candidate_email=enrollment.candidate_email,
+                    recipient_role="candidate",
+                    notification_type="class_reminder",
+                    title=f"Class ended automatically: {session.title}",
+                    description=f"Your class has automatically closed as the scheduled time ({session.end_time}) was reached.",
+                    detail=detail,
+                    event_date=event_date,
+                    severity="info",
                 )
             )
 
@@ -1207,6 +1868,75 @@ async def list_class_sessions(
     return [session_to_out(row) for row in result.scalars().all()]
 
 
+async def _validate_instructor_schedule(
+    db: AsyncSession,
+    instructor_name: Optional[str],
+    start_time: str,
+    end_time: str,
+    schedule_type: str,
+    date_str: Optional[str],
+    days: Optional[List[str]],
+    ignore_session_id: Optional[str] = None,
+):
+    if not instructor_name or not instructor_name.strip():
+        return
+
+    result = await db.execute(
+        select(TrainingPortalClassSession).where(
+            func.lower(TrainingPortalClassSession.instructor_name) == instructor_name.strip().lower()
+        )
+    )
+    existing_sessions = result.scalars().all()
+
+    t1_start = _parse_time_12h(start_time)
+    t1_end = _parse_time_12h(end_time)
+
+    for existing in existing_sessions:
+        if ignore_session_id and existing.id == ignore_session_id:
+            continue
+        
+        # Check if they can occur on the same day
+        same_day = False
+        if schedule_type == "one-time" and existing.schedule_type == "one-time":
+            same_day = (date_str == existing.date)
+        elif schedule_type == "recurring" and existing.schedule_type == "recurring":
+            days1 = set(days or [])
+            days2 = set(existing.days or [])
+            same_day = bool(days1.intersection(days2))
+        else:
+            # One is recurring, one is one-time
+            recurring = existing if existing.schedule_type == "recurring" else None
+            if not recurring: # our new session is recurring, existing is one-time
+                try:
+                    target_date = date.fromisoformat(existing.date)
+                    day_abbr = target_date.strftime("%a")
+                    same_day = day_abbr in (days or [])
+                except (ValueError, TypeError):
+                    same_day = False
+            else: # our new session is one-time, existing is recurring
+                try:
+                    target_date = date.fromisoformat(date_str)
+                    day_abbr = target_date.strftime("%a")
+                    same_day = day_abbr in (existing.days or [])
+                except (ValueError, TypeError):
+                    same_day = False
+
+        if same_day:
+            t2_start = _parse_time_12h(existing.start_time)
+            t2_end = _parse_time_12h(existing.end_time)
+
+            if t1_start and t1_end and t2_start and t2_end:
+                # Overlap check: Start1 < End2 and Start2 < End1
+                if t1_start < t2_end and t2_start < t1_end:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Instructor {instructor_name} is already assigned to another class "
+                            f"'{existing.title}' during this time ({existing.start_time} - {existing.end_time})."
+                        ),
+                    )
+
+
 @router.post("/class-sessions", response_model=PortalClassSessionOut, status_code=status.HTTP_201_CREATED)
 async def create_class_session(
     body: PortalClassSessionCreate,
@@ -1214,6 +1944,22 @@ async def create_class_session(
     current_user: User = Depends(require_super_admin),
     db: AsyncSession = Depends(get_db),
 ):
+    if not time_within_working_hours(body.start_time) or not time_within_working_hours(body.end_time):
+        raise HTTPException(
+            status_code=400,
+            detail="Class start and end time must be between 8:00 AM and 8:00 PM.",
+        )
+
+    await _validate_instructor_schedule(
+        db=db,
+        instructor_name=body.instructor_name,
+        start_time=body.start_time,
+        end_time=body.end_time,
+        schedule_type=body.schedule_type,
+        date_str=body.date,
+        days=body.days,
+    )
+
     if body.batch_id:
         student_count = await _batch_student_count(db, body.batch_id)
         if student_count < MIN_BATCH_SCHEDULE_STUDENTS and not body.admin_override:
@@ -1244,6 +1990,46 @@ async def create_class_session(
     )
     db.add(session)
     await db.flush()
+
+    # Trigger Notifications
+    if session.batch_id:
+        enrollments_result = await db.execute(
+            select(TrainingPortalEnrollment).where(
+                TrainingPortalEnrollment.batch_id == session.batch_id,
+                TrainingPortalEnrollment.status != "dropped",
+            )
+        )
+        for enrollment in enrollments_result.scalars().all():
+            db.add(
+                TrainingPortalCandidateNotification(
+                    id=str(uuid.uuid4()),
+                    candidate_email=enrollment.candidate_email,
+                    recipient_role="candidate",
+                    notification_type="class_scheduled",
+                    title="Class Scheduled",
+                    description=f'A new class "{session.title}" has been scheduled for your batch.',
+                    detail=f"Date: {session.date}. Time: {session.start_time} - {session.end_time}. Venue: {session.venue or 'TBA'}.",
+                    event_date=session.date,
+                    severity="info",
+                )
+            )
+
+    teacher_email = await _lookup_teacher_email(db, session.instructor_name)
+    if teacher_email:
+        db.add(
+            TrainingPortalCandidateNotification(
+                id=str(uuid.uuid4()),
+                candidate_email=teacher_email.lower(),
+                recipient_role="teacher",
+                notification_type="class_scheduled",
+                title="Class Scheduled",
+                description=f'You have been scheduled to teach class "{session.title}".',
+                detail=f"Date: {session.date}. Time: {session.start_time} - {session.end_time}. Venue: {session.venue or 'TBA'}.",
+                event_date=session.date,
+                severity="info",
+            )
+        )
+
     background_tasks.add_task(run_class_sync, session.id)
     return session_to_out(session)
 
@@ -1263,6 +2049,30 @@ async def update_class_session(
     if not session:
         raise HTTPException(status_code=404, detail="Class session not found")
 
+    effective_start_time = body.start_time if body.start_time is not None else session.start_time
+    effective_end_time = body.end_time if body.end_time is not None else session.end_time
+    if not time_within_working_hours(effective_start_time) or not time_within_working_hours(effective_end_time):
+        raise HTTPException(
+            status_code=400,
+            detail="Class start and end time must be between 8:00 AM and 8:00 PM.",
+        )
+
+    effective_instructor = body.instructor_name if body.instructor_name is not None else session.instructor_name
+    effective_schedule_type = body.schedule_type if body.schedule_type is not None else session.schedule_type
+    effective_date = body.date if body.date is not None else session.date
+    effective_days = body.days if body.days is not None else session.days
+
+    await _validate_instructor_schedule(
+        db=db,
+        instructor_name=effective_instructor,
+        start_time=effective_start_time,
+        end_time=effective_end_time,
+        schedule_type=effective_schedule_type,
+        date_str=effective_date,
+        days=effective_days,
+        ignore_session_id=session_id,
+    )
+
     batch_id = body.batch_id if body.batch_id is not None else session.batch_id
     if batch_id:
         student_count = await _batch_student_count(db, batch_id)
@@ -1281,6 +2091,75 @@ async def update_class_session(
     session.updated_at = datetime.utcnow()
     await db.flush()
     background_tasks.add_task(run_class_sync, session.id)
+    return session_to_out(session)
+
+
+CLASS_SESSION_ATTACHMENT_EXTENSIONS = {
+    ".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".txt", ".png", ".jpg", ".jpeg",
+}
+
+
+@router.post("/class-sessions/{session_id}/attachment", response_model=PortalClassSessionOut)
+async def upload_class_session_attachment(
+    session_id: str,
+    file: UploadFile = File(...),
+    current_user: User = Depends(require_teacher_or_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(TrainingPortalClassSession).where(TrainingPortalClassSession.id == session_id)
+    )
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="Class session not found")
+
+    ext = Path(file.filename or "attachment").suffix.lower()
+    if ext not in CLASS_SESSION_ATTACHMENT_EXTENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only PDF, Word, PowerPoint, Excel, text, or image files are allowed.",
+        )
+
+    content = await file.read()
+    max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
+    if len(content) > max_bytes:
+        raise HTTPException(status_code=413, detail=f"File too large. Max {settings.MAX_UPLOAD_MB}MB allowed.")
+
+    base_dir = Path(settings.UPLOAD_DIR)
+    if not base_dir.is_absolute():
+        base_dir = Path(__file__).parent.parent / base_dir
+    attachment_dir = base_dir / "training_portal_class_session_attachments"
+    attachment_dir.mkdir(parents=True, exist_ok=True)
+
+    safe_name = f"{uuid.uuid4().hex}{ext}"
+    file_path = attachment_dir / safe_name
+    with open(file_path, "wb") as output_file:
+        output_file.write(content)
+
+    session.attachment_url = f"/uploads/training_portal_class_session_attachments/{safe_name}"
+    session.attachment_filename = file.filename or safe_name
+    session.updated_at = datetime.utcnow()
+    await db.flush()
+    return session_to_out(session)
+
+
+@router.delete("/class-sessions/{session_id}/attachment", response_model=PortalClassSessionOut)
+async def delete_class_session_attachment(
+    session_id: str,
+    current_user: User = Depends(require_teacher_or_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(TrainingPortalClassSession).where(TrainingPortalClassSession.id == session_id)
+    )
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="Class session not found")
+
+    session.attachment_url = None
+    session.attachment_filename = None
+    session.updated_at = datetime.utcnow()
+    await db.flush()
     return session_to_out(session)
 
 
@@ -1328,11 +2207,90 @@ async def list_todays_class_sessions(
         if not session_occurs_on_date(session, today):
             continue
         if not session_live_applies_to_date(session, today):
-            if session.reminder_sent or session.reminder_15_sent:
+            if session.reminder_sent or session.reminder_15_sent or getattr(session, "end_reminder_sent", False):
                 session.reminder_sent = False
                 session.reminder_15_sent = False
+                session.end_reminder_sent = False
                 session.updated_at = now
         todays.append(session)
+
+        # Check if the class is live, to see if it should end or get a 15 min reminder
+        live_status = effective_live_status(session, now, today)
+        if live_status == "live":
+            end_dt = session_end_datetime(session, today)
+            if end_dt:
+                minutes_remaining = (end_dt - now).total_seconds() / 60.0
+                batch = None
+                if session.batch_id:
+                    batch_result = await db.execute(
+                        select(TrainingPortalBatch).where(TrainingPortalBatch.id == session.batch_id)
+                    )
+                    batch = batch_result.scalar_one_or_none()
+
+                # If 15 minutes or less remaining, send warning
+                if 0 < minutes_remaining <= 15:
+                    if not getattr(session, "end_reminder_sent", False):
+                        await _notify_class_ending_soon(db, session, batch, today)
+                
+                # If scheduled duration has completed (or passed), auto-end the class session
+                elif minutes_remaining <= 0:
+                    session.live_status = "completed"
+                    session.ended_at = datetime.utcnow()
+                    session.attendance_marked = True
+                    session.session_report = "Class ended automatically after scheduled duration."
+                    session.updated_at = datetime.utcnow()
+
+                    if batch:
+                        occurrence_date = today.isoformat()
+                        enrollments_result = await db.execute(
+                            select(TrainingPortalEnrollment).where(
+                                TrainingPortalEnrollment.batch_id == batch.id,
+                                TrainingPortalEnrollment.status != "dropped",
+                            )
+                        )
+                        enrollments = enrollments_result.scalars().all()
+                        for enrollment in enrollments:
+                            # Precedence: approved leave request
+                            leave_result = await db.execute(
+                                select(TrainingPortalLeaveRequest).where(
+                                    TrainingPortalLeaveRequest.requester_type == "student",
+                                    TrainingPortalLeaveRequest.candidate_email == enrollment.candidate_email.lower(),
+                                    TrainingPortalLeaveRequest.batch_id == batch.id,
+                                    TrainingPortalLeaveRequest.date == occurrence_date,
+                                    TrainingPortalLeaveRequest.status == "approved",
+                                )
+                            )
+                            approved_leave = leave_result.scalar_one_or_none()
+                            status_to_mark = "on_leave" if approved_leave else "present"
+
+                            existing = await db.execute(
+                                select(TrainingPortalAttendanceRecord).where(
+                                    TrainingPortalAttendanceRecord.class_session_id == session.id,
+                                    TrainingPortalAttendanceRecord.enrollment_id == enrollment.id,
+                                    TrainingPortalAttendanceRecord.occurrence_date == occurrence_date,
+                                )
+                            )
+                            record = existing.scalar_one_or_none()
+                            if record:
+                                record.status = status_to_mark
+                                record.marked_at = datetime.utcnow()
+                            else:
+                                db.add(
+                                    TrainingPortalAttendanceRecord(
+                                        id=str(uuid.uuid4()),
+                                        class_session_id=session.id,
+                                        enrollment_id=enrollment.id,
+                                        occurrence_date=occurrence_date,
+                                        batch_id=batch.id,
+                                        candidate_email=enrollment.candidate_email,
+                                        candidate_name=enrollment.candidate_name,
+                                        status=status_to_mark,
+                                        marked_at=datetime.utcnow(),
+                                    )
+                                )
+                        await _recalculate_batch_progress(db, batch)
+
+                    await _notify_class_ended_automatically(db, session, batch, today)
 
         if tier := pending_reminder_tier(session, now, today):
             batch = None
@@ -1360,6 +2318,20 @@ async def start_class_session(
     session = result.scalar_one_or_none()
     if not session:
         raise HTTPException(status_code=404, detail="Class session not found")
+
+    if session.batch_id:
+        enrollments_count_result = await db.execute(
+            select(func.count()).select_from(TrainingPortalEnrollment).where(
+                TrainingPortalEnrollment.batch_id == session.batch_id,
+                TrainingPortalEnrollment.status != "dropped"
+            )
+        )
+        count = int(enrollments_count_result.scalar() or 0)
+        if count == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot start class session because there are no students enrolled in this batch"
+            )
 
     today = today_ist()
     now = now_ist()
@@ -1390,7 +2362,10 @@ async def start_class_session(
         session.early_end_reason = None
         session.session_report = None
         session.covered_topic_ids = []
+        session.attachment_url = None
+        session.attachment_filename = None
         session.attendance_marked = False
+        session.end_reminder_sent = False
 
     session.live_status = "live"
     session.live_occurrence_date = today.isoformat()
@@ -1498,6 +2473,19 @@ async def complete_class_session(
         if session.batch_id and enrollment.batch_id != session.batch_id:
             raise HTTPException(status_code=400, detail="Student not in this batch")
 
+        # Check if student is on approved leave on this occurrence_date and batch
+        leave_result = await db.execute(
+            select(TrainingPortalLeaveRequest).where(
+                TrainingPortalLeaveRequest.requester_type == "student",
+                TrainingPortalLeaveRequest.candidate_email == enrollment.candidate_email.lower(),
+                TrainingPortalLeaveRequest.batch_id == session.batch_id,
+                TrainingPortalLeaveRequest.date == occurrence_date,
+                TrainingPortalLeaveRequest.status == "approved",
+            )
+        )
+        approved_leave = leave_result.scalar_one_or_none()
+        status_to_mark = "on_leave" if approved_leave else entry.status
+
         existing = await db.execute(
             select(TrainingPortalAttendanceRecord).where(
                 TrainingPortalAttendanceRecord.class_session_id == session.id,
@@ -1507,7 +2495,7 @@ async def complete_class_session(
         )
         record = existing.scalar_one_or_none()
         if record:
-            record.status = entry.status
+            record.status = status_to_mark
             record.marked_at = now
             record.marked_by_id = current_user.id
         else:
@@ -1520,7 +2508,7 @@ async def complete_class_session(
                     batch_id=session.batch_id,
                     candidate_email=enrollment.candidate_email,
                     candidate_name=enrollment.candidate_name,
-                    status=entry.status,
+                    status=status_to_mark,
                     marked_by_id=current_user.id,
                     marked_at=now,
                 )
@@ -1584,11 +2572,15 @@ async def list_attendance_records(
     elif teacher_batch_ids is not None:
         query = query.where(TrainingPortalAttendanceRecord.batch_id.in_(teacher_batch_ids))
 
+    is_student = not is_admin and teacher_batch_ids is None
     if candidate_email:
+        normalized_candidate_email = candidate_email.strip().lower()
+        if is_student and normalized_candidate_email != user_email:
+            raise HTTPException(status_code=403, detail="Not authorized to view another candidate's records")
         query = query.where(
-            TrainingPortalAttendanceRecord.candidate_email == candidate_email.strip().lower()
+            TrainingPortalAttendanceRecord.candidate_email == normalized_candidate_email
         )
-    elif not is_admin and teacher_batch_ids is None:
+    elif is_student:
         query = query.where(TrainingPortalAttendanceRecord.candidate_email == user_email)
 
     result = await db.execute(query)
@@ -1609,6 +2601,8 @@ async def list_attendance_records(
             session_end_time=session.end_time,
             session_report=session.session_report,
             covered_topic_ids=session.covered_topic_ids or [],
+            attachment_url=session.attachment_url,
+            attachment_filename=session.attachment_filename,
             late_start_reason=session.late_start_reason,
             early_end_reason=session.early_end_reason,
             instructor_name=session.instructor_name,
@@ -1633,10 +2627,12 @@ async def _notify_leave_status(
     if not email:
         return
     label = "approved" if status == "approved" else "rejected"
+    role = "teacher" if leave.teacher_email else "candidate"
     db.add(
         TrainingPortalCandidateNotification(
             id=str(uuid.uuid4()),
             candidate_email=email,
+            recipient_role=role,
             notification_type="leave_status",
             title=f"Leave request {label}",
             description=f"Your leave for {leave.date} has been {label}.",
@@ -1738,6 +2734,21 @@ async def create_student_leave_request(
     if len(reason) < 10:
         raise HTTPException(status_code=400, detail="Leave reason must be at least 10 characters")
 
+    # Check if student already has a pending or approved leave request for the same date
+    existing_result = await db.execute(
+        select(TrainingPortalLeaveRequest).where(
+            TrainingPortalLeaveRequest.requester_type == "student",
+            func.lower(TrainingPortalLeaveRequest.candidate_email) == (current_user.email or "").lower(),
+            TrainingPortalLeaveRequest.date == body.date,
+            TrainingPortalLeaveRequest.status.in_(["pending", "approved"]),
+        )
+    )
+    if existing_result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You have already applied for leave on this date",
+        )
+
     leave = TrainingPortalLeaveRequest(
         id=str(uuid.uuid4()),
         requester_type="student",
@@ -1752,6 +2763,29 @@ async def create_student_leave_request(
     )
     db.add(leave)
     await db.flush()
+
+    # Notify batch teacher
+    if body.batch_id:
+        batch_res = await db.execute(select(TrainingPortalBatch).where(TrainingPortalBatch.id == body.batch_id))
+        batch = batch_res.scalar_one_or_none()
+        if batch and batch.instructor_name:
+            t_email = await _lookup_teacher_email(db, batch.instructor_name)
+            if t_email:
+                db.add(
+                    TrainingPortalCandidateNotification(
+                        id=str(uuid.uuid4()),
+                        candidate_email=t_email.lower(),
+                        recipient_role="teacher",
+                        notification_type="student_leave_submitted",
+                        title="Student Leave Request",
+                        description=f"{leave.candidate_name} has requested leave for {leave.date}.",
+                        detail=reason,
+                        event_date=leave.date,
+                        severity="info",
+                    )
+                )
+                await db.flush()
+
     return leave_to_out(leave)
 
 
@@ -1767,6 +2801,21 @@ async def create_teacher_leave_request(
     reason = body.reason.strip()
     if len(reason) < 10:
         raise HTTPException(status_code=400, detail="Leave reason must be at least 10 characters")
+
+    # Check if teacher already has a pending or approved leave request for the same date
+    existing_result = await db.execute(
+        select(TrainingPortalLeaveRequest).where(
+            TrainingPortalLeaveRequest.requester_type == "teacher",
+            func.lower(TrainingPortalLeaveRequest.teacher_email) == (current_user.email or "").lower(),
+            TrainingPortalLeaveRequest.date == body.date,
+            TrainingPortalLeaveRequest.status.in_(["pending", "approved"]),
+        )
+    )
+    if existing_result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You have already applied for leave on this date",
+        )
 
     teacher_result = await db.execute(
         select(TrainingPortalTeacher).where(
@@ -1789,6 +2838,26 @@ async def create_teacher_leave_request(
     )
     db.add(leave)
     await db.flush()
+
+    # Notify admins
+    admin_res = await db.execute(select(User.email).where(User.is_super_admin == True))
+    admin_emails = [row[0] for row in admin_res.all()]
+    for admin_email in admin_emails:
+        db.add(
+            TrainingPortalCandidateNotification(
+                id=str(uuid.uuid4()),
+                candidate_email=admin_email,
+                recipient_role="admin",
+                notification_type="teacher_leave_submitted",
+                title="Teacher Leave Request",
+                description=f"Teacher {teacher_name} has requested leave for {body.date}.",
+                detail=reason,
+                event_date=body.date,
+                severity="info",
+            )
+        )
+    await db.flush()
+
     return leave_to_out(leave)
 
 
@@ -1963,6 +3032,23 @@ async def create_behavior_report(
     )
     db.add(report)
     await db.flush()
+
+    # Notify candidate
+    db.add(
+        TrainingPortalCandidateNotification(
+            id=str(uuid.uuid4()),
+            candidate_email=enrollment.candidate_email.lower(),
+            recipient_role="candidate",
+            notification_type="behavior_report",
+            title="Behavior Feedback Report",
+            description=f"Your instructor {instructor_name} has submitted a new behavior feedback report.",
+            detail=f"Discipline: {discipline}/5, Participation: {participation}/5, Performance: {performance}/5. Comments: {comments}",
+            event_date=report_date,
+            severity="warning" if flagged else "info",
+        )
+    )
+    await db.flush()
+
     return behavior_report_to_out(report)
 
 
@@ -1993,15 +3079,110 @@ async def list_notifications(
     current_user: User = Depends(require_training_portal_user),
     db: AsyncSession = Depends(get_db),
 ):
+    role_str = "admin"
+    if not getattr(current_user, "is_super_admin", False):
+        role_val = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role or "")
+        role_str = "candidate" if role_val == "seeker" else role_val
+
     query = select(TrainingPortalCandidateNotification).order_by(
         TrainingPortalCandidateNotification.created_at.desc()
     )
     if getattr(current_user, "is_super_admin", False) and candidate_email:
-        query = query.where(TrainingPortalCandidateNotification.candidate_email == candidate_email)
+        query = query.where(
+            and_(
+                TrainingPortalCandidateNotification.candidate_email == candidate_email,
+                TrainingPortalCandidateNotification.recipient_role == "candidate"
+            )
+        )
     else:
-        query = query.where(TrainingPortalCandidateNotification.candidate_email == (current_user.email or ""))
+        query = query.where(
+            and_(
+                TrainingPortalCandidateNotification.candidate_email == (current_user.email or ""),
+                TrainingPortalCandidateNotification.recipient_role == role_str
+            )
+        )
     result = await db.execute(query)
     return [notification_to_out(row) for row in result.scalars().all()]
+
+
+@router.post("/notifications/mark-read")
+async def mark_notifications_read(
+    body: PortalNotificationMarkRead,
+    current_user: User = Depends(require_training_portal_user),
+    db: AsyncSession = Depends(get_db),
+):
+    role_str = "admin"
+    if not getattr(current_user, "is_super_admin", False):
+        role_val = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role or "")
+        role_str = "candidate" if role_val == "seeker" else role_val
+
+    query = select(TrainingPortalCandidateNotification).where(
+        and_(
+            TrainingPortalCandidateNotification.candidate_email == (current_user.email or ""),
+            TrainingPortalCandidateNotification.recipient_role == role_str,
+            TrainingPortalCandidateNotification.is_read == False
+        )
+    )
+    if body.notification_ids is not None and len(body.notification_ids) > 0:
+        query = query.where(TrainingPortalCandidateNotification.id.in_(body.notification_ids))
+
+    res = await db.execute(query)
+    rows = res.scalars().all()
+    for row in rows:
+        row.is_read = True
+
+    await db.flush()
+    return {"status": "ok", "message": f"Marked {len(rows)} notification(s) as read."}
+
+
+@router.post("/notifications/clear-all")
+async def clear_all_notifications(
+    current_user: User = Depends(require_training_portal_user),
+    db: AsyncSession = Depends(get_db),
+):
+    role_str = "admin"
+    if not getattr(current_user, "is_super_admin", False):
+        role_val = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role or "")
+        role_str = "candidate" if role_val == "seeker" else role_val
+
+    await db.execute(
+        delete(TrainingPortalCandidateNotification).where(
+            and_(
+                TrainingPortalCandidateNotification.candidate_email == (current_user.email or ""),
+                TrainingPortalCandidateNotification.recipient_role == role_str
+            )
+        )
+    )
+    await db.flush()
+    return {"status": "ok", "message": "All notifications cleared."}
+
+
+@router.delete("/notifications/{id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_notification(
+    id: str,
+    current_user: User = Depends(require_training_portal_user),
+    db: AsyncSession = Depends(get_db),
+):
+    role_str = "admin"
+    if not getattr(current_user, "is_super_admin", False):
+        role_val = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role or "")
+        role_str = "candidate" if role_val == "seeker" else role_val
+
+    result = await db.execute(
+        select(TrainingPortalCandidateNotification).where(
+            and_(
+                TrainingPortalCandidateNotification.id == id,
+                TrainingPortalCandidateNotification.candidate_email == (current_user.email or ""),
+                TrainingPortalCandidateNotification.recipient_role == role_str
+            )
+        )
+    )
+    row = result.scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Notification not found")
+
+    await db.delete(row)
+    await db.flush()
 
 
 # ── Transactions ──────────────────────────────────────────────────────────────
@@ -2163,6 +3344,16 @@ async def create_refund_request(
         severity="info",
     )
     db.add(notif)
+
+    await _notify_admins(
+        db=db,
+        notification_type="refund_request_submitted",
+        title="Refund Request Submitted",
+        description=f"{enrollment.candidate_name} requested a refund of ₹{amount:,.2f}.",
+        detail=f"Course: {enrollment.title}. Reason: {body.reason.strip()}",
+        severity="warning",
+    )
+
     await db.flush()
     return refund_request_to_out(row)
 
@@ -2409,10 +3600,29 @@ async def razorpay_webhook(request: Request, db: AsyncSession = Depends(get_db))
         return {"status": "enrollment_missing"}
 
     order.provider_payment_id = payment_info["provider_payment_id"]
-    order.status = "paid"
     order.webhook_payload = payload
-    order.paid_at = datetime.utcnow()
     order.updated_at = datetime.utcnow()
+
+    if payment_info.get("event") == "payment.failed":
+        order.status = "failed"
+        db.add(
+            TrainingPortalCandidateNotification(
+                id=str(uuid.uuid4()),
+                candidate_email=order.candidate_email.strip().lower(),
+                recipient_role="candidate",
+                notification_type="payment_failed",
+                title="Payment Failed",
+                description="Your fee payment has failed or expired.",
+                detail=f"Order ID: {order.provider_order_id or order.id}. Please retry payment from your dashboard.",
+                event_date=datetime.utcnow().strftime("%Y-%m-%d"),
+                severity="danger",
+            )
+        )
+        await db.flush()
+        return {"status": "failed_recorded"}
+
+    order.status = "paid"
+    order.paid_at = datetime.utcnow()
     await _mark_enrollment_paid(
         db,
         enrollment,

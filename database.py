@@ -381,11 +381,14 @@ async def patch_training_portal_schema():
         "ALTER TABLE training_portal_class_sessions ADD COLUMN IF NOT EXISTS ended_at TIMESTAMP",
         "ALTER TABLE training_portal_class_sessions ADD COLUMN IF NOT EXISTS session_report TEXT",
         "ALTER TABLE training_portal_class_sessions ADD COLUMN IF NOT EXISTS covered_topic_ids JSON NOT NULL DEFAULT '[]'::json",
+        "ALTER TABLE training_portal_class_sessions ADD COLUMN IF NOT EXISTS attachment_url VARCHAR(500)",
+        "ALTER TABLE training_portal_class_sessions ADD COLUMN IF NOT EXISTS attachment_filename VARCHAR(255)",
         "ALTER TABLE training_portal_class_sessions ADD COLUMN IF NOT EXISTS reminder_sent BOOLEAN NOT NULL DEFAULT FALSE",
         "ALTER TABLE training_portal_class_sessions ADD COLUMN IF NOT EXISTS reminder_15_sent BOOLEAN NOT NULL DEFAULT FALSE",
         "ALTER TABLE training_portal_class_sessions ADD COLUMN IF NOT EXISTS late_start_reason TEXT",
         "ALTER TABLE training_portal_class_sessions ADD COLUMN IF NOT EXISTS early_end_reason TEXT",
         "ALTER TABLE training_portal_class_sessions ADD COLUMN IF NOT EXISTS attendance_marked BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE training_portal_class_sessions ADD COLUMN IF NOT EXISTS end_reminder_sent BOOLEAN NOT NULL DEFAULT FALSE",
         "ALTER TABLE training_portal_class_sessions ADD COLUMN IF NOT EXISTS created_by_id UUID",
         "ALTER TABLE training_portal_class_sessions ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW()",
         "ALTER TABLE training_portal_class_sessions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW()",
@@ -424,6 +427,8 @@ async def patch_training_portal_schema():
 
         # training_portal_candidate_notifications
         "ALTER TABLE training_portal_candidate_notifications ADD COLUMN IF NOT EXISTS candidate_email VARCHAR(200)",
+        "ALTER TABLE training_portal_candidate_notifications ADD COLUMN IF NOT EXISTS recipient_role VARCHAR(30) NOT NULL DEFAULT 'candidate'",
+        "ALTER TABLE training_portal_candidate_notifications ADD COLUMN IF NOT EXISTS is_read BOOLEAN NOT NULL DEFAULT FALSE",
         "ALTER TABLE training_portal_candidate_notifications ADD COLUMN IF NOT EXISTS notification_type VARCHAR(50)",
         "ALTER TABLE training_portal_candidate_notifications ADD COLUMN IF NOT EXISTS title VARCHAR(300)",
         "ALTER TABLE training_portal_candidate_notifications ADD COLUMN IF NOT EXISTS description TEXT",
@@ -432,6 +437,8 @@ async def patch_training_portal_schema():
         "ALTER TABLE training_portal_candidate_notifications ADD COLUMN IF NOT EXISTS severity VARCHAR(20) NOT NULL DEFAULT 'info'",
         "ALTER TABLE training_portal_candidate_notifications ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW()",
         "CREATE INDEX IF NOT EXISTS idx_tpcn_candidate_email ON training_portal_candidate_notifications(candidate_email)",
+        "CREATE INDEX IF NOT EXISTS idx_tpcn_recipient_role ON training_portal_candidate_notifications(recipient_role)",
+        "CREATE INDEX IF NOT EXISTS idx_tpcn_is_read ON training_portal_candidate_notifications(is_read)",
 
         # training_portal_transactions
         "ALTER TABLE training_portal_transactions ADD COLUMN IF NOT EXISTS transaction_id VARCHAR(80)",

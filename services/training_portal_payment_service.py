@@ -97,10 +97,11 @@ def verify_webhook_signature(body: bytes, signature: str) -> bool:
 def parse_webhook_payment(payload: dict[str, Any]) -> Optional[dict[str, str]]:
     try:
         event = payload.get("event", "")
-        if event != "payment.captured":
+        if event not in ("payment.captured", "payment.failed"):
             return None
         entity = payload["payload"]["payment"]["entity"]
         return {
+            "event": event,
             "provider_order_id": entity.get("order_id") or "",
             "provider_payment_id": entity.get("id") or "",
             "status": entity.get("status") or "captured",
