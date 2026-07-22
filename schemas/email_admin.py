@@ -71,14 +71,6 @@ class ImportedEmailRow(BaseModel):
     name: Optional[str] = None
 
 
-class AudienceFilter(BaseModel):
-    industries: Optional[list[str]] = None
-    user_ids: Optional[list[str]] = None
-    is_verified: Optional[bool] = None
-    imported_emails: Optional[list[ImportedEmailRow]] = None
-    job_fair_id: Optional[str] = None
-
-
 _AUDIENCE_TYPE_LITERAL = Literal[
     "all_seekers",
     "all_providers",
@@ -90,6 +82,15 @@ _AUDIENCE_TYPE_LITERAL = Literal[
     "job_fair_seekers",
     "job_fair_providers",
 ]
+
+
+class AudienceFilter(BaseModel):
+    audience_types: Optional[list[_AUDIENCE_TYPE_LITERAL]] = None
+    industries: Optional[list[str]] = None
+    user_ids: Optional[list[str]] = None
+    is_verified: Optional[bool] = None
+    imported_emails: Optional[list[ImportedEmailRow]] = None
+    job_fair_id: Optional[str] = None
 
 
 class EmailCampaignCreate(BaseModel):

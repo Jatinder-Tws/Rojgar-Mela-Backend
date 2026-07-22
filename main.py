@@ -1,6 +1,8 @@
 from contextlib import asynccontextmanager
+import asyncio
 import logging
 import os
+from typing import Optional
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,16 +13,43 @@ from database import init_db, patch_email_admin_schema, patch_interview_applicat
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(
-    title="JobMatch AI API",
-    description="AI-powered bidirectional job matching platform",
-    version="1.0.0",
-)
+_class_lifecycle_task: Optional[asyncio.Task] = None
 
 
-@app.on_event("startup")
-async def ensure_db_tables():
-    """Create any missing tables and patch email admin schema."""
+async def _class_lifecycle_loop():
+    """
+    Fallback scheduler so live classes still auto-end / get end reminders
+    even when Celery Beat is not running (e.g. local docker without beat).
+    Idempotent with the Celery task via end_reminder_sent / live_status flags.
+    """
+    await asyncio.sleep(20)
+    while True:
+        try:
+            from services.training_portal_class_lifecycle import process_all_class_lifecycles
+
+            async with AsyncSessionLocal() as db:
+                try:
+                    stats = await process_all_class_lifecycles(db)
+                    await db.commit()
+                    if stats and (
+                        stats.get("auto_ended")
+                        or stats.get("end_reminders")
+                        or stats.get("start_reminders")
+                    ):
+                        logger.info("Class lifecycle sweep: %s", stats)
+                except Exception:
+                    await db.rollback()
+                    raise
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Class lifecycle background sweep failed")
+        await asyncio.sleep(60)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _class_lifecycle_task
     await init_db()
     await patch_email_admin_schema()
     await patch_interview_application_schema()
@@ -34,6 +63,24 @@ async def ensure_db_tables():
     from controllers.super_admin_controller import ensure_super_admin_user
     await ensure_super_admin_user()
 
+    _class_lifecycle_task = asyncio.create_task(_class_lifecycle_loop())
+    try:
+        yield
+    finally:
+        if _class_lifecycle_task:
+            _class_lifecycle_task.cancel()
+            try:
+                await _class_lifecycle_task
+            except asyncio.CancelledError:
+                pass
+
+
+app = FastAPI(
+    title="JobMatch AI API",
+    description="AI-powered bidirectional job matching platform",
+    version="1.0.0",
+    lifespan=lifespan,
+)
 # ── Custom Exception Handler for Validation Errors ──────────────────────────
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):

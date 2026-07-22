@@ -114,6 +114,10 @@ from services.training_portal_class_live import (
     session_end_datetime,
     _parse_time_12h,
 )
+from services.training_portal_class_lifecycle import (
+    process_todays_session_lifecycle,
+    recalculate_batch_progress as _recalculate_batch_progress,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -735,10 +739,7 @@ async def export_students_csv(
         st_leaves = leaves_by_email.get(email, [])
         pending_slips = len([l for l in st_leaves if l.status == "Pending"])
         
-        laptop_confirmed = has_confirmed_course or any(
-            e.enrollment_type == "course" and e.status == "active"
-            for e in st_enrollments
-        )
+        laptop_confirmed = any(bool(getattr(e, "laptop_confirmed", False)) for e in st_enrollments)
         
         targets.append({
             "name": name,
@@ -1192,6 +1193,7 @@ async def create_enrollment(
         balance_due=body.balance_due,
         installments=body.installments,
         voter_card_url=body.voter_card_url,
+        laptop_confirmed=bool(getattr(body, "laptop_confirmed", False)),
         notes=body.notes,
         status="payment_initiated" if body.payment_status == "initiated" else ("active" if body.payment_status in ("paid_online", "paid_offline", "free") else "pending"),
     )
@@ -1297,6 +1299,8 @@ async def update_enrollment(
         enrollment.balance_due = body.balance_due
     if body.voter_card_url is not None:
         enrollment.voter_card_url = body.voter_card_url
+    if body.laptop_confirmed is not None:
+        enrollment.laptop_confirmed = body.laptop_confirmed
     if body.notes is not None:
         enrollment.notes = body.notes
     if body.status is not None:
@@ -1460,12 +1464,16 @@ async def create_batch(
     if len(body.enrollment_ids) > MAX_BATCH_STUDENTS:
         raise HTTPException(status_code=400, detail=f"Cannot assign more than {MAX_BATCH_STUDENTS} students at once")
 
+    resolved_instructor_id, resolved_instructor_name = await _resolve_batch_instructor(
+        db, body.instructor_id, body.instructor_name
+    )
+
     batch = TrainingPortalBatch(
         id=str(uuid.uuid4()),
         course_id=body.course_id,
         batch_name=body.batch_name.strip(),
-        instructor_id=body.instructor_id,
-        instructor_name=body.instructor_name,
+        instructor_id=resolved_instructor_id,
+        instructor_name=resolved_instructor_name,
         start_date=body.start_date,
         end_date=body.end_date,
         days=body.days,
@@ -1541,10 +1549,14 @@ async def update_batch(
     old_instructor_name = batch.instructor_name
     if body.batch_name is not None:
         batch.batch_name = body.batch_name.strip()
-    if body.instructor_id is not None:
-        batch.instructor_id = body.instructor_id
-    if body.instructor_name is not None:
-        batch.instructor_name = body.instructor_name.strip()
+    if body.instructor_id is not None or body.instructor_name is not None:
+        resolved_instructor_id, resolved_instructor_name = await _resolve_batch_instructor(
+            db,
+            body.instructor_id if body.instructor_id is not None else batch.instructor_id,
+            body.instructor_name if body.instructor_name is not None else batch.instructor_name,
+        )
+        batch.instructor_id = resolved_instructor_id
+        batch.instructor_name = resolved_instructor_name
     if body.start_date is not None:
         batch.start_date = body.start_date
     if body.end_date is not None:
@@ -1628,6 +1640,38 @@ async def _lookup_teacher_email(db: AsyncSession, instructor_name: str) -> Optio
     return teacher.email if teacher else None
 
 
+async def _resolve_batch_instructor(
+    db: AsyncSession,
+    instructor_id: Optional[str],
+    instructor_name: Optional[str],
+) -> tuple[Optional[str], str]:
+    """Prefer instructor_id; always return the canonical teacher name from DB."""
+    teacher_id = (instructor_id or "").strip() or None
+    name = (instructor_name or "").strip()
+
+    if teacher_id:
+        result = await db.execute(
+            select(TrainingPortalTeacher).where(TrainingPortalTeacher.id == teacher_id)
+        )
+        teacher = result.scalar_one_or_none()
+        if not teacher:
+            raise HTTPException(status_code=400, detail="Selected teacher not found")
+        return teacher.id, teacher.name
+
+    if name:
+        result = await db.execute(
+            select(TrainingPortalTeacher).where(
+                func.lower(TrainingPortalTeacher.name) == name.lower()
+            )
+        )
+        teacher = result.scalar_one_or_none()
+        if teacher:
+            return teacher.id, teacher.name
+        return None, name
+
+    raise HTTPException(status_code=400, detail="Please select a teacher")
+
+
 async def _teacher_batch_ids_for_user(db: AsyncSession, current_user: User) -> list[str]:
     user_email = (current_user.email or "").lower()
     teacher_result = await db.execute(
@@ -1647,210 +1691,6 @@ async def _teacher_batch_ids_for_user(db: AsyncSession, current_user: User) -> l
         select(TrainingPortalBatch.id).where(or_(*conditions))
     )
     return [row[0] for row in batch_result.all()]
-
-
-async def _notify_class_reminder(
-    db: AsyncSession,
-    session: TrainingPortalClassSession,
-    batch: Optional[TrainingPortalBatch],
-    target: date,
-    tier: int = 30,
-):
-    if tier == 30:
-        if session.reminder_sent:
-            return
-        session.reminder_sent = True
-    elif tier == 15:
-        if session.reminder_15_sent:
-            return
-        session.reminder_15_sent = True
-    else:
-        return
-    session.updated_at = datetime.utcnow()
-
-    time_label = f"{session.start_time} – {session.end_time}"
-    venue = session.venue or (batch.venue if batch else "TBA")
-    event_date = target.isoformat()
-    detail = f"Class starts at {session.start_time}. Venue: {venue}."
-
-    teacher_email = await _lookup_teacher_email(db, session.instructor_name)
-    if teacher_email:
-        db.add(
-            TrainingPortalCandidateNotification(
-                id=str(uuid.uuid4()),
-                candidate_email=teacher_email.lower(),
-                recipient_role="teacher",
-                notification_type="class_reminder",
-                title=f"Class in {tier} min: {session.title}",
-                description=f"Your class is scheduled today at {time_label}.",
-                detail=detail,
-                event_date=event_date,
-                severity="warning" if tier == 15 else "info",
-            )
-        )
-
-    if batch:
-        enrollments_result = await db.execute(
-            select(TrainingPortalEnrollment).where(
-                TrainingPortalEnrollment.batch_id == batch.id,
-                TrainingPortalEnrollment.status != "dropped",
-            )
-        )
-        for enrollment in enrollments_result.scalars().all():
-            db.add(
-                TrainingPortalCandidateNotification(
-                    id=str(uuid.uuid4()),
-                    candidate_email=enrollment.candidate_email,
-                    recipient_role="candidate",
-                    notification_type="class_reminder",
-                    title=f"Class in {tier} min: {session.title}",
-                    description=f"Your batch class is today at {time_label}.",
-                    detail=detail,
-                    event_date=event_date,
-                    severity="warning" if tier == 15 else "info",
-                )
-            )
-
-
-async def _notify_class_ending_soon(
-    db: AsyncSession,
-    session: TrainingPortalClassSession,
-    batch: Optional[TrainingPortalBatch],
-    target: date,
-):
-    if getattr(session, "end_reminder_sent", False):
-        return
-    session.end_reminder_sent = True
-    session.updated_at = datetime.utcnow()
-
-    event_date = target.isoformat()
-    detail = "This class session will close automatically in 15 minutes."
-
-    teacher_email = await _lookup_teacher_email(db, session.instructor_name)
-    if teacher_email:
-        db.add(
-            TrainingPortalCandidateNotification(
-                id=str(uuid.uuid4()),
-                candidate_email=teacher_email.lower(),
-                recipient_role="teacher",
-                notification_type="class_reminder",
-                title=f"Class ending soon: {session.title}",
-                description=f"Your live class will end automatically at {session.end_time} (in 15 minutes).",
-                detail=detail,
-                event_date=event_date,
-                severity="warning",
-            )
-        )
-
-    if batch:
-        enrollments_result = await db.execute(
-            select(TrainingPortalEnrollment).where(
-                TrainingPortalEnrollment.batch_id == batch.id,
-                TrainingPortalEnrollment.status != "dropped",
-            )
-        )
-        for enrollment in enrollments_result.scalars().all():
-            db.add(
-                TrainingPortalCandidateNotification(
-                    id=str(uuid.uuid4()),
-                    candidate_email=enrollment.candidate_email,
-                    recipient_role="candidate",
-                    notification_type="class_reminder",
-                    title=f"Class ending soon: {session.title}",
-                    description=f"Your live class will end automatically at {session.end_time} (in 15 minutes).",
-                    detail=detail,
-                    event_date=event_date,
-                    severity="warning",
-                )
-            )
-
-
-async def _notify_class_ended_automatically(
-    db: AsyncSession,
-    session: TrainingPortalClassSession,
-    batch: Optional[TrainingPortalBatch],
-    target: date,
-):
-    event_date = target.isoformat()
-    detail = "This class session was completed automatically as it exceeded its scheduled duration."
-
-    teacher_email = await _lookup_teacher_email(db, session.instructor_name)
-    if teacher_email:
-        db.add(
-            TrainingPortalCandidateNotification(
-                id=str(uuid.uuid4()),
-                candidate_email=teacher_email.lower(),
-                recipient_role="teacher",
-                notification_type="class_reminder",
-                title=f"Class ended automatically: {session.title}",
-                description=f"Your class has automatically closed as the scheduled time ({session.end_time}) was reached.",
-                detail=detail,
-                event_date=event_date,
-                severity="info",
-            )
-        )
-
-    if batch:
-        enrollments_result = await db.execute(
-            select(TrainingPortalEnrollment).where(
-                TrainingPortalEnrollment.batch_id == batch.id,
-                TrainingPortalEnrollment.status != "dropped",
-            )
-        )
-        for enrollment in enrollments_result.scalars().all():
-            db.add(
-                TrainingPortalCandidateNotification(
-                    id=str(uuid.uuid4()),
-                    candidate_email=enrollment.candidate_email,
-                    recipient_role="candidate",
-                    notification_type="class_reminder",
-                    title=f"Class ended automatically: {session.title}",
-                    description=f"Your class has automatically closed as the scheduled time ({session.end_time}) was reached.",
-                    detail=detail,
-                    event_date=event_date,
-                    severity="info",
-                )
-            )
-
-
-async def _recalculate_batch_progress(db: AsyncSession, batch: TrainingPortalBatch):
-    course_result = await db.execute(
-        select(TrainingPortalCourse).where(TrainingPortalCourse.id == batch.course_id)
-    )
-    course = course_result.scalar_one_or_none()
-    curriculum = (course.curriculum if course else None) or []
-    total_topics = 0
-    for module in curriculum:
-        topics = module.get("topics") if isinstance(module, dict) else []
-        total_topics += len(topics or [])
-
-    covered = len(batch.covered_topics or [])
-    completion_pct = round((covered / total_topics) * 100) if total_topics > 0 else 0
-
-    enrollments_result = await db.execute(
-        select(TrainingPortalEnrollment).where(
-            TrainingPortalEnrollment.batch_id == batch.id,
-            TrainingPortalEnrollment.status != "dropped",
-        )
-    )
-    for enrollment in enrollments_result.scalars().all():
-        total_result = await db.execute(
-            select(func.count()).select_from(TrainingPortalAttendanceRecord).where(
-                TrainingPortalAttendanceRecord.enrollment_id == enrollment.id
-            )
-        )
-        total_marked = int(total_result.scalar() or 0)
-        present_result = await db.execute(
-            select(func.count()).select_from(TrainingPortalAttendanceRecord).where(
-                TrainingPortalAttendanceRecord.enrollment_id == enrollment.id,
-                TrainingPortalAttendanceRecord.status.in_(["present", "late", "on_leave"]),
-            )
-        )
-        present_count = int(present_result.scalar() or 0)
-        attendance_pct = round((present_count / total_marked) * 100) if total_marked > 0 else enrollment.attendance_percentage
-        enrollment.attendance_percentage = attendance_pct
-        enrollment.completion_percentage = completion_pct
-        enrollment.updated_at = datetime.utcnow()
 
 
 # ── Class sessions ────────────────────────────────────────────────────────────
@@ -2206,100 +2046,9 @@ async def list_todays_class_sessions(
             continue
         if not session_occurs_on_date(session, today):
             continue
-        if not session_live_applies_to_date(session, today):
-            if session.reminder_sent or session.reminder_15_sent or getattr(session, "end_reminder_sent", False):
-                session.reminder_sent = False
-                session.reminder_15_sent = False
-                session.end_reminder_sent = False
-                session.updated_at = now
         todays.append(session)
-
-        # Check if the class is live, to see if it should end or get a 15 min reminder
-        live_status = effective_live_status(session, now, today)
-        if live_status == "live":
-            end_dt = session_end_datetime(session, today)
-            if end_dt:
-                minutes_remaining = (end_dt - now).total_seconds() / 60.0
-                batch = None
-                if session.batch_id:
-                    batch_result = await db.execute(
-                        select(TrainingPortalBatch).where(TrainingPortalBatch.id == session.batch_id)
-                    )
-                    batch = batch_result.scalar_one_or_none()
-
-                # If 15 minutes or less remaining, send warning
-                if 0 < minutes_remaining <= 15:
-                    if not getattr(session, "end_reminder_sent", False):
-                        await _notify_class_ending_soon(db, session, batch, today)
-                
-                # If scheduled duration has completed (or passed), auto-end the class session
-                elif minutes_remaining <= 0:
-                    session.live_status = "completed"
-                    session.ended_at = datetime.utcnow()
-                    session.attendance_marked = True
-                    session.session_report = "Class ended automatically after scheduled duration."
-                    session.updated_at = datetime.utcnow()
-
-                    if batch:
-                        occurrence_date = today.isoformat()
-                        enrollments_result = await db.execute(
-                            select(TrainingPortalEnrollment).where(
-                                TrainingPortalEnrollment.batch_id == batch.id,
-                                TrainingPortalEnrollment.status != "dropped",
-                            )
-                        )
-                        enrollments = enrollments_result.scalars().all()
-                        for enrollment in enrollments:
-                            # Precedence: approved leave request
-                            leave_result = await db.execute(
-                                select(TrainingPortalLeaveRequest).where(
-                                    TrainingPortalLeaveRequest.requester_type == "student",
-                                    TrainingPortalLeaveRequest.candidate_email == enrollment.candidate_email.lower(),
-                                    TrainingPortalLeaveRequest.batch_id == batch.id,
-                                    TrainingPortalLeaveRequest.date == occurrence_date,
-                                    TrainingPortalLeaveRequest.status == "approved",
-                                )
-                            )
-                            approved_leave = leave_result.scalar_one_or_none()
-                            status_to_mark = "on_leave" if approved_leave else "present"
-
-                            existing = await db.execute(
-                                select(TrainingPortalAttendanceRecord).where(
-                                    TrainingPortalAttendanceRecord.class_session_id == session.id,
-                                    TrainingPortalAttendanceRecord.enrollment_id == enrollment.id,
-                                    TrainingPortalAttendanceRecord.occurrence_date == occurrence_date,
-                                )
-                            )
-                            record = existing.scalar_one_or_none()
-                            if record:
-                                record.status = status_to_mark
-                                record.marked_at = datetime.utcnow()
-                            else:
-                                db.add(
-                                    TrainingPortalAttendanceRecord(
-                                        id=str(uuid.uuid4()),
-                                        class_session_id=session.id,
-                                        enrollment_id=enrollment.id,
-                                        occurrence_date=occurrence_date,
-                                        batch_id=batch.id,
-                                        candidate_email=enrollment.candidate_email,
-                                        candidate_name=enrollment.candidate_name,
-                                        status=status_to_mark,
-                                        marked_at=datetime.utcnow(),
-                                    )
-                                )
-                        await _recalculate_batch_progress(db, batch)
-
-                    await _notify_class_ended_automatically(db, session, batch, today)
-
-        if tier := pending_reminder_tier(session, now, today):
-            batch = None
-            if session.batch_id:
-                batch_result = await db.execute(
-                    select(TrainingPortalBatch).where(TrainingPortalBatch.id == session.batch_id)
-                )
-                batch = batch_result.scalar_one_or_none()
-            await _notify_class_reminder(db, session, batch, today, tier)
+        # Start reminders, 15-min end reminder, and auto-end at scheduled end_time.
+        await process_todays_session_lifecycle(db, session, today, now)
 
     await db.flush()
     return [session_to_out_for_date(row, today, now) for row in todays]

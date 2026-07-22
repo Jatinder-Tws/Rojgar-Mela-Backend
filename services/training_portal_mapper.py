@@ -32,6 +32,7 @@ from services.training_portal_class_live import (
 )
 
 from models.training_portal_batch import TrainingPortalBatch
+from models.training_portal_teacher import TrainingPortalTeacher
 
 
 def enrollment_to_out(row: TrainingPortalEnrollment) -> PortalEnrollmentOut:
@@ -61,6 +62,7 @@ def enrollment_to_out(row: TrainingPortalEnrollment) -> PortalEnrollmentOut:
         certificate_status=row.certificate_status,
         certificate_reason=row.certificate_reason,
         voter_card_url=getattr(row, "voter_card_url", None),
+        laptop_confirmed=bool(getattr(row, "laptop_confirmed", False)),
         notes=row.notes,
         preferred_batch_id=getattr(row, "preferred_batch_id", None),
         created_at=row.created_at,
@@ -79,12 +81,23 @@ async def batch_to_out(db: AsyncSession, row: TrainingPortalBatch) -> PortalBatc
         select(TrainingPortalEnrollment.id).where(TrainingPortalEnrollment.batch_id == row.id)
     )
     enrollment_ids = [r[0] for r in ids_result.all()]
+
+    instructor_id = row.instructor_id
+    instructor_name = row.instructor_name
+    if instructor_id:
+        teacher_result = await db.execute(
+            select(TrainingPortalTeacher).where(TrainingPortalTeacher.id == instructor_id)
+        )
+        teacher = teacher_result.scalar_one_or_none()
+        if teacher:
+            instructor_name = teacher.name
+
     return PortalBatchOut(
         id=row.id,
         course_id=row.course_id,
         batch_name=row.batch_name,
-        instructor_id=row.instructor_id,
-        instructor_name=row.instructor_name,
+        instructor_id=instructor_id,
+        instructor_name=instructor_name,
         start_date=row.start_date,
         end_date=row.end_date,
         days=row.days or [],

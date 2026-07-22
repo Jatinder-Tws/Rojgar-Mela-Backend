@@ -67,6 +67,28 @@ services:
       - uploads_data_prod:/app/uploads
     command: celery -A services.celery_app worker --loglevel=info --pool=solo
 
+  celery-beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://adminuser:jobXrojgarmela@postgres:5432/job_db
+      - REDIS_URL=redis://redis:6379/0
+      - PYTHONPATH=/app
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      celery-worker:
+        condition: service_started
+    volumes:
+      - .:/app
+    command: celery -A services.celery_app beat --loglevel=info
+
 volumes:
   pg_data_prod:
   redis_data_prod:

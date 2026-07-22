@@ -3,7 +3,7 @@ import re
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import and_, false, func, or_, select
+from sqlalchemy import false, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import AsyncSessionLocal
@@ -55,6 +55,25 @@ def _normalize_imported_emails(audience_filter: Optional[dict[str, Any]]) -> lis
     return out
 
 
+def _normalize_audience_types(
+    audience_type: str,
+    audience_filter: Optional[dict[str, Any]] = None,
+) -> list[str]:
+    """Return unique audience types; prefer filter.audience_types when present."""
+    filt = _audience_filter_dict(audience_filter)
+    raw = filt.get("audience_types")
+    types: list[str] = []
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, str) and item.strip():
+                value = item.strip()
+                if value not in types:
+                    types.append(value)
+    if not types and audience_type:
+        types = [audience_type]
+    return types
+
+
 async def build_audience_query(
     audience_type: str,
     audience_filter: Optional[dict[str, Any]] = None,
@@ -77,11 +96,15 @@ async def build_audience_query(
         industries = filt.get("industries") or []
         if industries:
             q = q.where(User.industry.in_(industries))
+        else:
+            q = q.where(false())
     elif audience_type == AudienceType.industry_providers.value:
         q = q.where(User.role == UserRole.provider)
         industries = filt.get("industries") or []
         if industries:
             q = q.where(User.industry.in_(industries))
+        else:
+            q = q.where(false())
     elif audience_type == AudienceType.specific_users.value:
         user_ids = filt.get("user_ids") or []
         if not user_ids:
@@ -89,30 +112,27 @@ async def build_audience_query(
         else:
             q = q.where(User.id.in_(user_ids))
     elif audience_type == AudienceType.job_fair_seekers.value:
+        # Use IN subquery (not JOIN + DISTINCT) — DISTINCT fails on User JSON columns in Postgres.
         job_fair_id = filt.get("job_fair_id")
         if not job_fair_id:
             q = q.where(false())
         else:
-            q = (
-                q.join(JobFairSeeker, JobFairSeeker.seeker_id == User.id)
-                .where(
-                    JobFairSeeker.job_fair_id == job_fair_id,
-                    User.role == UserRole.seeker,
-                )
-                .distinct()
+            q = q.where(
+                User.role == UserRole.seeker,
+                User.id.in_(
+                    select(JobFairSeeker.seeker_id).where(JobFairSeeker.job_fair_id == job_fair_id)
+                ),
             )
     elif audience_type == AudienceType.job_fair_providers.value:
         job_fair_id = filt.get("job_fair_id")
         if not job_fair_id:
             q = q.where(false())
         else:
-            q = (
-                q.join(JobFairCompany, JobFairCompany.provider_id == User.id)
-                .where(
-                    JobFairCompany.job_fair_id == job_fair_id,
-                    User.role == UserRole.provider,
-                )
-                .distinct()
+            q = q.where(
+                User.role == UserRole.provider,
+                User.id.in_(
+                    select(JobFairCompany.provider_id).where(JobFairCompany.job_fair_id == job_fair_id)
+                ),
             )
     elif audience_type == AudienceType.csv_import.value:
         q = q.where(false())
@@ -125,16 +145,35 @@ async def build_audience_query(
     return q
 
 
-async def count_audience(
+async def _resolve_csv_recipients(
     db: AsyncSession,
-    audience_type: str,
-    audience_filter: Optional[dict[str, Any]] = None,
-) -> int:
-    if audience_type == AudienceType.csv_import.value:
-        return len(_normalize_imported_emails(audience_filter))
-    q = await build_audience_query(audience_type, audience_filter)
-    count_q = select(func.count()).select_from(q.subquery())
-    return (await db.execute(count_q)).scalar() or 0
+    audience_filter: Optional[dict[str, Any]],
+    seen_emails: set[str],
+) -> list[tuple[Optional[User], str, str]]:
+    rows = _normalize_imported_emails(audience_filter)
+    if not rows:
+        return []
+    emails = [row["email"] for row in rows if row["email"] not in seen_emails]
+    if not emails:
+        return []
+    users_by_email: dict[str, User] = {}
+    user_rows = (
+        await db.execute(select(User).where(func.lower(User.email).in_(emails)))
+    ).scalars().all()
+    for user in user_rows:
+        if user.email:
+            users_by_email[user.email.strip().lower()] = user
+
+    recipients: list[tuple[Optional[User], str, str]] = []
+    for row in rows:
+        email = row["email"]
+        if email in seen_emails:
+            continue
+        seen_emails.add(email)
+        user = users_by_email.get(email)
+        name = row.get("name") or (user and _full_name(user)) or email.split("@")[0]
+        recipients.append((user, email, name))
+    return recipients
 
 
 async def resolve_campaign_recipients(
@@ -142,31 +181,35 @@ async def resolve_campaign_recipients(
     audience_type: str,
     audience_filter: Optional[dict[str, Any]] = None,
 ) -> list[tuple[Optional[User], str, str]]:
-    """Return (user_or_none, email, recipient_name) for each campaign recipient."""
-    if audience_type == AudienceType.csv_import.value:
-        rows = _normalize_imported_emails(audience_filter)
-        if not rows:
-            return []
-        emails = [row["email"] for row in rows]
-        users_by_email: dict[str, User] = {}
-        user_rows = (
-            await db.execute(select(User).where(func.lower(User.email).in_(emails)))
-        ).scalars().all()
-        for user in user_rows:
-            if user.email:
-                users_by_email[user.email.strip().lower()] = user
+    """Return (user_or_none, email, recipient_name), unique by email across all selected audiences."""
+    types = _normalize_audience_types(audience_type, audience_filter)
+    seen_emails: set[str] = set()
+    recipients: list[tuple[Optional[User], str, str]] = []
 
-        recipients: list[tuple[Optional[User], str, str]] = []
-        for row in rows:
-            email = row["email"]
-            user = users_by_email.get(email)
-            name = row.get("name") or (user and _full_name(user)) or email.split("@")[0]
-            recipients.append((user, email, name))
-        return recipients
+    for atype in types:
+        if atype == AudienceType.csv_import.value:
+            recipients.extend(await _resolve_csv_recipients(db, audience_filter, seen_emails))
+            continue
 
-    audience_q = await build_audience_query(audience_type, audience_filter)
-    users = (await db.execute(audience_q)).scalars().all()
-    return [(user, user.email, _full_name(user)) for user in users]
+        audience_q = await build_audience_query(atype, audience_filter)
+        users = (await db.execute(audience_q)).scalars().all()
+        for user in users:
+            email = (user.email or "").strip().lower()
+            if not email or email in seen_emails:
+                continue
+            seen_emails.add(email)
+            recipients.append((user, email, _full_name(user)))
+
+    return recipients
+
+
+async def count_audience(
+    db: AsyncSession,
+    audience_type: str,
+    audience_filter: Optional[dict[str, Any]] = None,
+) -> int:
+    """Count unique emails across one or more audience types."""
+    return len(await resolve_campaign_recipients(db, audience_type, audience_filter))
 
 
 async def get_audience_sample(
@@ -175,28 +218,18 @@ async def get_audience_sample(
     audience_filter: Optional[dict[str, Any]] = None,
     limit: int = 5,
 ) -> list[dict[str, Any]]:
-    if audience_type == AudienceType.csv_import.value:
-        rows = _normalize_imported_emails(audience_filter)[:limit]
-        return [
+    recipients = await resolve_campaign_recipients(db, audience_type, audience_filter)
+    sample: list[dict[str, Any]] = []
+    for user, email, name in recipients[:limit]:
+        sample.append(
             {
-                "id": "",
-                "name": row.get("name") or row["email"],
-                "email": row["email"],
-                "role": "",
+                "id": user.id if user else "",
+                "name": name,
+                "email": email,
+                "role": user.role.value if user and user.role else "",
             }
-            for row in rows
-        ]
-
-    users, _ = await get_audience_users(db, audience_type, audience_filter, page=1, page_size=limit)
-    return [
-        {
-            "id": user.id,
-            "name": f"{user.first_name or ''} {user.last_name or ''}".strip(),
-            "email": user.email,
-            "role": user.role.value if user.role else "",
-        }
-        for user in users
-    ]
+        )
+    return sample
 
 
 def build_picker_users_query(

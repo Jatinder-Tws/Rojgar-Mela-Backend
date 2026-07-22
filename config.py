@@ -127,6 +127,7 @@ def get_cors_allow_origins() -> list[str]:
         "http://127.0.0.1:4173",
         "http://192.168.100.15:5041",
         "http://localhost:5000",
+        "http://127.0.0.1:5000",
         "http://127.0.0.1:5000"
     ):
         add(dev)

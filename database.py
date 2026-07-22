@@ -349,6 +349,7 @@ async def patch_training_portal_schema():
         "ALTER TABLE training_portal_enrollments ADD COLUMN IF NOT EXISTS certificate_status VARCHAR(30)",
         "ALTER TABLE training_portal_enrollments ADD COLUMN IF NOT EXISTS certificate_reason TEXT",
         "ALTER TABLE training_portal_enrollments ADD COLUMN IF NOT EXISTS voter_card_url VARCHAR(500)",
+        "ALTER TABLE training_portal_enrollments ADD COLUMN IF NOT EXISTS laptop_confirmed BOOLEAN NOT NULL DEFAULT FALSE",
         "ALTER TABLE training_portal_enrollments ADD COLUMN IF NOT EXISTS notes TEXT",
         "ALTER TABLE training_portal_enrollments ADD COLUMN IF NOT EXISTS preferred_batch_id VARCHAR(50)",
         "ALTER TABLE training_portal_enrollments ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW()",
