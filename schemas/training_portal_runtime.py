@@ -58,6 +58,7 @@ class PortalEnrollmentCreate(BaseModel):
     balance_due: float = 0
     installments: list[dict[str, Any]] = Field(default_factory=list)
     voter_card_url: Optional[str] = None
+    laptop_confirmed: bool = False
     notes: Optional[str] = None
     payment_method_route: Optional[Literal["upi", "card", "emi", "offline", "email"]] = None
     batch_id: Optional[str] = None
@@ -71,6 +72,7 @@ class PortalEnrollmentUpdate(BaseModel):
     paid_amount: Optional[float] = None
     balance_due: Optional[float] = None
     voter_card_url: Optional[str] = None
+    laptop_confirmed: Optional[bool] = None
     notes: Optional[str] = None
     status: Optional[Literal["active", "completed", "dropped", "pending"]] = None
     attendance_percentage: Optional[int] = None
@@ -104,6 +106,7 @@ class PortalEnrollmentOut(BaseModel):
     certificate_status: Optional[str] = None
     certificate_reason: Optional[str] = None
     voter_card_url: Optional[str] = None
+    laptop_confirmed: bool = False
     notes: Optional[str] = None
     preferred_batch_id: Optional[str] = None
     created_at: datetime
@@ -206,6 +209,8 @@ class PortalClassSessionCreate(BaseModel):
     postponed: bool = False
     teacher_unavailable: bool = False
     admin_override: bool = False
+    # When creating a one-date override for a recurring series, ignore the parent row.
+    ignore_session_id: Optional[str] = None
 
 
 class PortalClassSessionUpdate(BaseModel):
@@ -223,6 +228,7 @@ class PortalClassSessionUpdate(BaseModel):
     postponed: Optional[bool] = None
     teacher_unavailable: Optional[bool] = None
     admin_override: bool = False
+    ignore_session_id: Optional[str] = None
 
 
 class PortalClassSessionOut(BaseModel):

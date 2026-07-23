@@ -41,6 +41,7 @@ class TrainingPortalEnrollment(Base):
     certificate_status = Column(String(30), nullable=True)
     certificate_reason = Column(Text, nullable=True)
     voter_card_url = Column(String(500), nullable=True)
+    laptop_confirmed = Column(Boolean, nullable=False, default=False)
     notes = Column(Text, nullable=True)
     preferred_batch_id = Column(String(50), ForeignKey("training_portal_batches.id", ondelete="SET NULL"), nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

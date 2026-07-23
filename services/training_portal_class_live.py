@@ -60,7 +60,39 @@ def session_end_datetime(session: TrainingPortalClassSession, target: date) -> O
     parsed = _parse_time_12h(session.end_time)
     if not parsed:
         return None
-    return datetime.combine(target, parsed)
+    end = datetime.combine(target, parsed)
+    start = session_start_datetime(session, target)
+    # Overnight classes (e.g. 11:00 PM – 1:00 AM): end is on the next calendar day.
+    if start and end <= start:
+        end = end + timedelta(days=1)
+    return end
+
+
+def minutes_until_end(session: TrainingPortalClassSession, now: datetime, target: date) -> Optional[float]:
+    end = session_end_datetime(session, target)
+    if not end:
+        return None
+    return (end - now).total_seconds() / 60.0
+
+
+def should_send_end_reminder(session: TrainingPortalClassSession, now: datetime, target: date) -> bool:
+    if (getattr(session, "live_status", None) or "").strip().lower() != "live":
+        return False
+    if bool(getattr(session, "end_reminder_sent", False)):
+        return False
+    mins = minutes_until_end(session, now, target)
+    if mins is None:
+        return False
+    return 0 < mins <= REMINDER_15_MINUTES_BEFORE
+
+
+def should_auto_end_live_session(session: TrainingPortalClassSession, now: datetime, target: date) -> bool:
+    if (getattr(session, "live_status", None) or "").strip().lower() != "live":
+        return False
+    mins = minutes_until_end(session, now, target)
+    if mins is None:
+        return False
+    return mins <= 0
 
 
 def minutes_until_start(session: TrainingPortalClassSession, now: datetime, target: date) -> Optional[float]:

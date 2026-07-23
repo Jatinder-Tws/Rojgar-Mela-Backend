@@ -375,6 +375,98 @@ async def get_public_job_detail(job_id: str, db: AsyncSession = Depends(get_db))
 
     return serialize_public_job_detail(job)
 
+@router.post("/parse-resume")
+async def parse_resume_public(file: UploadFile = File(...)):
+    """
+    Public OCR/AI resume parse for job-fair / external apply auto-fill.
+    Accepts PDF, DOC/DOCX, TXT, JPG/JPEG/PNG. Max size follows MAX_UPLOAD_MB.
+    """
+    import os
+    from pathlib import Path
+    from services.file_service import save_upload, ALLOWED_EXTENSIONS
+    from services.resume_parser import parse_resume, extract_profile_fields_with_ai
+
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported file. Upload PDF, DOC, DOCX, TXT, JPG, JPEG, or PNG.",
+        )
+
+    owner_id = f"parse_{uuid.uuid4().hex[:12]}"
+    file_path = None
+    try:
+        file_path, original_filename, _ = await save_upload(file, owner_id)
+        raw_text, parsed_json = parse_resume(file_path, original_filename)
+        if not (raw_text or "").strip():
+            raise HTTPException(
+                status_code=400,
+                detail="Could not extract text from resume. Try a clearer PDF, DOCX, or image.",
+            )
+
+        ai_data: dict = {}
+        try:
+            ai_data = await extract_profile_fields_with_ai(raw_text, parsed_json) or {}
+        except Exception:
+            ai_data = {}
+
+        full_name = (
+            ai_data.get("full_name")
+            or " ".join(
+                p for p in [ai_data.get("first_name"), ai_data.get("last_name")] if p
+            ).strip()
+            or None
+        )
+        skills = ai_data.get("skills") or parsed_json.get("skills") or []
+        if isinstance(skills, list):
+            skill_names = [
+                (s.get("name") if isinstance(s, dict) else str(s)) for s in skills if s
+            ]
+            skills_str = ", ".join(skill_names)
+        else:
+            skills_str = str(skills) if skills else ""
+
+        phone = ai_data.get("phone") or parsed_json.get("phone")
+        if phone:
+            digits = "".join(c for c in str(phone) if c.isdigit())
+            if len(digits) > 10:
+                digits = digits[-10:]
+            phone = digits if len(digits) == 10 else str(phone)
+
+        exp_years = ai_data.get("total_experience_years")
+        if exp_years is None:
+            exp_years = parsed_json.get("experience_years")
+
+        ocr_used = ext in {".jpg", ".jpeg", ".png"} or (
+            bool(raw_text) and len(raw_text.strip()) < 300 and ext == ".pdf"
+        )
+
+        return {
+            "full_name": full_name,
+            "email": ai_data.get("email") or parsed_json.get("email"),
+            "phone": phone,
+            "date_of_birth": ai_data.get("date_of_birth"),
+            "gender": ai_data.get("gender"),
+            "city": ai_data.get("city"),
+            "state": ai_data.get("state"),
+            "qualification": ai_data.get("highest_qualification"),
+            "total_experience_years": exp_years,
+            "sub_role": ai_data.get("job_role") or ai_data.get("current_role"),
+            "skills": skills_str,
+            "ocr_used": ocr_used,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Resume parse failed: {e}") from e
+    finally:
+        if file_path and os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
+
+
 @router.post("/upload")
 async def upload_public_file(
     file: UploadFile = File(...),

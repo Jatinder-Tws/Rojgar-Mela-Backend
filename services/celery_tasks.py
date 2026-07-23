@@ -212,3 +212,29 @@ def improve_resume_task(job_title: str, job_description: str, technologies: str,
         raise celery_app.retry(exc=exc)
 
 
+@celery_app.task(name="process_training_class_lifecycles")
+def process_training_class_lifecycles():
+    """Periodic: 15-min end reminders + auto-end live classes at scheduled end_time."""
+    from database import AsyncSessionLocal
+    from services.training_portal_class_lifecycle import process_all_class_lifecycles
+
+    async def _run():
+        async with AsyncSessionLocal() as db:
+            try:
+                stats = await process_all_class_lifecycles(db)
+                await db.commit()
+                return stats
+            except Exception:
+                await db.rollback()
+                raise
+
+    try:
+        stats = _run_async(_run())
+        if stats and (stats.get("auto_ended") or stats.get("end_reminders") or stats.get("start_reminders")):
+            logger.info("[CELERY] Class lifecycle sweep: %s", stats)
+        return stats
+    except Exception as exc:
+        logger.exception("[CELERY] Class lifecycle sweep failed: %s", exc)
+        raise
+
+

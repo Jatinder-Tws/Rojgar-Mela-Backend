@@ -11,6 +11,7 @@ from email.mime.image import MIMEImage
 from email.mime.application import MIMEApplication
 from email.utils import parseaddr
 from jinja2 import Environment, FileSystemLoader
+from markupsafe import Markup, escape
 
 from config import settings
 
@@ -92,6 +93,13 @@ def _support_context() -> dict[str, str]:
         "support_email": settings.SUPPORT_EMAIL,
         "support_phones": settings.SUPPORT_PHONES,
     }
+
+
+def _notification_message_html(message: str) -> Markup:
+    """Render notification body as HTML without exposing escaped source tags."""
+    if re.search(r"</?[a-zA-Z][^>]*>", message or ""):
+        return Markup(message)
+    return Markup(str(escape(message)).replace("\n", "<br />\n"))
 
 
 def build_job_fair_email_context(job_fair: Any = None) -> dict[str, Any]:
@@ -311,10 +319,10 @@ async def send_notification_email(to_email: str, first_name: str, title: str, me
     html = template.render(
         first_name=first_name,
         title=title,
-        message=message,
+        message=_notification_message_html(message),
         year=datetime.utcnow().year,
     )
-    await _send_email(to_email, title, html)
+    await _send_branded_email(to_email, title, html)
 
 
 async def send_password_email(to_email: str, first_name: str, password: str, role: str) -> None:
@@ -481,12 +489,16 @@ async def send_training_portal_payment_link_email(
     enrollment_id: str,
 ) -> None:
     pay_url = f"{settings.TRAINING_URL.rstrip('/')}/candidate/enrollments?pay={enrollment_id}"
-    html = f"""
-    <p>Hi {candidate_name},</p>
-    <p>Complete your payment of <strong>₹{amount:,.0f}</strong> for <strong>{program_title}</strong>.</p>
-    <p><a href="{pay_url}">Pay Now</a></p>
-    """
-    await send_notification_email(to_email, candidate_name, "Complete Your Training Payment", html)
+    template = _env.get_template("training_payment_link_email.html")
+    html = template.render(
+        candidate_name=candidate_name,
+        program_title=program_title,
+        amount_display=f"{amount:,.0f}",
+        pay_url=pay_url,
+        year=datetime.utcnow().year,
+        **_support_context(),
+    )
+    await _send_branded_email(to_email, "Complete Your Training Payment", html)
 
 
 async def send_class_calendar_invite_email(

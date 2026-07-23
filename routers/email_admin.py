@@ -310,7 +310,9 @@ async def create_email_campaign(
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
 
-    audience_filter = body.audience_filter.model_dump() if body.audience_filter else None
+    audience_filter = body.audience_filter.model_dump(exclude_none=True) if body.audience_filter else {}
+    if not audience_filter.get("audience_types"):
+        audience_filter["audience_types"] = [body.audience_type]
     count = await count_audience(db, body.audience_type, audience_filter)
     if count == 0:
         raise HTTPException(status_code=400, detail="Audience has no recipients")
@@ -334,7 +336,7 @@ async def estimate_audience(
     db: AsyncSession = Depends(get_db),
     _admin: User = Depends(require_super_admin),
 ):
-    audience_filter = body.audience_filter.model_dump() if body.audience_filter else None
+    audience_filter = body.audience_filter.model_dump(exclude_none=True) if body.audience_filter else None
     count = await count_audience(db, body.audience_type, audience_filter)
     sample = await get_audience_sample(db, body.audience_type, audience_filter, limit=5)
     return AudienceEstimateResponse(count=count, sample_users=sample)
@@ -431,7 +433,14 @@ async def update_email_campaign(
     if body.audience_type is not None:
         campaign.audience_type = body.audience_type
     if body.audience_filter is not None:
-        campaign.audience_filter = body.audience_filter.model_dump()
+        audience_filter = body.audience_filter.model_dump(exclude_none=True)
+        audience_type_for_filter = (
+            body.audience_type
+            or (campaign.audience_type.value if hasattr(campaign.audience_type, "value") else campaign.audience_type)
+        )
+        if not audience_filter.get("audience_types"):
+            audience_filter["audience_types"] = [audience_type_for_filter]
+        campaign.audience_filter = audience_filter
 
     audience_type = campaign.audience_type.value if hasattr(campaign.audience_type, "value") else campaign.audience_type
     campaign.total_recipients = await count_audience(db, audience_type, campaign.audience_filter)

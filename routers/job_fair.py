@@ -311,6 +311,7 @@ async def register_company_to_job_fair(
     phone: str = Form(...),
     department: str = Form(None),
     sector: str = Form(None),
+    job_category: str = Form(None),
     vacancy: str = Form(None),
     company_location: str = Form(None),
     company_size: str = Form(None),
@@ -392,6 +393,8 @@ async def register_company_to_job_fair(
     extra_meta = {}
     if website and website.strip():
         extra_meta["website"] = website.strip()
+    if job_category and job_category.strip():
+        extra_meta["job_category"] = job_category.strip()
     if contact_person_name and contact_person_name.strip():
         extra_meta["contact_person_name"] = contact_person_name.strip()
     if contact_person_designation and contact_person_designation.strip():
