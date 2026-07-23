@@ -1708,6 +1708,80 @@ async def list_class_sessions(
     return [session_to_out(row) for row in result.scalars().all()]
 
 
+def _normalize_schedule_type(value: Optional[str]) -> str:
+    """API uses one_time; tolerate legacy one-time."""
+    normalized = (value or "one_time").strip().lower().replace("-", "_")
+    return "recurring" if normalized == "recurring" else "one_time"
+
+
+def _day_abbr_for_iso(date_str: Optional[str]) -> Optional[str]:
+    if not date_str:
+        return None
+    try:
+        return date.fromisoformat(date_str).strftime("%a")
+    except (ValueError, TypeError):
+        return None
+
+
+def _date_ranges_overlap(
+    start_a: Optional[str],
+    end_a: Optional[str],
+    start_b: Optional[str],
+    end_b: Optional[str],
+) -> bool:
+    if not start_a or not end_a or not start_b or not end_b:
+        return True
+    return start_a <= end_b and start_b <= end_a
+
+
+async def _session_date_range(
+    db: AsyncSession,
+    schedule_type: str,
+    date_str: Optional[str],
+    batch_id: Optional[str],
+) -> tuple[Optional[str], Optional[str]]:
+    if schedule_type != "recurring":
+        return date_str, date_str
+    if batch_id:
+        result = await db.execute(
+            select(TrainingPortalBatch).where(TrainingPortalBatch.id == batch_id)
+        )
+        batch = result.scalar_one_or_none()
+        if batch:
+            return batch.start_date, batch.end_date
+    return date_str, date_str
+
+
+def _schedules_can_share_day(
+    type_a: str,
+    date_a: Optional[str],
+    days_a: list[str],
+    range_start_a: Optional[str],
+    range_end_a: Optional[str],
+    type_b: str,
+    date_b: Optional[str],
+    days_b: list[str],
+    range_start_b: Optional[str],
+    range_end_b: Optional[str],
+) -> bool:
+    """True when the two schedules can land on the same calendar day."""
+    if not _date_ranges_overlap(range_start_a, range_end_a, range_start_b, range_end_b):
+        return False
+
+    if type_a == "one_time" and type_b == "one_time":
+        return bool(date_a and date_b and date_a == date_b)
+
+    if type_a == "recurring" and type_b == "recurring":
+        return bool(set(days_a) & set(days_b))
+
+    # Mixed: one-time date weekday must be in the recurring weekdays
+    if type_a == "one_time":
+        day_abbr = _day_abbr_for_iso(date_a)
+        return bool(day_abbr and day_abbr in days_b)
+    day_abbr = _day_abbr_for_iso(date_b)
+    return bool(day_abbr and day_abbr in days_a)
+
+
 async def _validate_instructor_schedule(
     db: AsyncSession,
     instructor_name: Optional[str],
@@ -1717,9 +1791,38 @@ async def _validate_instructor_schedule(
     date_str: Optional[str],
     days: Optional[List[str]],
     ignore_session_id: Optional[str] = None,
+    batch_id: Optional[str] = None,
+    extra_ignore_session_ids: Optional[List[str]] = None,
 ):
+    """Block scheduling when the same teacher already has an overlapping class.
+
+    A conflict requires:
+    1. Same instructor
+    2. Shared calendar day (exact date and/or shared weekday within batch ranges)
+    3. Overlapping time window (start < other_end AND other_start < end)
+    """
     if not instructor_name or not instructor_name.strip():
         return
+
+    t1_start = _parse_time_12h(start_time)
+    t1_end = _parse_time_12h(end_time)
+    if not t1_start or not t1_end:
+        return
+    if t1_start >= t1_end:
+        raise HTTPException(
+            status_code=400,
+            detail="Class end time must be after start time.",
+        )
+
+    ignored_ids = {
+        sid for sid in [ignore_session_id, *(extra_ignore_session_ids or [])] if sid
+    }
+
+    new_type = _normalize_schedule_type(schedule_type)
+    new_days = list(days or [])
+    new_range_start, new_range_end = await _session_date_range(
+        db, new_type, date_str, batch_id
+    )
 
     result = await db.execute(
         select(TrainingPortalClassSession).where(
@@ -1728,53 +1831,70 @@ async def _validate_instructor_schedule(
     )
     existing_sessions = result.scalars().all()
 
-    t1_start = _parse_time_12h(start_time)
-    t1_end = _parse_time_12h(end_time)
+    batch_ids = {s.batch_id for s in existing_sessions if s.batch_id}
+    if batch_id:
+        batch_ids.add(batch_id)
+    batch_ranges: dict[str, tuple[Optional[str], Optional[str]]] = {}
+    if batch_ids:
+        batch_result = await db.execute(
+            select(TrainingPortalBatch).where(TrainingPortalBatch.id.in_(batch_ids))
+        )
+        for batch in batch_result.scalars().all():
+            batch_ranges[batch.id] = (batch.start_date, batch.end_date)
 
     for existing in existing_sessions:
-        if ignore_session_id and existing.id == ignore_session_id:
+        if existing.id in ignored_ids:
             continue
-        
-        # Check if they can occur on the same day
-        same_day = False
-        if schedule_type == "one-time" and existing.schedule_type == "one-time":
-            same_day = (date_str == existing.date)
-        elif schedule_type == "recurring" and existing.schedule_type == "recurring":
-            days1 = set(days or [])
-            days2 = set(existing.days or [])
-            same_day = bool(days1.intersection(days2))
+        if existing.postponed:
+            continue
+
+        existing_type = _normalize_schedule_type(existing.schedule_type or "one_time")
+        existing_days = list(existing.days or [])
+        existing_batch_start, existing_batch_end = batch_ranges.get(
+            existing.batch_id or "", (None, None)
+        )
+        if existing_type == "recurring":
+            existing_range_start = existing_batch_start or existing.date
+            existing_range_end = existing_batch_end or existing.date
         else:
-            # One is recurring, one is one-time
-            recurring = existing if existing.schedule_type == "recurring" else None
-            if not recurring: # our new session is recurring, existing is one-time
-                try:
-                    target_date = date.fromisoformat(existing.date)
-                    day_abbr = target_date.strftime("%a")
-                    same_day = day_abbr in (days or [])
-                except (ValueError, TypeError):
-                    same_day = False
-            else: # our new session is one-time, existing is recurring
-                try:
-                    target_date = date.fromisoformat(date_str)
-                    day_abbr = target_date.strftime("%a")
-                    same_day = day_abbr in (existing.days or [])
-                except (ValueError, TypeError):
-                    same_day = False
+            existing_range_start = existing.date
+            existing_range_end = existing.date
 
-        if same_day:
-            t2_start = _parse_time_12h(existing.start_time)
-            t2_end = _parse_time_12h(existing.end_time)
+        if not _schedules_can_share_day(
+            new_type,
+            date_str,
+            new_days,
+            new_range_start,
+            new_range_end,
+            existing_type,
+            existing.date,
+            existing_days,
+            existing_range_start,
+            existing_range_end,
+        ):
+            continue
 
-            if t1_start and t1_end and t2_start and t2_end:
-                # Overlap check: Start1 < End2 and Start2 < End1
-                if t1_start < t2_end and t2_start < t1_end:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=(
-                            f"Instructor {instructor_name} is already assigned to another class "
-                            f"'{existing.title}' during this time ({existing.start_time} - {existing.end_time})."
-                        ),
-                    )
+        t2_start = _parse_time_12h(existing.start_time)
+        t2_end = _parse_time_12h(existing.end_time)
+        if not t2_start or not t2_end:
+            continue
+
+        # Overlap: Start1 < End2 and Start2 < End1
+        if t1_start < t2_end and t2_start < t1_end:
+            if existing_type == "one_time":
+                when = f"on {existing.date}"
+            else:
+                days_label = ", ".join(existing_days) or "weekly"
+                when = f"every {days_label}"
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Teacher {instructor_name} already has another class "
+                    f"\"{existing.title}\" {when} "
+                    f"({existing.start_time} – {existing.end_time}). "
+                    f"Choose a different teacher, date, or time slot."
+                ),
+            )
 
 
 @router.post("/class-sessions", response_model=PortalClassSessionOut, status_code=status.HTTP_201_CREATED)
@@ -1798,6 +1918,8 @@ async def create_class_session(
         schedule_type=body.schedule_type,
         date_str=body.date,
         days=body.days,
+        batch_id=body.batch_id,
+        ignore_session_id=body.ignore_session_id,
     )
 
     if body.batch_id:
@@ -1911,6 +2033,8 @@ async def update_class_session(
         date_str=effective_date,
         days=effective_days,
         ignore_session_id=session_id,
+        batch_id=body.batch_id if body.batch_id is not None else session.batch_id,
+        extra_ignore_session_ids=[body.ignore_session_id] if body.ignore_session_id else None,
     )
 
     batch_id = body.batch_id if body.batch_id is not None else session.batch_id
@@ -1925,7 +2049,7 @@ async def update_class_session(
                 ),
             )
 
-    updates = body.model_dump(exclude_unset=True, exclude={"admin_override"})
+    updates = body.model_dump(exclude_unset=True, exclude={"admin_override", "ignore_session_id"})
     for field, value in updates.items():
         setattr(session, field, value)
     session.updated_at = datetime.utcnow()

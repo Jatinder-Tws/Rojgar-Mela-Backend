@@ -209,6 +209,8 @@ class PortalClassSessionCreate(BaseModel):
     postponed: bool = False
     teacher_unavailable: bool = False
     admin_override: bool = False
+    # When creating a one-date override for a recurring series, ignore the parent row.
+    ignore_session_id: Optional[str] = None
 
 
 class PortalClassSessionUpdate(BaseModel):
@@ -226,6 +228,7 @@ class PortalClassSessionUpdate(BaseModel):
     postponed: Optional[bool] = None
     teacher_unavailable: Optional[bool] = None
     admin_override: bool = False
+    ignore_session_id: Optional[str] = None
 
 
 class PortalClassSessionOut(BaseModel):
