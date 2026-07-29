@@ -17,8 +17,22 @@ logger = logging.getLogger(__name__)
 
 # ── Helper: run an async function from a sync Celery task ────────────────
 def _run_async(coro):
-    """Bridge sync Celery task → async matching functions."""
-    return asyncio.run(coro)
+    """Bridge sync Celery task → async code.
+
+    ``asyncio.run()`` creates a fresh event loop per call and closes it
+    afterward. The process-global async SQLAlchemy engine (asyncpg) may still
+    hold pooled connections bound to the *previous* loop; reusing them on the
+    next task raises ``RuntimeError: ... attached to a different loop``.
+    Dispose the engine after each run so the next task opens clean connections.
+    """
+    async def _wrapped():
+        try:
+            return await coro
+        finally:
+            from database import engine
+            await engine.dispose()
+
+    return asyncio.run(_wrapped())
 
 
 # ── Individual matching tasks (can be called independently) ─────────────
