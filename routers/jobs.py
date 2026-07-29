@@ -22,6 +22,7 @@ from controllers.jobs_controller import (
     get_job_stats as ctrl_get_job_stats,
     generate_description as ctrl_generate_description,
     generate_skills as ctrl_generate_skills,
+    get_distinct_industries as ctrl_get_distinct_industries,
 )
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -51,6 +52,11 @@ async def list_jobs(
 @router.get("/stats")
 async def get_job_stats(user: User = Depends(require_provider), db: AsyncSession = Depends(get_db)):
     return await ctrl_get_job_stats(user, db)
+
+
+@router.get("/industries", response_model=list[str])
+async def get_distinct_industries(user: User = Depends(require_verified), db: AsyncSession = Depends(get_db)):
+    return await ctrl_get_distinct_industries(db)
 
 
 @router.get("/{job_id}", response_model=JobOut)

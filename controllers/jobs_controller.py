@@ -154,7 +154,7 @@ async def list_jobs(
     if salary_range and salary_range != "all":
         filters.append(JobPosting.salary_range.ilike(f"%{salary_range.strip()}%"))
     if industry and industry != "all":
-        filters.append(JobPosting.industry == industry.strip())
+        filters.append(func.lower(JobPosting.industry) == industry.strip().lower())
 
     if filters:
         base_query = base_query.where(and_(*filters))
@@ -162,8 +162,6 @@ async def list_jobs(
     if page is not None and page_size is not None:
         count_query = select(func.count(JobPosting.id)).select_from(base_query.subquery())
         total_result = await db.execute(count_query)
-        total = total_result.scalar_one() or 0
-
         offset = (page - 1) * page_size
         query = base_query.offset(offset).limit(page_size)
         result = await db.execute(query)
@@ -181,6 +179,18 @@ async def list_jobs(
         result = await db.execute(base_query)
         jobs = result.scalars().all()
         return [JobOut.model_validate(j) for j in jobs]
+
+
+async def get_distinct_industries(db: AsyncSession) -> List[str]:
+    from sqlalchemy import distinct
+    query = (
+        select(distinct(JobPosting.industry))
+        .where(JobPosting.industry.isnot(None), JobPosting.industry != "")
+        .order_by(JobPosting.industry)
+    )
+    result = await db.execute(query)
+    industries = [r for r in result.scalars().all() if r and r.strip()]
+    return industries
 
 
 async def get_job(job_id: str, user: User, db: AsyncSession) -> JobOut:
@@ -249,9 +259,9 @@ async def delete_job(
     db: AsyncSession,
 ) -> None:
     job = await get_job_or_404(job_id, user, db)
-    await deactivate_job_service(job)
+    # Hard delete — cascades to applications and matches via DB relationship
+    await db.delete(job)
     await db.commit()
-    schedule_cleanup(background_tasks, job)
 
 
 async def deactivate_job(
