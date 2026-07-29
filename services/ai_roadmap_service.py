@@ -25,6 +25,23 @@ class AIRoadmapService:
             "ml": ["Python", "Machine Learning", "Feature Engineering", "Model Evaluation", "Deep Learning", "MLOps", "Deployment", "Experiment Tracking"],
             "cloud": ["AWS", "Azure", "GCP", "Infrastructure as Code", "Kubernetes", "Networking", "Security", "Cost Optimization"],
             "full stack": ["JavaScript", "TypeScript", "React", "Node.js", "APIs", "Databases", "Testing", "Deployment"],
+            # SDET / QA / Test Automation
+            "sdet": ["Selenium", "Playwright", "TestNG", "JUnit", "API Testing", "Postman", "CI/CD Test Pipelines", "BDD/Cucumber", "Performance Testing", "Test Automation Framework"],
+            "qa": ["Manual Testing", "Test Cases", "Bug Reporting", "Selenium", "API Testing", "Regression Testing", "JIRA", "Test Planning", "BDD", "Exploratory Testing"],
+            "test automation": ["Selenium WebDriver", "Playwright", "Cypress", "TestNG", "API Testing", "Postman/Newman", "BDD/Cucumber", "CI/CD Integration", "Allure Reports", "Page Object Model"],
+            "quality assurance": ["Test Strategy", "Manual Testing", "Automation Testing", "JIRA", "Defect Lifecycle", "Regression Suite", "API Testing", "Selenium", "Performance Testing", "Agile QA"],
+            # Security
+            "security": ["Network Security", "OWASP Top 10", "Penetration Testing", "Security Auditing", "Cryptography", "IAM", "SIEM", "Vulnerability Assessment", "Cloud Security", "Incident Response"],
+            "cyber": ["Ethical Hacking", "Kali Linux", "Metasploit", "Network Forensics", "Web App Pentesting", "OWASP", "SOC Operations", "Threat Intelligence", "Malware Analysis", "CTF Skills"],
+            # Mobile
+            "mobile": ["React Native", "Flutter", "Dart", "Android SDK", "iOS/Swift", "State Management", "Offline Storage", "Push Notifications", "App Store Deployment", "Performance Profiling"],
+            "android": ["Android SDK", "Kotlin", "Jetpack Compose", "MVVM", "Room Database", "Retrofit", "Coroutines", "Firebase", "Play Store Deployment", "Unit Testing"],
+            "ios": ["Swift", "SwiftUI", "UIKit", "CoreData", "Combine", "RESTful APIs", "XCTest", "App Store Deployment", "Push Notifications", "Dependency Injection"],
+            # Data Engineering
+            "data engineer": ["Python", "SQL", "Apache Spark", "Airflow", "Kafka", "Data Warehousing", "dbt", "ETL Pipelines", "Cloud Storage", "Data Modeling"],
+            # UI/UX
+            "ui/ux": ["Figma", "User Research", "Wireframing", "Prototyping", "Usability Testing", "Design Systems", "Accessibility", "Information Architecture", "Interaction Design", "Visual Design"],
+            "product": ["Product Discovery", "Roadmapping", "OKRs", "Analytics", "A/B Testing", "Stakeholder Management", "User Stories", "Prioritization Frameworks", "Agile", "Go-To-Market"],
         }
 
     def _get_primary_ai_for_json(self):
@@ -1045,18 +1062,36 @@ Return ONLY valid JSON. No markdown. No explanation.
 
     def _role_focus_keywords(self, target_role: str) -> List[str]:
         role = (target_role or "").lower()
+        if "sdet" in role or ("software" in role and "test" in role):
+            return ["selenium", "playwright", "testng", "api testing", "ci/cd", "bdd", "test automation", "performance testing"]
+        if "test automation" in role or "automation engineer" in role or "automation tester" in role:
+            return ["selenium webdriver", "playwright", "cypress", "testng", "postman", "bdd/cucumber", "allure reports", "page object model"]
+        if "qa" in role or "quality assurance" in role:
+            return ["manual testing", "test cases", "selenium", "api testing", "regression testing", "jira", "bdd", "test planning"]
+        if "cyber" in role or "penetration" in role or "pentest" in role or "ethical hacking" in role:
+            return ["kali linux", "metasploit", "owasp", "penetration testing", "network forensics", "vulnerability assessment", "siem", "threat intelligence"]
+        if "security" in role:
+            return ["owasp top 10", "penetration testing", "iam", "cryptography", "cloud security", "siem", "vulnerability assessment", "incident response"]
+        if "data engineer" in role:
+            return ["python", "sql", "apache spark", "airflow", "kafka", "dbt", "etl pipelines", "data warehousing"]
         if "data" in role or "analyst" in role or "scientist" in role:
             return ["python", "sql", "pandas", "statistics", "machine learning", "data visualization"]
-        if "devops" in role or "sre" in role or "cloud" in role:
+        if "devops" in role or "sre" in role or "cloud" in role or "platform" in role:
             return ["docker", "kubernetes", "aws", "ci/cd", "terraform", "monitoring"]
-        if "frontend" in role or "ui" in role or "ux" in role:
+        if "frontend" in role or ("ui" in role and "ux" not in role):
             return ["react", "typescript", "state management", "accessibility", "performance", "testing"]
-        if "backend" in role or "api" in role:
+        if "ui/ux" in role or "ux" in role or "product design" in role:
+            return ["figma", "user research", "wireframing", "prototyping", "usability testing", "design systems"]
+        if "backend" in role or "api" in role or "server" in role:
             return ["api design", "database design", "authentication", "caching", "queue systems", "testing"]
-        if "mobile" in role:
+        if "mobile" in role or "android" in role or "ios" in role or "react native" in role or "flutter" in role:
             return ["react native", "flutter", "app architecture", "state management", "api integration", "release pipeline"]
-        if "product" in role:
+        if "ml" in role or "machine learning" in role or "ai engineer" in role:
+            return ["python", "scikit-learn", "pytorch", "feature engineering", "model evaluation", "mlops"]
+        if "product" in role or "product manager" in role or "pm" == role.strip():
             return ["product discovery", "roadmapping", "analytics", "experimentation", "stakeholder management", "prioritization"]
+        if "full stack" in role or "fullstack" in role or "mern" in role or "mean" in role:
+            return ["react", "node.js", "api design", "databases", "testing", "deployment"]
         return ["system design", "testing", "version control", "deployment", "problem solving", "architecture"]
 
     def _build_role_context(self, target_role: str, current_skills: List[str]) -> Dict:

@@ -186,6 +186,27 @@ async def upload_profile_pic(file: UploadFile, user: User, db: AsyncSession) -> 
     return UserOut.model_validate(user)
 
 
+async def delete_own_account(user: User, db: AsyncSession) -> None:
+    """
+    Permanently delete the authenticated user's own account and all associated data.
+    Cascades are handled by FK constraints / ORM relationships; remaining loose data
+    is deleted explicitly to be safe.
+    """
+    from sqlalchemy import delete as sql_delete
+    from models.application import Application
+    from models.portfolio import Portfolio
+
+    # Delete applications submitted by this user
+    await db.execute(sql_delete(Application).where(Application.user_id == user.id))
+
+    # Delete portfolio (cascade handles portfolio sub-records if configured)
+    await db.execute(sql_delete(Portfolio).where(Portfolio.user_id == user.id))
+
+    # Delete the user record itself
+    await db.delete(user)
+    await db.commit()
+
+
 async def get_public_user(user_id: str, db: AsyncSession) -> UserOut:
     try:
         uid = uuid.UUID(user_id)
