@@ -161,6 +161,7 @@ class AdminSeekerDetailResponse(BaseModel):
     experience: Optional[str] = None
     preferred_locations: Optional[List[str]] = None
     profile_completion_percentage: Optional[int] = None
+    has_resume: bool = False
 
     # Extended personal info
     father_or_mother_name: Optional[str] = None

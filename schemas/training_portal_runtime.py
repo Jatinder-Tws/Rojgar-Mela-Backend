@@ -534,3 +534,102 @@ class PortalPaymentInvoiceOut(BaseModel):
     issuer_label: str = "RojgarMela Training Portal"
     line_items: list[PortalInvoiceLineItem] = Field(default_factory=list)
 
+
+# ── Dashboard summary ─────────────────────────────────────────────────────────
+
+class PortalWeeklyFeePoint(BaseModel):
+    key: str
+    label: str
+    collected: float
+    pending: float
+
+
+class PortalTeacherWorkloadPoint(BaseModel):
+    teacher_key: str
+    teacher_name: str
+    batch_count: int
+    ongoing_count: int
+    seats_filled: int = 0
+
+
+class PortalCourseEnrollmentPoint(BaseModel):
+    course_id: str
+    count: int
+
+
+class PortalBatchPerformancePoint(BaseModel):
+    batch_id: str
+    batch_name: str
+    student_count: int
+    avg_attendance: int
+    avg_completion: int
+    utilization: int
+
+
+class PortalEnrollmentStatusCounts(BaseModel):
+    active: int = 0
+    completed: int = 0
+    dropped: int = 0
+    pending: int = 0
+
+
+class PortalPaymentStatusCounts(BaseModel):
+    paid: int = 0
+    pending: int = 0
+    overdue: int = 0
+    paid_percent: int = 0
+    pending_percent: int = 0
+    overdue_percent: int = 0
+
+
+class PortalLeaveStatsCounts(BaseModel):
+    pending: int = 0
+    approved: int = 0
+    rejected: int = 0
+    total: int = 0
+
+
+class PortalBehaviorAvg(BaseModel):
+    discipline: float = 0
+    participation: float = 0
+    performance: float = 0
+    overall: float = 0
+
+
+class PortalDashboardSummaryOut(BaseModel):
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
+    total_students: int = 0
+    total_enrollments: int = 0
+    total_teachers: int = 0
+    active_teachers: int = 0
+    total_courses: int = 0
+    total_internships: int = 0
+    active_batches: int = 0
+    upcoming_batches: int = 0
+    completed_batches: int = 0
+    total_batches: int = 0
+    total_seats: int = 0
+    filled_seats: int = 0
+    batch_utilization_percent: int = 0
+    fee_collection: float = 0
+    pending_fee: float = 0
+    overdue_count: int = 0
+    certificates_issued: int = 0
+    certificate_eligible: int = 0
+    today_classes_count: int = 0
+    total_scheduled_classes: int = 0
+    avg_attendance: int = 0
+    avg_completion: int = 0
+    at_risk_count: int = 0
+    attendance_compliant: int = 0
+    attendance_below_threshold: int = 0
+    enrollment_status: PortalEnrollmentStatusCounts = Field(default_factory=PortalEnrollmentStatusCounts)
+    payment_status: PortalPaymentStatusCounts = Field(default_factory=PortalPaymentStatusCounts)
+    leave_stats: PortalLeaveStatsCounts = Field(default_factory=PortalLeaveStatsCounts)
+    behavior_avg: PortalBehaviorAvg = Field(default_factory=PortalBehaviorAvg)
+    weekly_fee: list[PortalWeeklyFeePoint] = Field(default_factory=list)
+    teacher_workload: list[PortalTeacherWorkloadPoint] = Field(default_factory=list)
+    course_enrollment: list[PortalCourseEnrollmentPoint] = Field(default_factory=list)
+    batch_performance: list[PortalBatchPerformancePoint] = Field(default_factory=list)
+

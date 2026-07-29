@@ -64,9 +64,11 @@ from schemas.training_portal_runtime import (
     PortalPaymentInvoiceOut,
     PortalInvoiceLineItem,
     PortalNotificationMarkRead,
+    PortalDashboardSummaryOut,
     time_within_working_hours,
 )
 from services.auth_service import require_super_admin, require_training_portal_user, require_teacher_or_super_admin
+from services.training_portal_dashboard import build_dashboard_summary
 from services.training_portal_mapper import (
     enrollment_to_out,
     batch_to_out,
@@ -621,6 +623,20 @@ async def update_payment_settings(
     row.updated_at = datetime.utcnow()
     await db.flush()
     return payment_settings_to_out(row)
+
+
+# ── Dashboard summary ─────────────────────────────────────────────────────────
+
+@router.get("/dashboard-summary", response_model=PortalDashboardSummaryOut)
+async def get_dashboard_summary(
+    date_from: Optional[str] = Query(None, description="YYYY-MM-DD enrollment/payment range start"),
+    date_to: Optional[str] = Query(None, description="YYYY-MM-DD enrollment/payment range end"),
+    current_user: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Aggregated admin KPIs, fee charts, and teacher workload from live DB data."""
+    data = await build_dashboard_summary(db, date_from=date_from, date_to=date_to)
+    return PortalDashboardSummaryOut(**data)
 
 
 # ── Enrollments ───────────────────────────────────────────────────────────────
