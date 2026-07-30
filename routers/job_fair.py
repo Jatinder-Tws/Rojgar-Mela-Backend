@@ -125,6 +125,12 @@ async def create_job_fair(
     """Super Admin: Create a new Job Fair (multipart/form-data, optional banner image)."""
     import json as _json
 
+    if len(title) > 200:
+        raise HTTPException(
+            status_code=400,
+            detail="Title cannot exceed 200 characters. Please enter a shorter title to continue.",
+        )
+
     banner_url = None
     if banner_image and banner_image.filename:
         banner_url = await _save_banner_image(banner_image)
@@ -140,6 +146,8 @@ async def create_job_fair(
             pass
 
     fair_date = datetime.fromisoformat(date.replace("Z", "+00:00")).replace(tzinfo=None)
+    if fair_date < datetime.utcnow():
+        raise HTTPException(status_code=400, detail="Job fair date cannot be in the past")
     return await create_job_fair_db(
         db,
         title=title,
@@ -167,6 +175,11 @@ async def update_job_fair(
         raise HTTPException(status_code=404, detail="Job Fair not found")
 
     update_data = body.model_dump(exclude_unset=True)
+    if update_data.get("title") and len(update_data["title"]) > 200:
+        raise HTTPException(
+            status_code=400,
+            detail="Title cannot exceed 200 characters. Please enter a shorter title to continue.",
+        )
     new_slug = None
     if "title" in update_data and update_data["title"] != existing.title:
         new_slug = await generate_unique_slug(update_data["title"], db)
