@@ -76,7 +76,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="JobMatch AI API",
+    title="RojgarMela AI API",
     description="AI-powered bidirectional job matching platform",
     version="1.0.0",
     lifespan=lifespan,
