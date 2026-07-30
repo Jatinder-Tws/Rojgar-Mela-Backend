@@ -719,13 +719,39 @@ def _extract_city_label(location: str) -> Optional[str]:
     return parts[0]
 
 
+# Only categories with count > 0 are returned. Counts use the same text search
+# as clicking the chip (title/industry/location/experience) — not description
+# keyword scans, which produced false positives.
+_BROWSE_CATEGORIES: list[dict[str, Any]] = [
+    {"key": "remote", "label": "Remote", "query": "remote"},
+    {"key": "mnc", "label": "MNC", "query": "mnc"},
+    {"key": "fresher", "label": "Fresher", "query": "fresher"},
+    {"key": "supply_chain", "label": "Supply Chain", "query": "supply chain"},
+    {"key": "software_it", "label": "Software & IT", "query": "software"},
+    {"key": "marketing", "label": "Marketing", "query": "marketing"},
+    {"key": "banking_finance", "label": "Banking & Finance", "query": "banking"},
+    {"key": "project_mgmt", "label": "Project Mgmt", "query": "project manager"},
+    {"key": "sales", "label": "Sales", "query": "sales"},
+    {"key": "data_science", "label": "Data Science", "query": "data science"},
+    {"key": "internship", "label": "Internship", "query": "internship"},
+]
+
+
+async def _count_category_jobs(db: AsyncSession, cat: dict[str, Any]) -> int:
+    """Count active jobs that would appear when the category chip is clicked."""
+    base = select(func.count()).select_from(JobPosting).filter(JobPosting.is_active == True)
+    # Same `q` filter as public job search — chip only if click returns jobs
+    result = await db.execute(_apply_text_search(base, cat["query"]))
+    return int(result.scalar() or 0)
+
+
 async def get_job_browse_meta(
     db: AsyncSession,
     *,
     title_limit: int = 10,
     city_limit: int = 12,
 ) -> dict[str, Any]:
-    """Popular job titles and cities derived from active job postings."""
+    """Popular job titles, cities, and category chips that have live jobs."""
     title_limit = min(max(1, title_limit), 30)
     city_limit = min(max(1, city_limit), 40)
 
@@ -764,6 +790,20 @@ async def get_job_browse_meta(
             city_counts[ckey] = city_counts.get(ckey, 0) + 1
             city_labels[ckey] = city_labels.get(ckey) or city
 
+    categories: list[dict[str, Any]] = []
+    for cat in _BROWSE_CATEGORIES:
+        count = await _count_category_jobs(db, cat)
+        if count <= 0:
+            continue
+        categories.append(
+            {
+                "key": cat["key"],
+                "label": cat["label"],
+                "query": cat["query"],
+                "count": count,
+            }
+        )
+
     popular_titles = [
         {"label": title_labels[k], "count": title_counts[k]}
         for k in sorted(title_counts.keys(), key=lambda x: (-title_counts[x], title_labels[x].lower()))[
@@ -781,6 +821,7 @@ async def get_job_browse_meta(
         "total_jobs": total_jobs,
         "popular_titles": popular_titles,
         "cities": cities,
+        "categories": categories,
     }
 
 
