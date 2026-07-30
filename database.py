@@ -455,6 +455,8 @@ async def patch_training_portal_schema():
         "ALTER TABLE training_portal_transactions ADD COLUMN IF NOT EXISTS provider VARCHAR(30)",
         "ALTER TABLE training_portal_transactions ADD COLUMN IF NOT EXISTS provider_transaction_id VARCHAR(120)",
         "ALTER TABLE training_portal_transactions ADD COLUMN IF NOT EXISTS reference_order_id VARCHAR(50)",
+        "ALTER TABLE training_portal_transactions ADD COLUMN IF NOT EXISTS transaction_reference VARCHAR(120)",
+        "ALTER TABLE training_portal_transactions ADD COLUMN IF NOT EXISTS bank_name VARCHAR(150)",
         "ALTER TABLE training_portal_transactions ADD COLUMN IF NOT EXISTS batch_id VARCHAR(50)",
         "ALTER TABLE training_portal_transactions ADD COLUMN IF NOT EXISTS batch_name VARCHAR(200)",
         "ALTER TABLE training_portal_transactions ADD COLUMN IF NOT EXISTS notes TEXT",

@@ -437,6 +437,8 @@ class PortalOfflinePaymentRecord(BaseModel):
     enrollment_id: str
     amount: float
     payment_mode: Literal["cash", "UPI", "bank_transfer"] = "UPI"
+    transaction_reference: Optional[str] = None
+    bank_name: Optional[str] = None
     notes: Optional[str] = None
     date: Optional[str] = None
 
@@ -497,6 +499,8 @@ class PortalTransactionOut(BaseModel):
     provider: Optional[str] = None
     provider_transaction_id: Optional[str] = None
     reference_order_id: Optional[str] = None
+    transaction_reference: Optional[str] = None
+    bank_name: Optional[str] = None
     batch_id: Optional[str] = None
     batch_name: Optional[str] = None
     notes: Optional[str] = None
@@ -523,6 +527,8 @@ class PortalPaymentInvoiceOut(BaseModel):
     provider: Optional[str] = None
     provider_transaction_id: Optional[str] = None
     reference_order_id: Optional[str] = None
+    transaction_reference: Optional[str] = None
+    bank_name: Optional[str] = None
     status: str
     currency: str
     amount: float

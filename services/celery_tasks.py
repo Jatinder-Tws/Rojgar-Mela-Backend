@@ -213,9 +213,14 @@ def improve_resume_task(job_title: str, job_description: str, technologies: str,
             if not resume:
                 raise ValueError("Resume not found")
 
+            resume_text = (resume.parsed_text or '').strip()
+            if not resume_text:
+                import json
+                resume_text = json.dumps(resume.parsed_json or {}, ensure_ascii=False)
+
             ai_result = await analyze_resume_multi(
                 data={"job_title": job_title, "job_description": job_description, "technologies": tech_list},
-                resume_text=resume.parsed_json,
+                resume_text=resume_text,
             )
             return ai_result
 
