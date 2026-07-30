@@ -304,11 +304,16 @@ async def list_platform_applications(
                 Application.candidate_name.ilike(term),
                 Application.candidate_email.ilike(term),
                 JobPosting.title.ilike(term),
+                Provider.company_name.ilike(term),
+                Seeker.first_name.ilike(term),
+                Seeker.last_name.ilike(term),
+                func.concat(Seeker.first_name, ' ', Seeker.last_name).ilike(term),
+                Seeker.email.ilike(term),
             )
         )
     if status and status != "all":
         base = base.where(Application.status == status)
-    count_q = select(func.count(Application.id)).select_from(Application).join(JobPosting, Application.job_id == JobPosting.id)
+    count_q = select(func.count(Application.id)).select_from(Application).join(JobPosting, Application.job_id == JobPosting.id).join(Provider, JobPosting.provider_id == Provider.id).outerjoin(Seeker, Application.seeker_id == Seeker.id)
     if search:
         term = f"%{search.strip()}%"
         count_q = count_q.where(
@@ -316,6 +321,11 @@ async def list_platform_applications(
                 Application.candidate_name.ilike(term),
                 Application.candidate_email.ilike(term),
                 JobPosting.title.ilike(term),
+                Provider.company_name.ilike(term),
+                Seeker.first_name.ilike(term),
+                Seeker.last_name.ilike(term),
+                func.concat(Seeker.first_name, ' ', Seeker.last_name).ilike(term),
+                Seeker.email.ilike(term),
             )
         )
     if status and status != "all":

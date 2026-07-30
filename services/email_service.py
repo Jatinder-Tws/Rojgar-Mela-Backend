@@ -303,7 +303,7 @@ async def send_welcome_email(
         email=to_email,
         password=password or "",
         role=role,
-        role_label=role_label,
+        role_label=role_label if role != "teacher" else "Training Portal Teacher",
         is_seeker=is_seeker,
         is_provider=not is_seeker,
         login_url=f"{settings.FRONTEND_URL.rstrip('/')}/login",

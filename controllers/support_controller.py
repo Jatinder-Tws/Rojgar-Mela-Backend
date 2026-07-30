@@ -254,6 +254,7 @@ async def create_ticket(body: TicketCreate, user: User, db: AsyncSession) -> Tic
         title="New Support Ticket",
         message=f"[{ticket.ticket_number}] {role_label} {_user_display_name(user)}: {ticket.subject}",
         type=NotificationType.general,
+        related_job_id=str(ticket.id),
         related_user_id=str(user.id),
     )
 
@@ -357,6 +358,7 @@ async def add_user_message(ticket_id: str, body: TicketMessageCreate, user: User
         title="Ticket Reply",
         message=f"[{ticket.ticket_number}] New reply from {_user_display_name(user)}",
         type=NotificationType.general,
+        related_job_id=str(ticket.id),
         related_user_id=str(user.id),
     )
 

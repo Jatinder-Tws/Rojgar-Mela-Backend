@@ -162,6 +162,7 @@ async def list_jobs(
     if page is not None and page_size is not None:
         count_query = select(func.count(JobPosting.id)).select_from(base_query.subquery())
         total_result = await db.execute(count_query)
+        total = total_result.scalar() or 0
         offset = (page - 1) * page_size
         query = base_query.offset(offset).limit(page_size)
         result = await db.execute(query)
