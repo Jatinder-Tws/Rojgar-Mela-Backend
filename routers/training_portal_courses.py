@@ -124,7 +124,11 @@ async def list_portal_courses(
     db: AsyncSession = Depends(get_db),
 ):
     """List training portal courses for admin, teacher, and candidate views."""
-    query = select(TrainingPortalCourse).order_by(TrainingPortalCourse.created_at.desc())
+    is_super_admin = (
+        getattr(current_user, "is_super_admin", False)
+        or (hasattr(current_user.role, "value") and current_user.role.value == "superadmin")
+        or (str(current_user.role or "") == "superadmin")
+    )
 
     if search:
         term = f"%{search.strip()}%"
@@ -137,8 +141,12 @@ async def list_portal_courses(
         )
     if category:
         query = query.where(TrainingPortalCourse.category == category.strip())
-    if status_filter and status_filter != "all":
+
+    if not is_super_admin:
+        query = query.where(TrainingPortalCourse.status == "published")
+    elif status_filter and status_filter != "all":
         query = query.where(TrainingPortalCourse.status == status_filter.strip())
+
     if delivery_mode and delivery_mode != "all":
         query = query.where(TrainingPortalCourse.delivery_mode == delivery_mode.strip())
 
