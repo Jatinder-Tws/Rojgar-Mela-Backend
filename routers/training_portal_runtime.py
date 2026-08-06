@@ -922,11 +922,12 @@ async def bulk_delete_students(
         select(TrainingPortalEnrollment.id).where(TrainingPortalEnrollment.candidate_email.in_(emails))
     )
     enrollment_ids = [row[0] for row in res_en.all()]
-    if enrollment_ids:
-        await db.execute(
-            delete(TrainingPortalTransaction).where(TrainingPortalTransaction.enrollment_id.in_(enrollment_ids))
-        )
-        
+    if not enrollment_ids:
+        raise HTTPException(status_code=404, detail="No matching student records found to delete.")
+    await db.execute(
+        delete(TrainingPortalTransaction).where(TrainingPortalTransaction.enrollment_id.in_(enrollment_ids))
+    )
+
     # Delete enrollments
     await db.execute(
         delete(TrainingPortalEnrollment).where(TrainingPortalEnrollment.candidate_email.in_(emails))

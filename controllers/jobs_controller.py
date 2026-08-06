@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import List, Optional
 from fastapi import BackgroundTasks, HTTPException
 from sqlalchemy import select
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
@@ -17,6 +18,8 @@ from schemas.jobs import (
     JobUpdate,
 )
 from services.ai_jobcreation_service import generate_job_descriptions, generate_job_skills
+from services.job_scrappers import search_external_jobs_paginated, clear_job_search_cache
+
 from services.jobs_service import (
     deactivate_job_service,
     get_job_or_404,
@@ -26,6 +29,7 @@ from services.jobs_service import (
     schedule_activation,
 )
 from services.seeker_matching_service import embed_and_store_job
+
 
 
 async def create_job(
@@ -324,3 +328,38 @@ async def generate_skills(payload: JobTitleRequest) -> JobSkillsResponse:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception:
         raise HTTPException(status_code=500, detail="Something went wrong")
+
+
+async def search_external_jobs(
+    query: str,
+    location: str = "",
+    page: int = 1,
+    page_size: int = 20,
+    greenhouse_board: str = "",
+    force_refresh: bool = False
+) -> dict:
+    """
+    Controller method for parallel, async paginated job search across external portals (Apna.co, Foundit.in, & Greenhouse.io).
+    """
+    from services.job_scrappers import search_external_jobs_paginated
+    return await search_external_jobs_paginated(
+        query=query,
+        location=location or "",
+        page=page,
+        page_size=page_size,
+        greenhouse_board=greenhouse_board or "",
+        force_refresh=force_refresh
+    )
+
+
+
+
+async def clear_external_jobs_cache():
+    """
+    Controller method to flush job search cache from Redis.
+    """
+    from services.job_scrappers import clear_job_search_cache
+    count = await clear_job_search_cache()
+    return {"message": f"Successfully cleared {count} cached search entries from Redis.", "cleared_count": count}
+
+
