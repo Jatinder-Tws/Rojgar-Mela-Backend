@@ -66,39 +66,44 @@ class EmailImageUploadResponse(BaseModel):
     html_snippet: str
 
 
+class ImportedEmailRow(BaseModel):
+    email: str
+    name: Optional[str] = None
+
+
+_AUDIENCE_TYPE_LITERAL = Literal[
+    "all_seekers",
+    "all_providers",
+    "all_users",
+    "industry_seekers",
+    "industry_providers",
+    "specific_users",
+    "csv_import",
+    "job_fair_seekers",
+    "job_fair_providers",
+]
+
+
 class AudienceFilter(BaseModel):
+    audience_types: Optional[list[_AUDIENCE_TYPE_LITERAL]] = None
     industries: Optional[list[str]] = None
     user_ids: Optional[list[str]] = None
     is_verified: Optional[bool] = None
+    imported_emails: Optional[list[ImportedEmailRow]] = None
+    job_fair_id: Optional[str] = None
 
 
 class EmailCampaignCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     template_id: str
-    audience_type: Literal[
-        "all_seekers",
-        "all_providers",
-        "all_users",
-        "industry_seekers",
-        "industry_providers",
-        "specific_users",
-    ]
+    audience_type: _AUDIENCE_TYPE_LITERAL
     audience_filter: Optional[AudienceFilter] = None
 
 
 class EmailCampaignUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=200)
     template_id: Optional[str] = None
-    audience_type: Optional[
-        Literal[
-            "all_seekers",
-            "all_providers",
-            "all_users",
-            "industry_seekers",
-            "industry_providers",
-            "specific_users",
-        ]
-    ] = None
+    audience_type: Optional[_AUDIENCE_TYPE_LITERAL] = None
     audience_filter: Optional[AudienceFilter] = None
 
 
@@ -132,14 +137,7 @@ class EmailCampaignListResponse(BaseModel):
 
 
 class AudienceEstimateRequest(BaseModel):
-    audience_type: Literal[
-        "all_seekers",
-        "all_providers",
-        "all_users",
-        "industry_seekers",
-        "industry_providers",
-        "specific_users",
-    ]
+    audience_type: _AUDIENCE_TYPE_LITERAL
     audience_filter: Optional[AudienceFilter] = None
 
 

@@ -2,6 +2,7 @@ from typing import Optional, Union
 from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
+
 from database import get_db
 from models.user import User
 from schemas.jobs import (
@@ -22,9 +23,13 @@ from controllers.jobs_controller import (
     get_job_stats as ctrl_get_job_stats,
     generate_description as ctrl_generate_description,
     generate_skills as ctrl_generate_skills,
+    get_distinct_industries as ctrl_get_distinct_industries,
+    search_external_jobs as ctrl_search_external_jobs,
+    clear_external_jobs_cache as ctrl_clear_external_jobs_cache,
 )
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
+
 
 
 @router.post("", response_model=JobOut, status_code=201)
@@ -53,9 +58,51 @@ async def get_job_stats(user: User = Depends(require_provider), db: AsyncSession
     return await ctrl_get_job_stats(user, db)
 
 
+@router.get("/industries", response_model=list[str])
+async def get_distinct_industries(user: User = Depends(require_verified), db: AsyncSession = Depends(get_db)):
+    return await ctrl_get_distinct_industries(db)
+
+
+@router.get("/external-search")
+async def search_external_jobs(
+    query: str = Query(..., description="Job title or search keyword"),
+    location: Optional[str] = Query("", description="Job location filter"),
+    page: int = Query(1, ge=1, description="Page number (default 1)"),
+    page_size: int = Query(20, ge=1, le=100, description="Items per page (default 20, max 100)"),
+    greenhouse_board: Optional[str] = Query("", description="Optional Greenhouse board token (e.g. github, stripe, cloudflare, postman)"),
+    force_refresh: bool = Query(False, description="Bypass Redis cache"),
+):
+    """
+    Public async paginated job search endpoint for Apna.co, Foundit.in, and Greenhouse.io portals (No Authentication Required).
+    Returns normalized job results from all portals using concurrent parallel API execution.
+    Supports pagination parameters (page, page_size) and optional Greenhouse board filtering.
+    """
+    return await ctrl_search_external_jobs(
+        query=query,
+        location=location or "",
+        page=page,
+        page_size=page_size,
+        greenhouse_board=greenhouse_board or "",
+        force_refresh=force_refresh
+    )
+
+
+
+
+@router.post("/clear-external-cache")
+@router.delete("/clear-external-cache")
+async def clear_external_cache():
+    """
+    Clear all external job search entries from Redis cache.
+    """
+    return await ctrl_clear_external_jobs_cache()
+
+
+
 @router.get("/{job_id}", response_model=JobOut)
 async def get_job(job_id: str, user: User = Depends(require_verified), db: AsyncSession = Depends(get_db)):
     return await ctrl_get_job(job_id, user, db)
+
 
 
 @router.patch("/{job_id}", response_model=JobOut)
@@ -91,3 +138,8 @@ async def generate_description(payload: JobDescriptionRequest, user: User = Depe
 @router.post("/ai/generate-skills", response_model=JobSkillsResponse)
 async def generate_skills(payload: JobTitleRequest, user: User = Depends(require_provider)):
     return await ctrl_generate_skills(payload)
+
+
+
+
+

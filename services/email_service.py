@@ -8,8 +8,10 @@ import aiosmtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.image import MIMEImage
+from email.mime.application import MIMEApplication
 from email.utils import parseaddr
 from jinja2 import Environment, FileSystemLoader
+from markupsafe import Markup, escape
 
 from config import settings
 
@@ -93,6 +95,13 @@ def _support_context() -> dict[str, str]:
     }
 
 
+def _notification_message_html(message: str) -> Markup:
+    """Render notification body as HTML without exposing escaped source tags."""
+    if re.search(r"</?[a-zA-Z][^>]*>", message or ""):
+        return Markup(message)
+    return Markup(str(escape(message)).replace("\n", "<br />\n"))
+
+
 def build_job_fair_email_context(job_fair: Any = None) -> dict[str, Any]:
     """Build template variables from a JobFair record (or sensible defaults)."""
     ctx: dict[str, Any] = {
@@ -166,7 +175,7 @@ def _apply_common_headers(msg: MIMEMultipart, to_email: str, subject: str, *, is
     msg["From"] = settings.SMTP_FROM
     msg["To"] = to_email
     msg["Message-ID"] = _message_id()
-    msg["Reply-To"] = settings.SMTP_USER or parseaddr(settings.SMTP_FROM)[1]
+    msg["Reply-To"] = settings.SMTP_FROM or parseaddr(settings.SMTP_FROM)[1]
     if is_bulk:
         msg["Precedence"] = "bulk"
         reply_addr = parseaddr(settings.SMTP_FROM)[1] or settings.SMTP_USER
@@ -294,7 +303,7 @@ async def send_welcome_email(
         email=to_email,
         password=password or "",
         role=role,
-        role_label=role_label,
+        role_label=role_label if role != "teacher" else "Training Portal Teacher",
         is_seeker=is_seeker,
         is_provider=not is_seeker,
         login_url=f"{settings.FRONTEND_URL.rstrip('/')}/login",
@@ -310,10 +319,10 @@ async def send_notification_email(to_email: str, first_name: str, title: str, me
     html = template.render(
         first_name=first_name,
         title=title,
-        message=message,
+        message=_notification_message_html(message),
         year=datetime.utcnow().year,
     )
-    await _send_email(to_email, title, html)
+    await _send_branded_email(to_email, title, html)
 
 
 async def send_password_email(to_email: str, first_name: str, password: str, role: str) -> None:
@@ -351,9 +360,9 @@ async def send_password_email(to_email: str, first_name: str, password: str, rol
                     <tr>
                         <td style="padding:10px 36px 24px;background:#ffffff;text-align:left;">
                             <h1 style="margin:0 0 16px 0;font-size:22px;font-weight:700;color:#0f2d52;line-height:1.3;border-bottom:3px solid #ea580c;padding-bottom:10px;">Welcome to Rojgar Mela!</h1>
-                            <p style="margin:0 0 14px 0;font-size:15px;line-height:1.65;color:#1f2937;">Hi <strong>{first_name}</strong>,</p>
-                            <p style="margin:0 0 18px 0;font-size:15px;line-height:1.65;color:#1f2937;">Your account has been successfully created as a <strong>{role_label}</strong>. We are thrilled to welcome you to the Rojgar Mela platform!</p>
-                            <p style="margin:0 0 18px 0;font-size:15px;line-height:1.65;color:#1f2937;">Use the credentials below to log in to your account and get started:</p>
+                            <p style="margin:0 0 14px 0;font-size:13px;line-height:1.65;color:#1f2937;">Hi <strong>{first_name}</strong>,</p>
+                            <p style="margin:0 0 18px 0;font-size:13px;line-height:1.65;color:#1f2937;">Your account has been successfully created as a <strong>{role_label}</strong>. We are thrilled to welcome you to the Rojgar Mela platform!</p>
+                            <p style="margin:0 0 18px 0;font-size:13px;line-height:1.65;color:#1f2937;">Use the credentials below to log in to your account and get started:</p>
                             <!-- Credentials Box -->
                             <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="margin:0 0 22px 0;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;">
                                 <tr>
@@ -377,11 +386,11 @@ async def send_password_email(to_email: str, first_name: str, password: str, rol
                             <table cellpadding="0" align="center" cellspacing="0" role="presentation" style="margin:0 0 24px 0;" width="100%">
                                 <tr>
                                     <td align="center">
-                                        <a href="{settings.FRONTEND_URL}/login" target="_blank" style="display:inline-block;background:#0f2d52;color:#ffffff;text-decoration:none;font-size:15px;font-weight:600;padding:14px 32px;border-radius:4px;letter-spacing:0.02em;">Log In to Dashboard</a>
+                                        <a href="{settings.FRONTEND_URL}/login" target="_blank" style="display:inline-block;background:#0f2d52;color:#ffffff;text-decoration:none;font-size:13px;font-weight:600;padding:14px 32px;border-radius:4px;letter-spacing:0.02em;">Log In to Dashboard</a>
                                     </td>
                                 </tr>
                             </table>
-                            <p style="margin:0;font-size:15px;line-height:1.6;color:#1f2937;">Regards,<br /><strong style="color:#0f2d52;">Mega Job Fair Organizing Committee</strong><br /><span style="font-size:13px;color:#64748b;">CICU x Rojgar Mela AI</span></p>
+                            <p style="margin:0;font-size:13px;line-height:1.6;color:#1f2937;">Regards,<br /><strong style="color:#0f2d52;">Mega Job Fair Organizing Committee</strong><br /><span style="font-size:13px;color:#64748b;">CICU x Rojgar Mela AI</span></p>
                         </td>
                     </tr>
                     <!-- Footer with logos -->
@@ -447,3 +456,135 @@ async def send_job_fair_welcome_email(
     )
 
     await _send_branded_email(to_email, subject, html, raise_on_error=True)
+
+
+async def send_training_portal_batch_assigned_email(
+    to_email: str,
+    candidate_name: str,
+    course_title: str,
+    batch_name: str,
+    time_slot: str,
+    venue: str,
+    days: list,
+) -> None:
+    days_text = ", ".join(days) if days else "To be announced"
+    html = f"""
+    <p>Hi {candidate_name},</p>
+    <p>Your batch has been assigned for <strong>{course_title}</strong>.</p>
+    <ul>
+      <li><strong>Batch:</strong> {batch_name}</li>
+      <li><strong>Schedule:</strong> {time_slot} ({days_text})</li>
+      <li><strong>Venue:</strong> {venue}</li>
+    </ul>
+    <p>Login to the Training Portal to view your schedule.</p>
+    """
+    await send_notification_email(to_email, candidate_name, "Batch Assigned – RojgarMela Training", html)
+
+
+async def send_training_portal_payment_link_email(
+    to_email: str,
+    candidate_name: str,
+    program_title: str,
+    amount: float,
+    enrollment_id: str,
+) -> None:
+    pay_url = f"{settings.TRAINING_URL.rstrip('/')}/candidate/enrollments?pay={enrollment_id}"
+    template = _env.get_template("training_payment_link_email.html")
+    html = template.render(
+        candidate_name=candidate_name,
+        program_title=program_title,
+        amount_display=f"{amount:,.0f}",
+        pay_url=pay_url,
+        year=datetime.utcnow().year,
+        **_support_context(),
+    )
+    await _send_branded_email(to_email, "Complete Your Training Payment", html)
+
+
+async def send_class_calendar_invite_email(
+    to_email: str,
+    recipient_name: str,
+    class_title: str,
+    schedule_line: str,
+    venue: str,
+    ics_content: str,
+    *,
+    method: str = "REQUEST",
+    role_label: str = "class",
+) -> None:
+    """Email an .ics calendar invite so the class appears in the recipient's calendar.
+
+    method="REQUEST" adds/updates the event; method="CANCEL" removes it. Gmail
+    surfaces an "add to calendar" card automatically for REQUEST invites.
+    """
+    cancelled = method.upper() == "CANCEL"
+    if cancelled:
+        subject = f"Cancelled: {class_title}"
+        intro = f"The following {role_label} has been <strong>cancelled</strong> and removed from your calendar:"
+    else:
+        subject = f"Class scheduled: {class_title}"
+        intro = f"A {role_label} has been scheduled. It has been added to your calendar:"
+
+    html = f"""
+    <p>Hi {recipient_name},</p>
+    <p>{intro}</p>
+    <ul>
+      <li><strong>Class:</strong> {class_title}</li>
+      <li><strong>When:</strong> {schedule_line}</li>
+      <li><strong>Venue:</strong> {venue}</li>
+    </ul>
+    <p>{'This event will disappear from your calendar automatically.' if cancelled else 'Accept the invite to keep it in your Google Calendar. You will get reminders 30 and 15 minutes before class.'}</p>
+    <p>— RojgarMela Training</p>
+    """
+    text_body = _html_to_plain_text(html)
+
+    msg = MIMEMultipart("mixed")
+    _apply_common_headers(msg, to_email, subject)
+
+    alt = MIMEMultipart("alternative")
+    alt.attach(MIMEText(text_body, "plain", "utf-8"))
+    alt.attach(MIMEText(html, "html", "utf-8"))
+    # Inline calendar part drives the Gmail/Google Calendar auto-add card.
+    ical_part = MIMEText(ics_content, f"calendar; method={method.upper()}; charset=UTF-8")
+    ical_part.add_header("Content-Class", "urn:content-classes:calendarmessage")
+    alt.attach(ical_part)
+    msg.attach(alt)
+
+    # File attachment fallback for clients that ignore the inline part.
+    ics_attachment = MIMEApplication(ics_content.encode("utf-8"), _subtype="ics")
+    ics_attachment.add_header("Content-Disposition", "attachment", filename="invite.ics")
+    ics_attachment.add_header("Content-Type", f"text/calendar; method={method.upper()}; name=invite.ics")
+    msg.attach(ics_attachment)
+
+    await _deliver_message(msg, to_email)
+
+
+async def send_training_portal_payment_success_email(
+    to_email: str,
+    candidate_name: str,
+    program_title: str,
+    amount: float,
+    invoice_number: str,
+    invoice_date: str,
+    payment_mode: str | None = None,
+    batch_name: str | None = None,
+    invoice_url: str | None = None,
+) -> None:
+    batch_html = f"<p><strong>Batch:</strong> {batch_name}</p>" if batch_name else ""
+    payment_mode_html = f"<p><strong>Payment mode:</strong> {payment_mode}</p>" if payment_mode else ""
+    invoice_url_html = (
+        f'<p>You can view and print your invoice here: <a href="{invoice_url}">Open Invoice</a></p>'
+        if invoice_url
+        else ""
+    )
+    html = f"""
+    <p>Hi {candidate_name},</p>
+    <p>We received your payment of <strong>₹{amount:,.0f}</strong> for <strong>{program_title}</strong>.</p>
+    <p><strong>Invoice No:</strong> {invoice_number}</p>
+    <p><strong>Invoice Date:</strong> {invoice_date}</p>
+    {payment_mode_html}
+    {batch_html}
+    <p>Your enrollment is now confirmed. Our admin team will contact you regarding batch assignment.</p>
+    {invoice_url_html}
+    """
+    await send_notification_email(to_email, candidate_name, "Payment Received – RojgarMela Training", html)

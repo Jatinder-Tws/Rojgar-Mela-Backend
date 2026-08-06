@@ -1,33 +1,86 @@
 from contextlib import asynccontextmanager
+import asyncio
 import logging
 import os
+from typing import Optional
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
 from config import settings, get_cors_allow_origins, get_cors_origin_regex
-from database import init_db, patch_email_admin_schema, patch_interview_application_schema, patch_dashboard_indexes, patch_support_bot_schema, patch_company_internships_schema, AsyncSessionLocal, engine
+from database import init_db, patch_email_admin_schema, patch_interview_application_schema, patch_dashboard_indexes, patch_support_bot_schema, patch_company_internships_schema, patch_teacher_role_schema, patch_training_portal_schema, patch_users_registration_schema, patch_google_calendar_schema, AsyncSessionLocal, engine
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(
-    title="JobMatch AI API",
-    description="AI-powered bidirectional job matching platform",
-    version="1.0.0",
-)
+_class_lifecycle_task: Optional[asyncio.Task] = None
 
 
-@app.on_event("startup")
-async def ensure_db_tables():
-    """Create any missing tables and patch email admin schema."""
+async def _class_lifecycle_loop():
+    """
+    Fallback scheduler so live classes still auto-end / get end reminders
+    even when Celery Beat is not running (e.g. local docker without beat).
+    Idempotent with the Celery task via end_reminder_sent / live_status flags.
+    """
+    await asyncio.sleep(20)
+    while True:
+        try:
+            from services.training_portal_class_lifecycle import process_all_class_lifecycles
+
+            async with AsyncSessionLocal() as db:
+                try:
+                    stats = await process_all_class_lifecycles(db)
+                    await db.commit()
+                    if stats and (
+                        stats.get("auto_ended")
+                        or stats.get("end_reminders")
+                        or stats.get("start_reminders")
+                    ):
+                        logger.info("Class lifecycle sweep: %s", stats)
+                except Exception:
+                    await db.rollback()
+                    raise
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Class lifecycle background sweep failed")
+        await asyncio.sleep(60)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _class_lifecycle_task
     await init_db()
     await patch_email_admin_schema()
     await patch_interview_application_schema()
     await patch_dashboard_indexes()
     await patch_support_bot_schema()
     await patch_company_internships_schema()
+    await patch_teacher_role_schema()
+    await patch_training_portal_schema()
+    await patch_users_registration_schema()
+    await patch_google_calendar_schema()
+    from controllers.super_admin_controller import ensure_super_admin_user
+    await ensure_super_admin_user()
 
+    _class_lifecycle_task = asyncio.create_task(_class_lifecycle_loop())
+    try:
+        yield
+    finally:
+        if _class_lifecycle_task:
+            _class_lifecycle_task.cancel()
+            try:
+                await _class_lifecycle_task
+            except asyncio.CancelledError:
+                pass
+
+
+app = FastAPI(
+    title="RojgarMela AI API",
+    description="AI-powered bidirectional job matching platform",
+    version="1.0.0",
+    lifespan=lifespan,
+)
 # ── Custom Exception Handler for Validation Errors ──────────────────────────
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
@@ -66,7 +119,7 @@ app.add_middleware(
 )
 
 # ── Routers ─────────────────────────────────────────────────────────────────
-from routers import auth, users, jobs, resumes, matches, applications, notifications, interviews, assessment, portfolio, analytics, resume_builder, onboarding, master, ai_interview, roadmap, external_candidate, master_data, ai_coach ,interview_scheduling, import_users, superadmin, super_admin, super_admin_support, support, help_desk_bot, attendance, job_fair, email_admin, dashboard, company_internships, training_courses # noqa
+from routers import auth, users, jobs, resumes, matches, applications, saved_jobs, notifications, interviews, assessment, portfolio, analytics, resume_builder, onboarding, master, ai_interview, roadmap, external_candidate, master_data, ai_coach ,interview_scheduling, import_users, superadmin, super_admin, super_admin_support, support, help_desk_bot, attendance, job_fair, email_admin, dashboard, company_internships, training_courses, training_portal_courses, training_portal_categories, training_portal_teachers, training_portal_internships, training_portal_runtime, google_calendar # noqa
 
 
 API_PREFIX = ""
@@ -77,6 +130,7 @@ routers = [
     attendance.router,
     matches.router,
     applications.router,
+    saved_jobs.router,
     notifications.router,
     interviews.router,
     assessment.router,
@@ -99,6 +153,12 @@ routers = [
     email_admin.router,
     company_internships.router,
     training_courses.router,
+    training_portal_courses.router,
+    training_portal_categories.router,
+    training_portal_teachers.router,
+    training_portal_internships.router,
+    training_portal_runtime.router,
+    google_calendar.router,
 ]
 
 app.include_router(auth.router)

@@ -45,7 +45,7 @@ services:
       - .:/app
       - uploads_data_prod:/app/uploads
     # In production, we typically don't use --reload.
-    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips='*'
 
   celery-worker:
     build:
@@ -66,6 +66,28 @@ services:
       - .:/app
       - uploads_data_prod:/app/uploads
     command: celery -A services.celery_app worker --loglevel=info --pool=solo
+
+  celery-beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://adminuser:jobXrojgarmela@postgres:5432/job_db
+      - REDIS_URL=redis://redis:6379/0
+      - PYTHONPATH=/app
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      celery-worker:
+        condition: service_started
+    volumes:
+      - .:/app
+    command: celery -A services.celery_app beat --loglevel=info
 
 volumes:
   pg_data_prod:

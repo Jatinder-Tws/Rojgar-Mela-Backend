@@ -41,8 +41,9 @@ async def create_notification(
 
         # 2. Broadcast via WebSocket
         notif_data = NotificationOut.model_validate(notif).model_dump()
-        # Convert datetime to ISO string for JSON serialization
-        notif_data["created_at"] = notif.created_at.isoformat()
+        # Convert datetime to ISO string for JSON serialization — always UTC-suffixed
+        # so browsers parse it as UTC rather than local time.
+        notif_data["created_at"] = notif.created_at.isoformat() + "Z"
         
         await manager.send_personal_message(
             {"type": "NOTIFICATION", "data": notif_data},

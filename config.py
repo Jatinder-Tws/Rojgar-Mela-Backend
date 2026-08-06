@@ -51,6 +51,7 @@ class Settings(BaseSettings):
 
     # CORS — set FRONTEND_URL and/or CORS_ORIGINS on the server to match where the SPA is served
     FRONTEND_URL: str = "http://localhost:5173"
+    TRAINING_URL: str = "http://localhost:5000"
     CORS_ORIGINS: str = ""  # comma-separated extra origins, e.g. http://10.0.0.5:8080,https://app.example.com
     # Empty = allow typical LAN/dev hosts (192.168.x.x, 10.x, 172.16–31.x) + any port via regex.
     # Set to "none" to disable regex (only explicit origins). Or set a custom regex string.
@@ -68,6 +69,34 @@ class Settings(BaseSettings):
     # Super admin (seeded on startup if missing)
     SUPER_ADMIN_EMAIL: str = "superadmin@rojgarmela.ai"
     SUPER_ADMIN_PASSWORD: str = "SuperAdmin@123"
+
+    # Razorpay (training portal payments)
+    RAZORPAY_KEY_ID: str = ""
+    RAZORPAY_KEY_SECRET: str = ""
+    RAZORPAY_WEBHOOK_SECRET: str = ""
+
+    # Google Sign-In (Login with Google). Use a Web client ID from Google Cloud Console
+    # with Authorized JavaScript origins for the frontend (e.g. http://localhost:5173).
+    # Falls back to GOOGLE_CALENDAR_CLIENT_ID when empty.
+    GOOGLE_OAUTH_CLIENT_ID: str = ""
+
+    # Google Calendar integration (training class schedule sync)
+    # Leave OAuth keys empty to disable per-user auto-sync; ICS email invites
+    # still work as long as SMTP is configured.
+    GOOGLE_CALENDAR_ICS_ENABLED: bool = True
+    GOOGLE_CALENDAR_CLIENT_ID: str = ""
+    GOOGLE_CALENDAR_CLIENT_SECRET: str = ""
+    # Must exactly match an Authorized redirect URI in the Google Cloud OAuth client.
+    GOOGLE_CALENDAR_REDIRECT_URI: str = "http://localhost:8000/google-calendar/callback"
+    # Where users land after connecting (training portal). Empty = TRAINING_URL.
+    GOOGLE_CALENDAR_POST_CONNECT_URL: str = ""
+
+    @property
+    def google_sign_in_client_id(self) -> str:
+        return (self.GOOGLE_OAUTH_CLIENT_ID or self.GOOGLE_CALENDAR_CLIENT_ID or "").strip()
+
+    def google_calendar_oauth_configured(self) -> bool:
+        return bool(self.GOOGLE_CALENDAR_CLIENT_ID and self.GOOGLE_CALENDAR_CLIENT_SECRET)
 
 
 @lru_cache()
@@ -91,6 +120,7 @@ def get_cors_allow_origins() -> list[str]:
         out.append(u)
 
     add(settings.FRONTEND_URL)
+    add(settings.TRAINING_URL)
     for part in settings.CORS_ORIGINS.split(","):
         add(part.strip())
     for dev in (
@@ -104,7 +134,10 @@ def get_cors_allow_origins() -> list[str]:
         "http://127.0.0.1:3000",
         "http://localhost:4173",
         "http://127.0.0.1:4173",
-        "http://192.168.100.15:5041"
+        "http://192.168.100.15:5041",
+        "http://localhost:5000",
+        "http://127.0.0.1:5000",
+        "http://127.0.0.1:5000"
     ):
         add(dev)
     return out

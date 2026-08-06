@@ -4,18 +4,21 @@ Business logic lives in controllers/super_admin_controller.py
 """
 from datetime import datetime
 from typing import Optional
-from fastapi import APIRouter, Depends, File, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 from models.user import User
 from schemas.super_admin import (
-    AdminApplicationListResponse, AdminAssessmentListResponse, AdminInterviewListResponse,
+    AdminApplicationListItem, AdminApplicationListResponse, AdminAssessmentListResponse, AdminInterviewListResponse,
     AdminJobListResponse, AdminMatchListResponse, AdminProviderCreate, AdminProviderUpdate,
     AdminSeekerCreate, AdminSeekerUpdate, AdminSetPasswordRequest, AdminUserListResponse,
     AdminUserOut, BulkImportJobStarted, DashboardAnalyticsResponse, DetailedPlatformAnalytics,
     ImportJobStatus, PlatformStatsResponse, SuperAdminChangePasswordRequest, SuperAdminLoginRequest,
     SuperAdminLoginResponse, SuperAdminProfileOut, SuperAdminProfileUpdate,
+)
+from schemas.super_admin_detail import (
+    AdminProviderDetailResponse, AdminSeekerDetailResponse,
 )
 from services.auth_service import require_super_admin
 from controllers.super_admin_controller import (
@@ -27,6 +30,7 @@ from controllers.super_admin_controller import (
     list_platform_jobs as ctrl_list_jobs,
     list_platform_matches as ctrl_list_matches,
     list_platform_applications as ctrl_list_applications,
+    update_platform_application_status as ctrl_update_application_status,
     list_platform_interviews as ctrl_list_interviews,
     list_platform_assessments as ctrl_list_assessments,
     platform_stats as ctrl_platform_stats,
@@ -36,6 +40,7 @@ from controllers.super_admin_controller import (
     list_seekers as ctrl_list_seekers,
     create_seeker as ctrl_create_seeker,
     get_seeker as ctrl_get_seeker,
+    get_seeker_detail as ctrl_get_seeker_detail,
     update_seeker as ctrl_update_seeker,
     delete_seeker as ctrl_delete_seeker,
     set_seeker_password as ctrl_set_seeker_password,
@@ -43,6 +48,7 @@ from controllers.super_admin_controller import (
     list_providers as ctrl_list_providers,
     create_provider as ctrl_create_provider,
     get_provider as ctrl_get_provider,
+    get_provider_detail as ctrl_get_provider_detail,
     update_provider as ctrl_update_provider,
     delete_provider as ctrl_delete_provider,
     set_provider_password as ctrl_set_provider_password,
@@ -97,8 +103,9 @@ async def list_jobs(
     page_size: int = Query(20, ge=1, le=100),
     search: Optional[str] = None,
     industry: Optional[str] = Query(None),
+    is_active: Optional[bool] = Query(None),
 ):
-    return await ctrl_list_jobs(db, page, page_size, search, industry)
+    return await ctrl_list_jobs(db, page, page_size, search, industry, is_active)
 
 
 @router.get("/matches", response_model=AdminMatchListResponse)
@@ -122,6 +129,24 @@ async def list_applications(
     status: Optional[str] = Query(None),
 ):
     return await ctrl_list_applications(db, page, page_size, search, status)
+
+
+@router.patch("/applications/{app_id}/status", response_model=AdminApplicationListItem)
+async def update_application_status(
+    app_id: str,
+    body: dict,
+    admin: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    status = body.get("status")
+    if not status:
+        raise HTTPException(status_code=400, detail="status is required")
+    return await ctrl_update_application_status(
+        db,
+        app_id,
+        str(status),
+        rejection_reason=body.get("rejection_reason"),
+    )
 
 
 @router.get("/interviews", response_model=AdminInterviewListResponse)
@@ -237,6 +262,24 @@ async def create_provider(body: AdminProviderCreate, admin: User = Depends(requi
 @router.get("/providers/{user_id}", response_model=AdminUserOut)
 async def get_provider(user_id: str, admin: User = Depends(require_super_admin), db: AsyncSession = Depends(get_db)):
     return await ctrl_get_provider(user_id, db)
+
+
+@router.get("/providers/{user_id}/detail", response_model=AdminProviderDetailResponse)
+async def get_provider_detail(
+    user_id: str,
+    admin: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_get_provider_detail(user_id, db)
+
+
+@router.get("/seekers/{user_id}/detail", response_model=AdminSeekerDetailResponse)
+async def get_seeker_detail(
+    user_id: str,
+    admin: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_get_seeker_detail(user_id, db)
 
 
 @router.put("/providers/{user_id}", response_model=AdminUserOut)

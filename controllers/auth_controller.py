@@ -2,7 +2,7 @@ from datetime import datetime
 import secrets
 import string
 import pyotp
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, or_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException, BackgroundTasks
 
@@ -11,9 +11,11 @@ from models.user import User
 from models.otp import OTPRecord
 from schemas.auth import (
     RegisterRequest,
+    RegisterResponse,
     VerifyOtpRequest,
     ResendOtpRequest,
     LoginRequest,
+    GoogleLoginRequest,
     UserOut,
     OnboardingRequest,
     UpdateSettingsRequest,
@@ -60,37 +62,72 @@ def _generate_temp_password(length: int = 12) -> str:
     return "".join(password_list)
 
 
+def _split_full_name(full_name: str) -> tuple[str, str]:
+    parts = [p for p in full_name.strip().split() if p]
+    if not parts:
+        return "", ""
+    if len(parts) == 1:
+        return parts[0], ""
+    return parts[0], " ".join(parts[1:])
+
+
 async def register(
     body: RegisterRequest,
     background_tasks: BackgroundTasks,
     db: AsyncSession,
-) -> LoginResponse:
-    existing = await db.execute(
-        select(User).where((User.email == body.email) | (User.phone == body.phone))
-    )
+    resume_file=None,
+    registration_ip: str | None = None,
+) -> RegisterResponse:
+    duplicate_filters = [User.email == body.email]
+    if body.phone:
+        duplicate_filters.append(User.phone == body.phone)
+    existing = await db.execute(select(User).where(or_(*duplicate_filters)))
     if existing.scalar_one_or_none():
         raise HTTPException(
             status_code=409, detail="An account with this email or phone already exists"
         )
 
-    secret = totp_service.generate_secret()
+    if body.role == "provider":
+        first_name = body.company_name or ""
+        last_name = ""
+        company_name = body.company_name
+        phone = None
+        experience = None
+        preferred_locations = None
+    else:
+        full_name = (body.full_name or f"{body.first_name or ''} {body.last_name or ''}").strip()
+        first_name, last_name = _split_full_name(full_name)
+        company_name = None
+        phone = body.phone
+        experience = body.work_status
+        preferred_locations = [body.current_city] if body.work_status == "fresher" and body.current_city else None
+
     user = User(
-        first_name=body.first_name,
-        last_name=body.last_name,
+        first_name=first_name,
+        last_name=last_name,
         email=body.email,
-        phone=body.phone,
+        phone=phone,
         role=body.role,
-        totp_secret=secret,
+        company_name=company_name,
+        experience=experience,
+        preferred_locations=preferred_locations,
+        registration_ip=registration_ip,
         is_verified=False,
         onboarding_complete=False,
         is_assessment_done=(body.role == "seeker"),
+        hashed_password=hash_password(body.password),
     )
-    if body.password:
-        user.hashed_password = hash_password(body.password)
 
     db.add(user)
     await db.commit()
     await db.refresh(user)
+
+    if resume_file and body.role == "seeker":
+        try:
+            from controllers.resumes_controller import upload_resume
+            await upload_resume(background_tasks, resume_file, user, db)
+        except Exception as e:
+            print(f"[REGISTER] Optional resume upload failed: {e}")
 
     if user.email:
         otp_code = generate_otp()
@@ -100,18 +137,10 @@ async def register(
         db.add(otp_record)
         await db.commit()
         background_tasks.add_task(send_otp_email, user.email, otp_code, user.first_name)
-        print(user.email)
-        print(otp_code)
-        print(user.first_name)
 
-    uri = totp_service.get_provisioning_uri(user.email or user.phone, secret)
-    qr_base64 = totp_service.generate_qr_base64(uri)
-
-    return LoginResponse(
-        message="Registration initiated. Please check your email for the OTP and scan the QR code to set up TOTP.",
-        requires_setup=True,
-        qr_code_base64=f"data:image/png;base64,{qr_base64}",
-        user=UserOut.model_validate(user),
+    return RegisterResponse(
+        message="Registration successful. Please check your email for the verification code.",
+        requires_otp=True,
     )
 
 
@@ -246,12 +275,28 @@ async def login(
     referer: str | None = None,
 ) -> LoginResponse:
     try:
-        result = await db.execute(select(User).where(User.email == body.email))
+        identifier = (body.email or "").strip()
+        result = await db.execute(select(User).where(func.lower(User.email) == identifier.lower()))
         user = result.scalar_one_or_none()
+
+        # Fallback: training-portal teachers are issued a login username that may
+        # differ from their account email. Resolve it to the linked user account.
+        if not user:
+            from models.training_portal_teacher import TrainingPortalTeacher
+
+            teacher_res = await db.execute(
+                select(TrainingPortalTeacher).where(
+                    func.lower(TrainingPortalTeacher.login_username) == identifier.lower()
+                )
+            )
+            teacher = teacher_res.scalar_one_or_none()
+            if teacher and teacher.user_id:
+                user_res = await db.execute(select(User).where(User.id == teacher.user_id))
+                user = user_res.scalar_one_or_none()
 
         if not user:
             raise HTTPException(
-                status_code=400, detail={"email": "No account found with this email"}
+                status_code=400, detail={"email": "No account found with this email or username"}
             )
 
         if not user.hashed_password:
@@ -260,8 +305,13 @@ async def login(
                 detail={"general": "Password not set. Contact your administrator."},
             )
         if getattr(user, "is_super_admin", False):
-            expected_referer = f"{settings.FRONTEND_URL.rstrip('/')}/super-admin/login"
-            if not referer or not referer.startswith(expected_referer):
+            expected_fe_referer = f"{settings.FRONTEND_URL.rstrip('/')}/super-admin/login"
+            expected_tr_referer = f"{settings.TRAINING_URL.rstrip('/')}/login"
+            is_valid_referer = False
+            if referer:
+                if referer.startswith(expected_fe_referer) or referer.startswith(expected_tr_referer) or referer.startswith(settings.TRAINING_URL.rstrip('/')):
+                    is_valid_referer = True
+            if not is_valid_referer:
                 raise HTTPException(
                     status_code=400,
                     detail={"general": "Invalid login source for superadmin."},
@@ -536,4 +586,86 @@ async def refresh_token(body: RefreshTokenRequest, db: AsyncSession) -> RefreshT
     return RefreshTokenResponse(
         access_token=new_access_token,
         refresh_token=new_refresh_token
+    )
+
+
+async def google_login(body: GoogleLoginRequest, db: AsyncSession) -> LoginResponse:
+    """Verify Google ID token and login or create a user."""
+    client_id = settings.google_sign_in_client_id
+    if not client_id:
+        raise HTTPException(
+            status_code=503,
+            detail="Google Sign-In is not configured on the server.",
+        )
+
+    try:
+        from google.oauth2 import id_token
+        from google.auth.transport import requests as google_requests
+
+        idinfo = id_token.verify_oauth2_token(
+            body.credential,
+            google_requests.Request(),
+            client_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid Google credential") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Could not verify Google credential") from exc
+
+    if idinfo.get("iss") not in {"accounts.google.com", "https://accounts.google.com"}:
+        raise HTTPException(status_code=400, detail="Invalid Google token issuer")
+
+    email = (idinfo.get("email") or "").strip().lower()
+    if not email or not idinfo.get("email_verified", False):
+        raise HTTPException(status_code=400, detail="Google account email is not verified")
+
+    user = await db.scalar(select(User).where(func.lower(User.email) == email))
+    if not user:
+        from models.user import UserRole
+
+        given = (idinfo.get("given_name") or "").strip()
+        family = (idinfo.get("family_name") or "").strip()
+        full_name = (idinfo.get("name") or "").strip()
+        if not given and full_name:
+            parts = full_name.split(None, 1)
+            given = parts[0]
+            family = parts[1] if len(parts) > 1 else ""
+
+        role = UserRole.provider if body.role == "provider" else UserRole.seeker
+        user = User(
+            email=email,
+            first_name=given or None,
+            last_name=family or None,
+            profile_pic_url=(idinfo.get("picture") or None),
+            role=role,
+            is_verified=True,
+            is_first_login=True,
+            hashed_password=None,
+        )
+        if role == UserRole.provider:
+            user.company_name = (given or email.split("@")[0]).strip() or "My Company"
+        db.add(user)
+        await db.commit()
+        await db.refresh(user)
+    else:
+        # Keep profile picture fresh; mark verified since Google confirmed email
+        if idinfo.get("picture") and not user.profile_pic_url:
+            user.profile_pic_url = idinfo["picture"]
+        if not user.is_verified:
+            user.is_verified = True
+        await db.commit()
+        await db.refresh(user)
+
+    if getattr(user, "is_super_admin", False):
+        raise HTTPException(
+            status_code=400,
+            detail="Please use the super admin login page for this account.",
+        )
+
+    token = create_access_token({"sub": user.id})
+    refresh_token = create_refresh_token({"sub": user.id})
+    return LoginResponse(
+        access_token=token,
+        refresh_token=refresh_token,
+        user=UserOut.model_validate(user),
     )

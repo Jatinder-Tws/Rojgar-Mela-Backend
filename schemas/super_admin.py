@@ -90,7 +90,7 @@ class AdminUserOut(BaseModel):
     last_name: Optional[str] = None
     email: Optional[str] = None
     profile_pic_url: Optional[str] = None
-    phone: str
+    phone: Optional[str] = None
     role: str
     has_password: bool = False
     is_verified: bool
@@ -107,6 +107,7 @@ class AdminUserOut(BaseModel):
     profile_completion_percentage: Optional[int] = None
     welcome_email_status: Optional[str] = None
     welcome_email_error: Optional[str] = None
+    has_resume: Optional[bool] = None
     created_at: datetime
     registered_job_fairs: Optional[List[str]] = None
 
@@ -367,10 +368,14 @@ class AdminApplicationListItem(BaseModel):
     id: str
     candidate_name: str
     candidate_email: Optional[str] = None
+    candidate_phone: Optional[str] = None
+    seeker_id: Optional[str] = None
+    job_id: str
     job_title: str
     company: str
     status: str
     applied_at: datetime
+    updated_at: datetime
 
 
 class AdminInterviewListItem(BaseModel):
@@ -431,11 +436,15 @@ class AdminAssessmentListResponse(BaseModel):
 
 class DashboardAnalyticsResponse(BaseModel):
     generated_at: str
+    reporting_period: dict = {}
     today_kpis: List[DashboardKpiItem]
     summary_columns: dict
     recruitment_funnel: List[DashboardFunnelStage]
+    funnel_velocity: List[dict] = []
+    funnel_highlight: Optional[str] = None
     ai_matching: DashboardAiMatching
     candidate_growth: dict
+    provider_growth: dict = {}
     experience_breakdown: List[DashboardExperienceLevel]
     industry_distribution: List[DashboardIndustryDist]
     top_skills: List[DashboardSkill]

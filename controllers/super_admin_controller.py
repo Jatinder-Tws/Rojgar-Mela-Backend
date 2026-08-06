@@ -14,12 +14,13 @@ import os
 import uuid as uuid_lib
 
 from fastapi import UploadFile
-from models.application import Application
+from models.application import Application, ApplicationStatus
 from models.assessment import AssessmentResult, AssessmentSession
 from models.interview import Interview
 from models.job import JobPosting
 from models.match import Match
 from models.portfolio import Portfolio
+from models.resume import Resume
 from models.user import CompanyType, JobType, User, UserRole
 from schemas.super_admin import (
     AdminApplicationListItem, AdminApplicationListResponse, AdminAssessmentListItem,
@@ -30,6 +31,11 @@ from schemas.super_admin import (
     DashboardAnalyticsResponse, DetailedPlatformAnalytics, ImportJobStatus, PlatformStatsResponse,
     SuperAdminChangePasswordRequest, SuperAdminLoginRequest, SuperAdminLoginResponse,
     SuperAdminProfileOut, SuperAdminProfileUpdate,
+)
+from schemas.super_admin_detail import (
+    AdminProviderDetailResponse, AdminSeekerDetailResponse,
+    ProviderJobItem, SeekerApplicationItem,
+    ProviderInterviewItem, SeekerInterviewItem,
 )
 from services.auth_service import create_access_token, hash_password, verify_password
 from services.import_job_store import create_job as _create_job, get_job as _get_job
@@ -52,7 +58,13 @@ def _build_user_search_filter(search: str, include_company: bool = False):
     return or_(*predicates)
 
 
-def _user_to_admin_out(user: User, role_label: str, profile_completion_percentage: Optional[int] = None, registered_job_fairs: Optional[List[str]] = None) -> AdminUserOut:
+def _user_to_admin_out(
+    user: User,
+    role_label: str,
+    profile_completion_percentage: Optional[int] = None,
+    registered_job_fairs: Optional[List[str]] = None,
+    has_resume: Optional[bool] = None,
+) -> AdminUserOut:
     job_type = user.job_type.value if user.job_type and hasattr(user.job_type, "value") else user.job_type
     company_type = user.company_type.value if user.company_type and hasattr(user.company_type, "value") else user.company_type
     return AdminUserOut(
@@ -64,8 +76,26 @@ def _user_to_admin_out(user: User, role_label: str, profile_completion_percentag
         company_name=user.company_name, company_type=company_type, company_location=user.company_location,
         company_size=user.company_size, profile_completion_percentage=profile_completion_percentage,
         welcome_email_status=user.welcome_email_status, welcome_email_error=user.welcome_email_error,
-        created_at=user.created_at, registered_job_fairs=registered_job_fairs,
+        has_resume=has_resume, created_at=user.created_at, registered_job_fairs=registered_job_fairs,
     )
+
+
+async def _seeker_has_resume_ids(db: AsyncSession, user_ids: List[str]) -> set:
+    """Same rule as job-fair seeker_resume_url: Resume row exists for the seeker."""
+    if not user_ids:
+        return set()
+    result = await db.execute(
+        select(Resume.user_id).where(Resume.user_id.in_(user_ids)).distinct()
+    )
+    return {row[0] for row in result.all()}
+
+
+async def _seeker_has_resume(db: AsyncSession, user_id: str) -> bool:
+    """Same rule as job-fair seeker_resume_url: Resume row exists for the seeker."""
+    result = await db.execute(
+        select(Resume.id).where(Resume.user_id == user_id).limit(1)
+    )
+    return result.scalar_one_or_none() is not None
 
 
 async def _check_duplicate(db: AsyncSession, email: str, phone: str, exclude_id: Optional[str] = None):
@@ -199,7 +229,12 @@ async def upload_super_admin_profile_pic(file: UploadFile, admin: User, db: Asyn
 
 
 async def list_platform_jobs(
-    db: AsyncSession, page: int, page_size: int, search: Optional[str] = None, industry: Optional[str] = None
+    db: AsyncSession,
+    page: int,
+    page_size: int,
+    search: Optional[str] = None,
+    industry: Optional[str] = None,
+    is_active: Optional[bool] = None,
 ) -> AdminJobListResponse:
     base = (
         select(JobPosting, User)
@@ -213,6 +248,8 @@ async def list_platform_jobs(
         filters.append(or_(JobPosting.title.ilike(term), User.company_name.ilike(term)))
     if industry:
         filters.append(JobPosting.industry.ilike(f"%{industry.strip()}%"))
+    if is_active is not None:
+        filters.append(JobPosting.is_active.is_(is_active))
 
     if filters:
         base = base.where(and_(*filters))
@@ -292,11 +329,16 @@ async def list_platform_applications(
                 Application.candidate_name.ilike(term),
                 Application.candidate_email.ilike(term),
                 JobPosting.title.ilike(term),
+                Provider.company_name.ilike(term),
+                Seeker.first_name.ilike(term),
+                Seeker.last_name.ilike(term),
+                func.concat(Seeker.first_name, ' ', Seeker.last_name).ilike(term),
+                Seeker.email.ilike(term),
             )
         )
     if status and status != "all":
         base = base.where(Application.status == status)
-    count_q = select(func.count(Application.id)).select_from(Application).join(JobPosting, Application.job_id == JobPosting.id)
+    count_q = select(func.count(Application.id)).select_from(Application).join(JobPosting, Application.job_id == JobPosting.id).join(Provider, JobPosting.provider_id == Provider.id).outerjoin(Seeker, Application.seeker_id == Seeker.id)
     if search:
         term = f"%{search.strip()}%"
         count_q = count_q.where(
@@ -304,6 +346,11 @@ async def list_platform_applications(
                 Application.candidate_name.ilike(term),
                 Application.candidate_email.ilike(term),
                 JobPosting.title.ilike(term),
+                Provider.company_name.ilike(term),
+                Seeker.first_name.ilike(term),
+                Seeker.last_name.ilike(term),
+                func.concat(Seeker.first_name, ' ', Seeker.last_name).ilike(term),
+                Seeker.email.ilike(term),
             )
         )
     if status and status != "all":
@@ -319,13 +366,66 @@ async def list_platform_applications(
                 id=str(app.id),
                 candidate_name=candidate,
                 candidate_email=app.candidate_email or (seeker.email if seeker else None),
+                candidate_phone=app.candidate_phone or (seeker.phone if seeker else None),
+                seeker_id=str(app.seeker_id) if app.seeker_id else None,
+                job_id=str(job.id),
                 job_title=job.title,
                 company=provider.company_name or _user_display_name(provider, "Provider"),
                 status=str(app.status.value if hasattr(app.status, "value") else app.status),
                 applied_at=app.applied_at,
+                updated_at=app.updated_at,
             )
         )
     return AdminApplicationListResponse(items=items, total=int(total), page=page, page_size=page_size)
+
+
+async def update_platform_application_status(
+    db: AsyncSession,
+    app_id: str,
+    status: str,
+    rejection_reason: Optional[str] = None,
+) -> AdminApplicationListItem:
+    result = await db.execute(select(Application).where(Application.id == app_id))
+    app = result.scalar_one_or_none()
+    if not app:
+        raise HTTPException(status_code=404, detail="Application not found")
+
+    allowed = {s.value for s in ApplicationStatus}
+    if status not in allowed:
+        raise HTTPException(status_code=400, detail=f"Invalid status. Allowed: {', '.join(sorted(allowed))}")
+
+    app.status = ApplicationStatus(status)
+    if status == "rejected":
+        app.rejection_reason = rejection_reason or "Not specified"
+    elif status != "rejected":
+        app.rejection_reason = None
+
+    await db.commit()
+    await db.refresh(app)
+
+    job_result = await db.execute(select(JobPosting).where(JobPosting.id == app.job_id))
+    job = job_result.scalar_one_or_none()
+    provider = None
+    if job:
+        provider_result = await db.execute(select(User).where(User.id == job.provider_id))
+        provider = provider_result.scalar_one_or_none()
+    seeker_result = await db.execute(select(User).where(User.id == app.seeker_id)) if app.seeker_id else None
+    seeker = seeker_result.scalar_one_or_none() if app.seeker_id else None
+    candidate = app.candidate_name or _user_display_name(seeker, "Candidate")
+
+    return AdminApplicationListItem(
+        id=str(app.id),
+        candidate_name=candidate,
+        candidate_email=app.candidate_email or (seeker.email if seeker else None),
+        candidate_phone=app.candidate_phone or (seeker.phone if seeker else None),
+        seeker_id=str(app.seeker_id) if app.seeker_id else None,
+        job_id=str(app.job_id),
+        job_title=job.title if job else "—",
+        company=provider.company_name or _user_display_name(provider, "Provider") if provider else "—",
+        status=str(app.status.value if hasattr(app.status, "value") else app.status),
+        applied_at=app.applied_at,
+        updated_at=app.updated_at,
+    )
 
 
 async def list_platform_interviews(
@@ -483,13 +583,23 @@ async def list_seekers(
         select_q.order_by(User.created_at.desc(), User.id.desc())
         .offset((page - 1) * page_size).limit(page_size)
     )
+    rows = result.all()
+    has_resume_ids = await _seeker_has_resume_ids(db, [user.id for user, _ in rows])
     items = []
-    for user, portfolio in result.all():
+    for user, portfolio in rows:
         pct = 0
         if portfolio:
             pct, _, _ = calculate_completion(portfolio, user)
         jf_titles = await _seeker_job_fair_names(db, user.id)
-        items.append(_user_to_admin_out(user, "seeker", profile_completion_percentage=pct, registered_job_fairs=jf_titles))
+        items.append(
+            _user_to_admin_out(
+                user,
+                "seeker",
+                profile_completion_percentage=pct,
+                registered_job_fairs=jf_titles,
+                has_resume=user.id in has_resume_ids,
+            )
+        )
     return AdminUserListResponse(items=items, total=total or 0, page=page, page_size=page_size)
 
 
@@ -518,7 +628,130 @@ async def get_seeker(user_id: str, db: AsyncSession) -> AdminUserOut:
     if portfolio:
         pct, _, _ = calculate_completion(portfolio, user)
     jf_titles = await _seeker_job_fair_names(db, user.id)
-    return _user_to_admin_out(user, "seeker", profile_completion_percentage=pct, registered_job_fairs=jf_titles)
+    has_resume = await _seeker_has_resume(db, user.id)
+    return _user_to_admin_out(
+        user,
+        "seeker",
+        profile_completion_percentage=pct,
+        registered_job_fairs=jf_titles,
+        has_resume=has_resume,
+    )
+
+
+async def get_seeker_detail(user_id: str, db: AsyncSession) -> AdminSeekerDetailResponse:
+    """Full seeker detail including applications, interviews, and extended personal info."""
+    user = await _get_role_user(db, user_id, UserRole.seeker)
+
+    # Profile completion
+    portfolio = (await db.execute(select(Portfolio).where(Portfolio.user_id == user.id))).scalar_one_or_none()
+    pct = 0
+    if portfolio:
+        pct, _, _ = calculate_completion(portfolio, user)
+
+    # Job fair names
+    jf_titles = await _seeker_job_fair_names(db, user.id)
+    has_resume = await _seeker_has_resume(db, user.id)
+
+    # Fetch all applications for this seeker
+    apps_q = (
+        select(Application, JobPosting, User)
+        .join(JobPosting, Application.job_id == JobPosting.id)
+        .join(User, JobPosting.provider_id == User.id)
+        .where(Application.seeker_id == user.id)
+        .order_by(Application.applied_at.desc())
+    )
+    rows = (await db.execute(apps_q)).all()
+
+    app_items = []
+    shortlisted_count = 0
+    interviewing_count = 0
+    selected_count = 0
+    for app, job, provider in rows:
+        status_str = str(app.status.value if hasattr(app.status, "value") else app.status)
+        if status_str == "shortlisted":
+            shortlisted_count += 1
+        elif status_str == "interviewing":
+            interviewing_count += 1
+        elif status_str == "selected":
+            selected_count += 1
+        app_items.append(SeekerApplicationItem(
+            id=str(app.id),
+            job_title=job.title,
+            company_name=provider.company_name,
+            company_location=job.location,
+            industry=job.industry,
+            status=status_str,
+            applied_at=app.applied_at,
+            updated_at=app.updated_at,
+        ))
+
+    # Fetch interviews for this seeker
+    interviews_q = (
+        select(Interview, JobPosting, User)
+        .join(JobPosting, Interview.job_id == JobPosting.id)
+        .join(User, Interview.provider_id == User.id)
+        .where(Interview.seeker_id == user.id)
+        .order_by(Interview.scheduled_at.desc())
+    )
+    interview_rows = (await db.execute(interviews_q)).all()
+    interview_items = [
+        SeekerInterviewItem(
+            id=str(iv.id),
+            title=iv.title,
+            job_title=job.title,
+            provider_name=provider.company_name or _user_display_name(provider, "Provider"),
+            interview_type=iv.interview_type.value if iv.interview_type and hasattr(iv.interview_type, "value") else None,
+            status=str(iv.status.value if hasattr(iv.status, "value") else iv.status),
+            scheduled_at=iv.scheduled_at,
+            meeting_link=iv.meeting_link,
+            location=iv.location,
+            interviewer_name=iv.interviewer_name,
+        )
+        for iv, job, provider in interview_rows
+    ]
+
+    job_type = user.job_type.value if user.job_type and hasattr(user.job_type, "value") else user.job_type
+    company_type = user.company_type.value if user.company_type and hasattr(user.company_type, "value") else user.company_type
+    return AdminSeekerDetailResponse(
+        id=user.id,
+        first_name=user.first_name,
+        last_name=user.last_name,
+        email=user.email,
+        phone=user.phone,
+        profile_pic_url=user.profile_pic_url,
+        has_password=bool(user.hashed_password),
+        is_verified=user.is_verified,
+        onboarding_complete=user.onboarding_complete,
+        is_assessment_done=user.is_assessment_done or False,
+        is_first_login=user.is_first_login,
+        auto_apply_enabled=user.auto_apply_enabled or False,
+        welcome_email_status=user.welcome_email_status,
+        welcome_email_error=user.welcome_email_error,
+        industry=user.industry,
+        job_role=user.job_role,
+        job_type=job_type,
+        salary_range=user.salary_range,
+        experience=user.experience,
+        preferred_locations=user.preferred_locations,
+        profile_completion_percentage=pct,
+        has_resume=has_resume,
+        father_or_mother_name=user.father_or_mother_name,
+        gender=user.gender,
+        address=user.address,
+        highest_qualification=user.highest_qualification,
+        stream_specialization=user.stream_specialization,
+        college_institute_name=user.college_institute_name,
+        preferred_job_sector=user.preferred_job_sector,
+        registered_job_fairs=jf_titles,
+        created_at=user.created_at,
+        updated_at=user.updated_at,
+        applications=app_items,
+        total_applications=len(app_items),
+        shortlisted_count=shortlisted_count,
+        interviewing_count=interviewing_count,
+        selected_count=selected_count,
+        interviews=interview_items,
+    )
 
 
 async def update_seeker(user_id: str, body: AdminSeekerUpdate, db: AsyncSession) -> AdminUserOut:
@@ -608,6 +841,108 @@ async def get_provider(user_id: str, db: AsyncSession) -> AdminUserOut:
     return _user_to_admin_out(user, "provider")
 
 
+async def get_provider_detail(user_id: str, db: AsyncSession) -> AdminProviderDetailResponse:
+    """Full provider detail including job postings and interviews."""
+    user = await _get_role_user(db, user_id, UserRole.provider)
+
+    # Fetch all job postings for this provider with application counts
+    jobs_q = (
+        select(
+            JobPosting,
+            func.count(Application.id).label("app_count")
+        )
+        .outerjoin(Application, Application.job_id == JobPosting.id)
+        .where(JobPosting.provider_id == user.id)
+        .group_by(JobPosting.id)
+        .order_by(JobPosting.created_at.desc())
+    )
+    rows = (await db.execute(jobs_q)).all()
+
+    job_items = []
+    active_count = 0
+    total_apps_received = 0
+    for job, app_count in rows:
+        if job.is_active:
+            active_count += 1
+        total_apps_received += int(app_count)
+        job_type = job.job_type.value if job.job_type and hasattr(job.job_type, "value") else job.job_type
+        required_skills = job.required_skills if isinstance(job.required_skills, list) else None
+        perks = job.perks if isinstance(job.perks, list) else None
+        job_items.append(ProviderJobItem(
+            id=str(job.id),
+            title=job.title,
+            industry=job.industry,
+            location=job.location,
+            job_type=job_type,
+            salary_range=job.salary_range,
+            experience_required=job.experience_required,
+            description=job.description,
+            required_skills=required_skills,
+            is_active=bool(job.is_active),
+            posted_by_name=job.posted_by_name,
+            employment_type=job.employment_type,
+            shift=job.shift,
+            perks=perks,
+            application_count=int(app_count),
+            created_at=job.created_at,
+            updated_at=job.updated_at,
+        ))
+
+    # Fetch interviews for this provider
+    interviews_q = (
+        select(Interview, JobPosting, User)
+        .join(JobPosting, Interview.job_id == JobPosting.id)
+        .join(User, Interview.seeker_id == User.id)
+        .where(Interview.provider_id == user.id)
+        .order_by(Interview.scheduled_at.desc())
+    )
+    interview_rows = (await db.execute(interviews_q)).all()
+    interview_items = [
+        ProviderInterviewItem(
+            id=str(iv.id),
+            title=iv.title,
+            seeker_name=_user_display_name(seeker),
+            job_title=job.title,
+            interview_type=iv.interview_type.value if iv.interview_type and hasattr(iv.interview_type, "value") else None,
+            status=str(iv.status.value if hasattr(iv.status, "value") else iv.status),
+            scheduled_at=iv.scheduled_at,
+            meeting_link=iv.meeting_link,
+        )
+        for iv, job, seeker in interview_rows
+    ]
+
+    company_type = user.company_type.value if user.company_type and hasattr(user.company_type, "value") else user.company_type
+    return AdminProviderDetailResponse(
+        id=user.id,
+        first_name=user.first_name,
+        last_name=user.last_name,
+        email=user.email,
+        phone=user.phone,
+        profile_pic_url=user.profile_pic_url,
+        has_password=bool(user.hashed_password),
+        is_verified=user.is_verified,
+        onboarding_complete=user.onboarding_complete,
+        is_first_login=user.is_first_login,
+        welcome_email_status=user.welcome_email_status,
+        welcome_email_error=user.welcome_email_error,
+        company_name=user.company_name,
+        company_type=company_type,
+        company_location=user.company_location,
+        company_address=user.company_address,
+        company_size=user.company_size,
+        gender=user.gender,
+        job_roles_offering=user.job_roles_offering,
+        specific_requirements=user.specific_requirements,
+        created_at=user.created_at,
+        updated_at=user.updated_at,
+        job_postings=job_items,
+        total_jobs=len(job_items),
+        active_jobs=active_count,
+        total_applications_received=total_apps_received,
+        interviews=interview_items,
+    )
+
+
 async def update_provider(user_id: str, body: AdminProviderUpdate, db: AsyncSession) -> AdminUserOut:
     user = await _get_role_user(db, user_id, UserRole.provider)
     await _apply_user_update(db, user, body)
@@ -642,9 +977,11 @@ async def bulk_import_providers(content: bytes, filename: str) -> BulkImportJobS
 
 
 async def ensure_super_admin_user():
-    """Create default super admin from env if missing."""
+    """Create default super admin from env if missing, and default teacher/student for quick testing."""
     from database import AsyncSessionLocal
+    from models.user import UserRole
     async with AsyncSessionLocal() as db:
+        # 1. Super Admin
         email = settings.SUPER_ADMIN_EMAIL.strip().lower()
         result = await db.execute(select(User).where(User.email == email))
         admin = result.scalar_one_or_none()

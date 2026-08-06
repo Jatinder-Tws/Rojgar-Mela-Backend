@@ -1,7 +1,14 @@
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
+
+
+def _utc_iso(dt: datetime) -> str:
+    """Always emit UTC ISO string with Z suffix so browsers parse correctly."""
+    if dt is None:
+        return ''
+    return dt.isoformat() + 'Z'
 
 
 class TicketCreate(BaseModel):
@@ -25,6 +32,10 @@ class TicketMessageOut(BaseModel):
     is_bot_reply: bool = False
     created_at: datetime
 
+    @field_serializer('created_at')
+    def serialize_created_at(self, value: datetime) -> str:
+        return _utc_iso(value)
+
     class Config:
         from_attributes = True
 
@@ -45,6 +56,14 @@ class TicketOut(BaseModel):
     user_name: Optional[str] = None
     user_email: Optional[str] = None
     user_role: Optional[str] = None
+
+    @field_serializer('created_at', 'updated_at')
+    def serialize_datetimes(self, value: datetime) -> str:
+        return _utc_iso(value)
+
+    @field_serializer('resolved_at', 'last_message_at')
+    def serialize_optional_datetimes(self, value: Optional[datetime]) -> Optional[str]:
+        return _utc_iso(value) if value else None
 
     class Config:
         from_attributes = True
@@ -81,6 +100,10 @@ class FeedbackOut(BaseModel):
     comment: str
     page_context: Optional[str] = None
     created_at: datetime
+
+    @field_serializer('created_at')
+    def serialize_created_at(self, value: datetime) -> str:
+        return _utc_iso(value)
 
     class Config:
         from_attributes = True

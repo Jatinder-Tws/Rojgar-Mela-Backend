@@ -1,6 +1,7 @@
 from models.user import User, UserRole, JobType, CompanyType
 from models.resume import Resume
 from models.job import JobPosting
+from models.saved_job import SavedJob
 from models.match import Match
 from models.application import Application, ApplicationStatus
 from models.notification import Notification, NotificationType
@@ -26,11 +27,26 @@ from models.platform_feedback import PlatformFeedback, FeedbackCategory
 from models.contact_inquiry import ContactInquiry
 from models.company_internship import CompanyInternship, CompanyInternshipApplication
 from models.training_course import TrainingCourse, TrainingModule, TrainingModuleTopic, TrainingCourseApplication
+from models.training_portal_course import TrainingPortalCourse
+from models.training_portal_category import TrainingPortalCourseCategory
+from models.training_portal_teacher import TrainingPortalTeacher
+from models.training_portal_internship import TrainingPortalInternship
+from models.training_portal_batch import TrainingPortalBatch
+from models.training_portal_enrollment import TrainingPortalEnrollment
+from models.training_portal_class_session import TrainingPortalClassSession
+from models.training_portal_payment import TrainingPortalPaymentSettings, TrainingPortalPaymentOrder
+from models.training_portal_candidate_notification import TrainingPortalCandidateNotification
+from models.training_portal_transaction import TrainingPortalTransaction
+from models.training_portal_refund_request import TrainingPortalRefundRequest
+from models.training_portal_attendance import TrainingPortalAttendanceRecord
+from models.training_portal_leave_request import TrainingPortalLeaveRequest
+from models.training_portal_behavior_report import TrainingPortalBehaviorReport
 
 __all__ = [
     "User", "UserRole", "JobType", "CompanyType", "ExternalCandidate", "ExternalCandidateMatch",
     "Resume",
     "JobPosting",
+    "SavedJob",
     "Match",
     "Application", "ApplicationStatus",
     "Notification", "NotificationType",
@@ -53,5 +69,20 @@ __all__ = [
     "ContactInquiry",
     "CompanyInternship", "CompanyInternshipApplication",
     "TrainingCourse", "TrainingModule", "TrainingModuleTopic", "TrainingCourseApplication",
+    "TrainingPortalCourse",
+    "TrainingPortalCourseCategory",
+    "TrainingPortalTeacher",
+    "TrainingPortalInternship",
+    "TrainingPortalBatch",
+    "TrainingPortalEnrollment",
+    "TrainingPortalClassSession",
+    "TrainingPortalPaymentSettings",
+    "TrainingPortalPaymentOrder",
+    "TrainingPortalCandidateNotification",
+    "TrainingPortalTransaction",
+    "TrainingPortalRefundRequest",
+    "TrainingPortalAttendanceRecord",
+    "TrainingPortalLeaveRequest",
+    "TrainingPortalBehaviorReport",
 ]
 

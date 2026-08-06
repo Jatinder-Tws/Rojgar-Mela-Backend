@@ -18,11 +18,18 @@ celery_app.conf.update(
     task_serializer="json",
     accept_content=["json"],
     result_serializer="json",
-    timezone="UTC",
+    timezone="Asia/Kolkata",
     enable_utc=True,
     task_track_started=True,
     task_acks_late=True,
     worker_prefetch_multiplier=1,
     # Retry on connection errors
     broker_connection_retry_on_startup=True,
+    beat_schedule={
+        # Auto-end live classes + 15-min end/start reminders even when nobody is polling the UI.
+        "process-training-class-lifecycles": {
+            "task": "process_training_class_lifecycles",
+            "schedule": 60.0,
+        },
+    },
 )

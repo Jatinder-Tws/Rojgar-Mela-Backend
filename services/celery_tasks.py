@@ -17,8 +17,22 @@ logger = logging.getLogger(__name__)
 
 # ── Helper: run an async function from a sync Celery task ────────────────
 def _run_async(coro):
-    """Bridge sync Celery task → async matching functions."""
-    return asyncio.run(coro)
+    """Bridge sync Celery task → async code.
+
+    ``asyncio.run()`` creates a fresh event loop per call and closes it
+    afterward. The process-global async SQLAlchemy engine (asyncpg) may still
+    hold pooled connections bound to the *previous* loop; reusing them on the
+    next task raises ``RuntimeError: ... attached to a different loop``.
+    Dispose the engine after each run so the next task opens clean connections.
+    """
+    async def _wrapped():
+        try:
+            return await coro
+        finally:
+            from database import engine
+            await engine.dispose()
+
+    return asyncio.run(_wrapped())
 
 
 # ── Individual matching tasks (can be called independently) ─────────────
@@ -161,8 +175,8 @@ def send_inquiry_reply_email(to_email: str, subject: str, message_body: str):
         <html>
         <body style="font-family: sans-serif; line-height: 1.5; color: #333; margin: 0; padding: 20px; background-color: #f8fafc;">
             <div style="max-width: 600px; margin: 0 auto; padding: 30px; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
-                <h2 style="color: #4f46e5; border-bottom: 2px solid #e2e8f0; padding-bottom: 15px; margin-top: 0;">Support Inquiry Response</h2>
-                <div style="font-size: 15px; color: #1e293b; white-space: pre-wrap; line-height: 1.6; margin-top: 20px; margin-bottom: 20px;">
+                <h2 style="color: #4f46e5; border-bottom: 2px solid #e2e8f0; padding-bottom: 13px; margin-top: 0;">Support Inquiry Response</h2>
+                <div style="font-size: 13px; color: #1e293b; white-space: pre-wrap; line-height: 1.6; margin-top: 20px; margin-bottom: 20px;">
 {message_body}
                 </div>
                 <hr style="border: 0; border-top: 1px solid #e2e8f0; margin-top: 30px; margin-bottom: 20px;">
@@ -199,9 +213,14 @@ def improve_resume_task(job_title: str, job_description: str, technologies: str,
             if not resume:
                 raise ValueError("Resume not found")
 
+            resume_text = (resume.parsed_text or '').strip()
+            if not resume_text:
+                import json
+                resume_text = json.dumps(resume.parsed_json or {}, ensure_ascii=False)
+
             ai_result = await analyze_resume_multi(
                 data={"job_title": job_title, "job_description": job_description, "technologies": tech_list},
-                resume_text=resume.parsed_json,
+                resume_text=resume_text,
             )
             return ai_result
 
@@ -210,5 +229,31 @@ def improve_resume_task(job_title: str, job_description: str, technologies: str,
     except Exception as exc:
         logger.exception(f"[CELERY] Resume improvement failed for user {user_id}: {exc}")
         raise celery_app.retry(exc=exc)
+
+
+@celery_app.task(name="process_training_class_lifecycles")
+def process_training_class_lifecycles():
+    """Periodic: 15-min end reminders + auto-end live classes at scheduled end_time."""
+    from database import AsyncSessionLocal
+    from services.training_portal_class_lifecycle import process_all_class_lifecycles
+
+    async def _run():
+        async with AsyncSessionLocal() as db:
+            try:
+                stats = await process_all_class_lifecycles(db)
+                await db.commit()
+                return stats
+            except Exception:
+                await db.rollback()
+                raise
+
+    try:
+        stats = _run_async(_run())
+        if stats and (stats.get("auto_ended") or stats.get("end_reminders") or stats.get("start_reminders")):
+            logger.info("[CELERY] Class lifecycle sweep: %s", stats)
+        return stats
+    except Exception as exc:
+        logger.exception("[CELERY] Class lifecycle sweep failed: %s", exc)
+        raise
 
 

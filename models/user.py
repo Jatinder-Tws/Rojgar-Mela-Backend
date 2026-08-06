@@ -19,6 +19,7 @@ class UserRole(str, enum.Enum):
     seeker = "seeker"
     provider = "provider"
     superadmin = "superadmin"
+    teacher = "teacher"
 
 
 class JobType(str, enum.Enum):
@@ -43,7 +44,7 @@ class User(Base):
     first_name = Column(String(50), nullable=True)
     last_name = Column(String(50), nullable=True)
     email = Column(String(255), unique=True, nullable=True, index=True)
-    phone = Column(String(15), nullable=False)
+    phone = Column(String(15), nullable=True)
     hashed_password = Column(String(255), nullable=True)
     profile_pic_url = Column(Text, nullable=True)
 
@@ -92,6 +93,9 @@ class User(Base):
     # Bulk import welcome email tracking (seekers)
     welcome_email_status = Column(String(20), nullable=True)  # pending | sent | failed
     welcome_email_error = Column(Text, nullable=True)
+
+    # Registration audit
+    registration_ip = Column(String(45), nullable=True)
 
     # Profile embedding for similarity (1536 dims = text-embedding-3-small)
     if VECTOR_AVAILABLE:

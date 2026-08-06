@@ -22,7 +22,6 @@ from schemas.email_admin import (
     CampaignDeliveryStats,
     CampaignRecipientListResponse,
     CampaignRecipientOut,
-    ResendFailedResponse,
     ResendRecipientResponse,
     EmailCampaignCreate,
     EmailCampaignListResponse,
@@ -41,11 +40,12 @@ from services.auth_service import require_super_admin
 from services.email_campaign_job_store import get_job
 from services.email_campaign_service import (
     count_audience,
+    get_audience_sample,
     get_audience_users,
     get_picker_user_ids,
     list_picker_users,
-    resend_all_failed,
     resend_to_recipient,
+    run_campaign_resend_failed_job,
     run_campaign_send_job,
     start_campaign_job,
 )
@@ -310,8 +310,12 @@ async def create_email_campaign(
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
 
-    audience_filter = body.audience_filter.model_dump() if body.audience_filter else None
+    audience_filter = body.audience_filter.model_dump(exclude_none=True) if body.audience_filter else {}
+    if not audience_filter.get("audience_types"):
+        audience_filter["audience_types"] = [body.audience_type]
     count = await count_audience(db, body.audience_type, audience_filter)
+    if count == 0:
+        raise HTTPException(status_code=400, detail="Audience has no recipients")
 
     campaign = EmailCampaign(
         name=body.name,
@@ -332,18 +336,9 @@ async def estimate_audience(
     db: AsyncSession = Depends(get_db),
     _admin: User = Depends(require_super_admin),
 ):
-    audience_filter = body.audience_filter.model_dump() if body.audience_filter else None
+    audience_filter = body.audience_filter.model_dump(exclude_none=True) if body.audience_filter else None
     count = await count_audience(db, body.audience_type, audience_filter)
-    users, _ = await get_audience_users(db, body.audience_type, audience_filter, page=1, page_size=5)
-    sample = [
-        {
-            "id": u.id,
-            "name": f"{u.first_name or ''} {u.last_name or ''}".strip(),
-            "email": u.email,
-            "role": u.role.value if u.role else "",
-        }
-        for u in users
-    ]
+    sample = await get_audience_sample(db, body.audience_type, audience_filter, limit=5)
     return AudienceEstimateResponse(count=count, sample_users=sample)
 
 
@@ -438,7 +433,14 @@ async def update_email_campaign(
     if body.audience_type is not None:
         campaign.audience_type = body.audience_type
     if body.audience_filter is not None:
-        campaign.audience_filter = body.audience_filter.model_dump()
+        audience_filter = body.audience_filter.model_dump(exclude_none=True)
+        audience_type_for_filter = (
+            body.audience_type
+            or (campaign.audience_type.value if hasattr(campaign.audience_type, "value") else campaign.audience_type)
+        )
+        if not audience_filter.get("audience_types"):
+            audience_filter["audience_types"] = [audience_type_for_filter]
+        campaign.audience_filter = audience_filter
 
     audience_type = campaign.audience_type.value if hasattr(campaign.audience_type, "value") else campaign.audience_type
     campaign.total_recipients = await count_audience(db, audience_type, campaign.audience_filter)
@@ -517,6 +519,15 @@ async def get_campaign_delivery_stats(
     if total == 0:
         total = campaign.total_recipients
 
+    # Reconcile the campaign's denormalized counters with the live recipient
+    # counts. These can drift (e.g. recipient statuses change without the
+    # campaign row being updated), which makes the campaign detail endpoint
+    # disagree with these delivery stats.
+    if total > 0 and (campaign.sent_count != sent or campaign.failed_count != failed):
+        campaign.sent_count = sent
+        campaign.failed_count = failed
+        await db.commit()
+
     return CampaignDeliveryStats(
         total=total,
         sent=sent,
@@ -538,7 +549,7 @@ def _recipient_to_out(r: EmailCampaignRecipient) -> CampaignRecipientOut:
     )
 
 
-@router.post("/email-campaigns/{campaign_id}/resend-failed", response_model=ResendFailedResponse)
+@router.post("/email-campaigns/{campaign_id}/resend-failed", response_model=CampaignJobStarted)
 async def resend_failed_campaign_emails(
     campaign_id: str,
     db: AsyncSession = Depends(get_db),
@@ -547,22 +558,31 @@ async def resend_failed_campaign_emails(
     campaign = (await db.execute(select(EmailCampaign).where(EmailCampaign.id == campaign_id))).scalar_one_or_none()
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
-    if campaign.status == CampaignStatus.running:
-        raise HTTPException(status_code=400, detail="Campaign is still sending")
+    if campaign.status in (CampaignStatus.running, CampaignStatus.queued):
+        raise HTTPException(status_code=400, detail="Campaign is already sending")
 
-    try:
-        total, sent, still_failed = await resend_all_failed(db, campaign_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    failed_count = (
+        await db.execute(
+            select(func.count()).where(
+                EmailCampaignRecipient.campaign_id == campaign_id,
+                EmailCampaignRecipient.status == RecipientStatus.failed,
+            )
+        )
+    ).scalar() or 0
 
-    if total == 0:
-        return ResendFailedResponse(total=0, sent=0, failed=0, message="No failed emails to resend")
+    if failed_count == 0:
+        raise HTTPException(status_code=400, detail="No failed emails to resend")
 
-    return ResendFailedResponse(
-        total=total,
-        sent=sent,
-        failed=still_failed,
-        message=f"Resent {sent} of {total} failed email(s)",
+    job_id = start_campaign_job(campaign_id)
+    campaign.status = CampaignStatus.queued
+    campaign.job_id = job_id
+    await db.flush()
+
+    asyncio.create_task(run_campaign_resend_failed_job(job_id, campaign_id))
+    return CampaignJobStarted(
+        job_id=job_id,
+        campaign_id=campaign_id,
+        message=f"Resending {failed_count} failed email(s)…",
     )
 
 
@@ -607,7 +627,11 @@ async def list_campaign_recipients(
 
     q = select(EmailCampaignRecipient).where(EmailCampaignRecipient.campaign_id == campaign_id)
     if status_filter:
-        q = q.where(EmailCampaignRecipient.status == status_filter)
+        try:
+            status_enum = RecipientStatus(status_filter)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid status filter") from exc
+        q = q.where(EmailCampaignRecipient.status == status_enum)
 
     count_q = select(func.count()).select_from(q.subquery())
     total = (await db.execute(count_q)).scalar() or 0
