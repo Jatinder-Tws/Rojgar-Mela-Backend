@@ -75,6 +75,11 @@ class Settings(BaseSettings):
     RAZORPAY_KEY_SECRET: str = ""
     RAZORPAY_WEBHOOK_SECRET: str = ""
 
+    # Google Sign-In (Login with Google). Use a Web client ID from Google Cloud Console
+    # with Authorized JavaScript origins for the frontend (e.g. http://localhost:5173).
+    # Falls back to GOOGLE_CALENDAR_CLIENT_ID when empty.
+    GOOGLE_OAUTH_CLIENT_ID: str = ""
+
     # Google Calendar integration (training class schedule sync)
     # Leave OAuth keys empty to disable per-user auto-sync; ICS email invites
     # still work as long as SMTP is configured.
@@ -85,6 +90,10 @@ class Settings(BaseSettings):
     GOOGLE_CALENDAR_REDIRECT_URI: str = "http://localhost:8000/google-calendar/callback"
     # Where users land after connecting (training portal). Empty = TRAINING_URL.
     GOOGLE_CALENDAR_POST_CONNECT_URL: str = ""
+
+    @property
+    def google_sign_in_client_id(self) -> str:
+        return (self.GOOGLE_OAUTH_CLIENT_ID or self.GOOGLE_CALENDAR_CLIENT_ID or "").strip()
 
     def google_calendar_oauth_configured(self) -> bool:
         return bool(self.GOOGLE_CALENDAR_CLIENT_ID and self.GOOGLE_CALENDAR_CLIENT_SECRET)
