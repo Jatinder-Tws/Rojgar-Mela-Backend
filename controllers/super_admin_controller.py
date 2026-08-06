@@ -20,6 +20,7 @@ from models.interview import Interview
 from models.job import JobPosting
 from models.match import Match
 from models.portfolio import Portfolio
+from models.resume import Resume
 from models.user import CompanyType, JobType, User, UserRole
 from schemas.super_admin import (
     AdminApplicationListItem, AdminApplicationListResponse, AdminAssessmentListItem,
@@ -57,7 +58,13 @@ def _build_user_search_filter(search: str, include_company: bool = False):
     return or_(*predicates)
 
 
-def _user_to_admin_out(user: User, role_label: str, profile_completion_percentage: Optional[int] = None, registered_job_fairs: Optional[List[str]] = None) -> AdminUserOut:
+def _user_to_admin_out(
+    user: User,
+    role_label: str,
+    profile_completion_percentage: Optional[int] = None,
+    registered_job_fairs: Optional[List[str]] = None,
+    has_resume: Optional[bool] = None,
+) -> AdminUserOut:
     job_type = user.job_type.value if user.job_type and hasattr(user.job_type, "value") else user.job_type
     company_type = user.company_type.value if user.company_type and hasattr(user.company_type, "value") else user.company_type
     return AdminUserOut(
@@ -69,8 +76,26 @@ def _user_to_admin_out(user: User, role_label: str, profile_completion_percentag
         company_name=user.company_name, company_type=company_type, company_location=user.company_location,
         company_size=user.company_size, profile_completion_percentage=profile_completion_percentage,
         welcome_email_status=user.welcome_email_status, welcome_email_error=user.welcome_email_error,
-        created_at=user.created_at, registered_job_fairs=registered_job_fairs,
+        has_resume=has_resume, created_at=user.created_at, registered_job_fairs=registered_job_fairs,
     )
+
+
+async def _seeker_has_resume_ids(db: AsyncSession, user_ids: List[str]) -> set:
+    """Same rule as job-fair seeker_resume_url: Resume row exists for the seeker."""
+    if not user_ids:
+        return set()
+    result = await db.execute(
+        select(Resume.user_id).where(Resume.user_id.in_(user_ids)).distinct()
+    )
+    return {row[0] for row in result.all()}
+
+
+async def _seeker_has_resume(db: AsyncSession, user_id: str) -> bool:
+    """Same rule as job-fair seeker_resume_url: Resume row exists for the seeker."""
+    result = await db.execute(
+        select(Resume.id).where(Resume.user_id == user_id).limit(1)
+    )
+    return result.scalar_one_or_none() is not None
 
 
 async def _check_duplicate(db: AsyncSession, email: str, phone: str, exclude_id: Optional[str] = None):
@@ -304,11 +329,16 @@ async def list_platform_applications(
                 Application.candidate_name.ilike(term),
                 Application.candidate_email.ilike(term),
                 JobPosting.title.ilike(term),
+                Provider.company_name.ilike(term),
+                Seeker.first_name.ilike(term),
+                Seeker.last_name.ilike(term),
+                func.concat(Seeker.first_name, ' ', Seeker.last_name).ilike(term),
+                Seeker.email.ilike(term),
             )
         )
     if status and status != "all":
         base = base.where(Application.status == status)
-    count_q = select(func.count(Application.id)).select_from(Application).join(JobPosting, Application.job_id == JobPosting.id)
+    count_q = select(func.count(Application.id)).select_from(Application).join(JobPosting, Application.job_id == JobPosting.id).join(Provider, JobPosting.provider_id == Provider.id).outerjoin(Seeker, Application.seeker_id == Seeker.id)
     if search:
         term = f"%{search.strip()}%"
         count_q = count_q.where(
@@ -316,6 +346,11 @@ async def list_platform_applications(
                 Application.candidate_name.ilike(term),
                 Application.candidate_email.ilike(term),
                 JobPosting.title.ilike(term),
+                Provider.company_name.ilike(term),
+                Seeker.first_name.ilike(term),
+                Seeker.last_name.ilike(term),
+                func.concat(Seeker.first_name, ' ', Seeker.last_name).ilike(term),
+                Seeker.email.ilike(term),
             )
         )
     if status and status != "all":
@@ -548,13 +583,23 @@ async def list_seekers(
         select_q.order_by(User.created_at.desc(), User.id.desc())
         .offset((page - 1) * page_size).limit(page_size)
     )
+    rows = result.all()
+    has_resume_ids = await _seeker_has_resume_ids(db, [user.id for user, _ in rows])
     items = []
-    for user, portfolio in result.all():
+    for user, portfolio in rows:
         pct = 0
         if portfolio:
             pct, _, _ = calculate_completion(portfolio, user)
         jf_titles = await _seeker_job_fair_names(db, user.id)
-        items.append(_user_to_admin_out(user, "seeker", profile_completion_percentage=pct, registered_job_fairs=jf_titles))
+        items.append(
+            _user_to_admin_out(
+                user,
+                "seeker",
+                profile_completion_percentage=pct,
+                registered_job_fairs=jf_titles,
+                has_resume=user.id in has_resume_ids,
+            )
+        )
     return AdminUserListResponse(items=items, total=total or 0, page=page, page_size=page_size)
 
 
@@ -583,7 +628,14 @@ async def get_seeker(user_id: str, db: AsyncSession) -> AdminUserOut:
     if portfolio:
         pct, _, _ = calculate_completion(portfolio, user)
     jf_titles = await _seeker_job_fair_names(db, user.id)
-    return _user_to_admin_out(user, "seeker", profile_completion_percentage=pct, registered_job_fairs=jf_titles)
+    has_resume = await _seeker_has_resume(db, user.id)
+    return _user_to_admin_out(
+        user,
+        "seeker",
+        profile_completion_percentage=pct,
+        registered_job_fairs=jf_titles,
+        has_resume=has_resume,
+    )
 
 
 async def get_seeker_detail(user_id: str, db: AsyncSession) -> AdminSeekerDetailResponse:
@@ -598,6 +650,7 @@ async def get_seeker_detail(user_id: str, db: AsyncSession) -> AdminSeekerDetail
 
     # Job fair names
     jf_titles = await _seeker_job_fair_names(db, user.id)
+    has_resume = await _seeker_has_resume(db, user.id)
 
     # Fetch all applications for this seeker
     apps_q = (
@@ -681,6 +734,7 @@ async def get_seeker_detail(user_id: str, db: AsyncSession) -> AdminSeekerDetail
         experience=user.experience,
         preferred_locations=user.preferred_locations,
         profile_completion_percentage=pct,
+        has_resume=has_resume,
         father_or_mother_name=user.father_or_mother_name,
         gender=user.gender,
         address=user.address,

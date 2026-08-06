@@ -6,6 +6,7 @@ from database import get_db
 from models.user import User
 from schemas.auth import (
     RegisterRequest, RegisterResponse, VerifyOtpRequest, ResendOtpRequest, LoginRequest,
+    GoogleLoginRequest,
     UserOut, SendPhoneOtpRequest, VerifyPhoneOtpRequest, TOTPVerifyRequest,
     LoginResponse, TokenResponse, TOTPSetupResponse, TOTPStatusResponse,
     TOTPLoginRequest, CreateTestUserRequest, CreateTestUserResponse,
@@ -21,6 +22,7 @@ from controllers.auth_controller import (
     verify_phone_otp as ctrl_verify_phone_otp,
     resend_otp as ctrl_resend_otp,
     login as ctrl_login,
+    google_login as ctrl_google_login,
     verify_reset_otp as ctrl_verify_reset_otp,
     forgot_password as ctrl_forgot_password,
     reset_password as ctrl_reset_password,
@@ -129,6 +131,11 @@ async def login(
 ):
     referer = request.headers.get("referer")
     return await ctrl_login(body, background_tasks, db, referer)
+
+
+@router.post("/google", response_model=LoginResponse)
+async def google_login(body: GoogleLoginRequest, db: AsyncSession = Depends(get_db)):
+    return await ctrl_google_login(body, db)
 
 
 @router.post("/verify-reset-otp", response_model=LoginResponse)

@@ -107,6 +107,7 @@ class AdminUserOut(BaseModel):
     profile_completion_percentage: Optional[int] = None
     welcome_email_status: Optional[str] = None
     welcome_email_error: Optional[str] = None
+    has_resume: Optional[bool] = None
     created_at: datetime
     registered_job_fairs: Optional[List[str]] = None
 

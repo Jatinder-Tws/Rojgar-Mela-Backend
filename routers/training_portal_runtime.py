@@ -3,6 +3,7 @@ import logging
 import uuid
 import csv
 import io
+from collections import defaultdict
 from datetime import datetime, timedelta, date
 from pathlib import Path
 from typing import List, Optional
@@ -64,9 +65,11 @@ from schemas.training_portal_runtime import (
     PortalPaymentInvoiceOut,
     PortalInvoiceLineItem,
     PortalNotificationMarkRead,
+    PortalDashboardSummaryOut,
     time_within_working_hours,
 )
 from services.auth_service import require_super_admin, require_training_portal_user, require_teacher_or_super_admin
+from services.training_portal_dashboard import build_dashboard_summary
 from services.training_portal_mapper import (
     enrollment_to_out,
     batch_to_out,
@@ -126,6 +129,53 @@ router = APIRouter(prefix="/training-portal/runtime", tags=["Training Portal Run
 MIN_BATCH_SCHEDULE_STUDENTS = 15
 MAX_BATCH_STUDENTS = 20
 REFUND_REQUEST_MIN_DAYS = 14
+
+
+def _batch_export_status(batch: TrainingPortalBatch, scheduled_class_count: int, today: str | None = None) -> str:
+    current_day = today or datetime.utcnow().strftime("%Y-%m-%d")
+    if batch.status == "completed" or batch.end_date < current_day:
+        return "Completed"
+    if batch.start_date <= current_day <= batch.end_date:
+        return "Ongoing" if scheduled_class_count > 0 or batch.status == "ongoing" else "Upcoming"
+    if scheduled_class_count > 0:
+        return "Scheduled"
+    return "Ongoing" if batch.status == "ongoing" else "Upcoming"
+
+
+def _batch_export_schedule(batch: TrainingPortalBatch, sessions: list[TrainingPortalClassSession]) -> tuple[str, str]:
+    batch_sessions = [session for session in sessions if session.batch_id == batch.id]
+    recurring = [
+        session
+        for session in batch_sessions
+        if (session.schedule_type or "one_time") == "recurring" and (session.days or [])
+    ]
+    one_time = [
+        session
+        for session in batch_sessions
+        if (session.schedule_type or "one_time") == "one_time"
+        or ((session.schedule_type or "") != "recurring" and not (session.days or []))
+    ]
+
+    if batch_sessions:
+        if recurring and one_time:
+            days = ", ".join(recurring[0].days or []) or "Recurring"
+            time_label = f"{recurring[0].start_time} - {recurring[0].end_time}"
+            return f"{days} + {len(one_time)} one-time", time_label
+        if recurring:
+            days = ", ".join(recurring[0].days or []) or "Recurring"
+            if len(recurring) > 1:
+                days = f"{days} + {len(recurring)} series"
+            time_label = f"{recurring[0].start_time} - {recurring[0].end_time}"
+            return days, time_label
+        primary = one_time[0]
+        time_label = f"{primary.start_time} - {primary.end_time}"
+        if len(one_time) == 1:
+            return "One-time", time_label
+        return f"{len(one_time)} one-time classes", time_label
+
+    days_label = ", ".join(batch.days or []) if batch.days else f"{batch.start_date} to {batch.end_date}"
+    time_label = batch.time_slot or "To be scheduled"
+    return days_label, time_label
 
 
 @router.post("/enrollments/voter-card", response_model=dict)
@@ -307,6 +357,8 @@ async def _record_transaction(
     provider: Optional[str] = None,
     provider_transaction_id: Optional[str] = None,
     reference_order_id: Optional[str] = None,
+    transaction_reference: Optional[str] = None,
+    bank_name: Optional[str] = None,
     notes: Optional[str] = None,
     created_by_id: Optional[str] = None,
 ) -> TrainingPortalTransaction:
@@ -324,6 +376,8 @@ async def _record_transaction(
         provider=provider,
         provider_transaction_id=provider_transaction_id,
         reference_order_id=reference_order_id,
+        transaction_reference=transaction_reference,
+        bank_name=bank_name,
         batch_id=enrollment.batch_id,
         batch_name=enrollment.batch_name,
         notes=notes,
@@ -352,6 +406,8 @@ def _build_invoice(
         provider=transaction.provider,
         provider_transaction_id=transaction.provider_transaction_id,
         reference_order_id=transaction.reference_order_id,
+        transaction_reference=transaction.transaction_reference,
+        bank_name=transaction.bank_name,
         status=transaction.status,
         currency=transaction.currency,
         amount=transaction.amount,
@@ -623,6 +679,20 @@ async def update_payment_settings(
     return payment_settings_to_out(row)
 
 
+# ── Dashboard summary ─────────────────────────────────────────────────────────
+
+@router.get("/dashboard-summary", response_model=PortalDashboardSummaryOut)
+async def get_dashboard_summary(
+    date_from: Optional[str] = Query(None, description="YYYY-MM-DD enrollment/payment range start"),
+    date_to: Optional[str] = Query(None, description="YYYY-MM-DD enrollment/payment range end"),
+    current_user: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Aggregated admin KPIs, fee charts, and teacher workload from live DB data."""
+    data = await build_dashboard_summary(db, date_from=date_from, date_to=date_to)
+    return PortalDashboardSummaryOut(**data)
+
+
 # ── Enrollments ───────────────────────────────────────────────────────────────
 
 @router.get("/enrollments", response_model=List[PortalEnrollmentOut])
@@ -852,11 +922,12 @@ async def bulk_delete_students(
         select(TrainingPortalEnrollment.id).where(TrainingPortalEnrollment.candidate_email.in_(emails))
     )
     enrollment_ids = [row[0] for row in res_en.all()]
-    if enrollment_ids:
-        await db.execute(
-            delete(TrainingPortalTransaction).where(TrainingPortalTransaction.enrollment_id.in_(enrollment_ids))
-        )
-        
+    if not enrollment_ids:
+        raise HTTPException(status_code=404, detail="No matching student records found to delete.")
+    await db.execute(
+        delete(TrainingPortalTransaction).where(TrainingPortalTransaction.enrollment_id.in_(enrollment_ids))
+    )
+
     # Delete enrollments
     await db.execute(
         delete(TrainingPortalEnrollment).where(TrainingPortalEnrollment.candidate_email.in_(emails))
@@ -932,22 +1003,43 @@ async def generic_export_csv(
             query = query.where(TrainingPortalBatch.id.in_(ids))
         res = await db.execute(query)
         batches = res.scalars().all()
-        
+
         courses_res = await db.execute(select(TrainingPortalCourse))
-        courses_map = {c.id: c.title for c in courses_res.scalars().all()}
-        
+        courses_map = {c.id: c for c in courses_res.scalars().all()}
+
+        batch_ids = [b.id for b in batches]
+        sessions_by_batch: dict[str, list[TrainingPortalClassSession]] = defaultdict(list)
+        if batch_ids:
+            session_rows = (
+                await db.execute(
+                    select(TrainingPortalClassSession).where(TrainingPortalClassSession.batch_id.in_(batch_ids))
+                )
+            ).scalars().all()
+            for session in session_rows:
+                sessions_by_batch[session.batch_id].append(session)
+
         writer.writerow([
-            'Batch Name', 'Course Title', 'Instructor', 'Schedule', 'Days', 'Venue', 
-            'Max Seats', 'Delivery Mode', 'Status'
+            'Batch Name', 'Course Title', 'Instructor', 'Schedule', 'Days', 'Venue',
+            'Max Seats', 'Class Mode', 'Status'
         ])
         for b in batches:
-            days_str = ", ".join(b.days) if b.days else "—"
-            course_title = courses_map.get(b.course_id, "Unknown Course")
+            course = courses_map.get(b.course_id)
+            days_str, schedule_time = _batch_export_schedule(b, sessions_by_batch.get(b.id, []))
+            status_label = _batch_export_status(b, len(sessions_by_batch.get(b.id, [])))
+            class_mode = b.delivery_mode or (course.delivery_mode if course else None) or '-'
+            course_title = course.title if course else 'Unknown Course'
             writer.writerow([
-                b.batch_name, course_title, b.instructor_name or "—", b.time_slot or "—",
-                days_str, b.venue or "—", b.max_seats, b.delivery_mode, b.status
+                b.batch_name,
+                course_title,
+                b.instructor_name or '-',
+                schedule_time or '-',
+                days_str or '-',
+                b.venue or '-',
+                b.max_seats,
+                class_mode,
+                status_label,
             ])
-            
+
     elif entity == "ledger":
         query = select(TrainingPortalEnrollment).where(TrainingPortalEnrollment.enrollment_type == "course")
         if ids:
@@ -1073,7 +1165,7 @@ async def generic_export_csv(
         if ids:
             query = query.where(TrainingPortalEnrollment.id.in_(ids))
         else:
-            query = query.where(TrainingPortalEnrollment.is_certificate_issued == True)
+            query = query.where(TrainingPortalEnrollment.status.in_(["active", "completed"]))
         res = await db.execute(query)
         enrollments = res.scalars().all()
         
@@ -1116,25 +1208,37 @@ async def create_enrollment(
     name = body.candidate_name or f"{current_user.first_name or ''} {current_user.last_name or ''}".strip() or email.split("@")[0]
     phone = body.candidate_phone or current_user.phone
 
-    # Delete any stale initiated enrollments that never completed payment
-    await db.execute(
-        delete(TrainingPortalEnrollment).where(
-            TrainingPortalEnrollment.candidate_email == email,
-            TrainingPortalEnrollment.enrollment_type == body.enrollment_type,
+    # Delete any stale initiated enrollments that never completed payment.
+    # For course enrollments, keep separate batch registrations distinct so the
+    # same student can join more than one class for the same course.
+    initiated_filters = [
+        TrainingPortalEnrollment.candidate_email == email,
+        TrainingPortalEnrollment.enrollment_type == body.enrollment_type,
+        TrainingPortalEnrollment.status == "payment_initiated",
+    ]
+    if body.enrollment_type == "course" and body.batch_id:
+        initiated_filters.extend([
             TrainingPortalEnrollment.item_id == body.item_id,
-            TrainingPortalEnrollment.status == "payment_initiated",
-        )
-    )
+            TrainingPortalEnrollment.batch_id == body.batch_id,
+        ])
+    else:
+        initiated_filters.append(TrainingPortalEnrollment.item_id == body.item_id)
+    await db.execute(delete(TrainingPortalEnrollment).where(*initiated_filters))
     await db.flush()
 
-    dup = await db.execute(
-        select(TrainingPortalEnrollment).where(
-            TrainingPortalEnrollment.candidate_email == email,
-            TrainingPortalEnrollment.enrollment_type == body.enrollment_type,
+    duplicate_filters = [
+        TrainingPortalEnrollment.candidate_email == email,
+        TrainingPortalEnrollment.enrollment_type == body.enrollment_type,
+        TrainingPortalEnrollment.status != "dropped",
+    ]
+    if body.enrollment_type == "course" and body.batch_id:
+        duplicate_filters.extend([
             TrainingPortalEnrollment.item_id == body.item_id,
-            TrainingPortalEnrollment.status != "dropped",
-        )
-    )
+            TrainingPortalEnrollment.batch_id == body.batch_id,
+        ])
+    else:
+        duplicate_filters.append(TrainingPortalEnrollment.item_id == body.item_id)
+    dup = await db.execute(select(TrainingPortalEnrollment).where(*duplicate_filters))
     if dup.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="Already enrolled in this program")
 
@@ -1346,6 +1450,8 @@ async def record_offline_payment(
         amount=paid,
         payment_mode=body.payment_mode,
         provider="offline",
+        transaction_reference=body.transaction_reference,
+        bank_name=body.bank_name,
         notes=body.notes or "Offline payment recorded by Admin",
         created_by_id=current_user.id,
     )
@@ -3508,3 +3614,4 @@ async def razorpay_webhook(request: Request, db: AsyncSession = Depends(get_db))
     )
     await db.flush()
     return {"status": "ok"}
+

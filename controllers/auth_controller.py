@@ -15,6 +15,7 @@ from schemas.auth import (
     VerifyOtpRequest,
     ResendOtpRequest,
     LoginRequest,
+    GoogleLoginRequest,
     UserOut,
     OnboardingRequest,
     UpdateSettingsRequest,
@@ -585,4 +586,86 @@ async def refresh_token(body: RefreshTokenRequest, db: AsyncSession) -> RefreshT
     return RefreshTokenResponse(
         access_token=new_access_token,
         refresh_token=new_refresh_token
+    )
+
+
+async def google_login(body: GoogleLoginRequest, db: AsyncSession) -> LoginResponse:
+    """Verify Google ID token and login or create a user."""
+    client_id = settings.google_sign_in_client_id
+    if not client_id:
+        raise HTTPException(
+            status_code=503,
+            detail="Google Sign-In is not configured on the server.",
+        )
+
+    try:
+        from google.oauth2 import id_token
+        from google.auth.transport import requests as google_requests
+
+        idinfo = id_token.verify_oauth2_token(
+            body.credential,
+            google_requests.Request(),
+            client_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid Google credential") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Could not verify Google credential") from exc
+
+    if idinfo.get("iss") not in {"accounts.google.com", "https://accounts.google.com"}:
+        raise HTTPException(status_code=400, detail="Invalid Google token issuer")
+
+    email = (idinfo.get("email") or "").strip().lower()
+    if not email or not idinfo.get("email_verified", False):
+        raise HTTPException(status_code=400, detail="Google account email is not verified")
+
+    user = await db.scalar(select(User).where(func.lower(User.email) == email))
+    if not user:
+        from models.user import UserRole
+
+        given = (idinfo.get("given_name") or "").strip()
+        family = (idinfo.get("family_name") or "").strip()
+        full_name = (idinfo.get("name") or "").strip()
+        if not given and full_name:
+            parts = full_name.split(None, 1)
+            given = parts[0]
+            family = parts[1] if len(parts) > 1 else ""
+
+        role = UserRole.provider if body.role == "provider" else UserRole.seeker
+        user = User(
+            email=email,
+            first_name=given or None,
+            last_name=family or None,
+            profile_pic_url=(idinfo.get("picture") or None),
+            role=role,
+            is_verified=True,
+            is_first_login=True,
+            hashed_password=None,
+        )
+        if role == UserRole.provider:
+            user.company_name = (given or email.split("@")[0]).strip() or "My Company"
+        db.add(user)
+        await db.commit()
+        await db.refresh(user)
+    else:
+        # Keep profile picture fresh; mark verified since Google confirmed email
+        if idinfo.get("picture") and not user.profile_pic_url:
+            user.profile_pic_url = idinfo["picture"]
+        if not user.is_verified:
+            user.is_verified = True
+        await db.commit()
+        await db.refresh(user)
+
+    if getattr(user, "is_super_admin", False):
+        raise HTTPException(
+            status_code=400,
+            detail="Please use the super admin login page for this account.",
+        )
+
+    token = create_access_token({"sub": user.id})
+    refresh_token = create_refresh_token({"sub": user.id})
+    return LoginResponse(
+        access_token=token,
+        refresh_token=refresh_token,
+        user=UserOut.model_validate(user),
     )

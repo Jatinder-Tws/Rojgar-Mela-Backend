@@ -1,6 +1,7 @@
 from models.user import User, UserRole, JobType, CompanyType
 from models.resume import Resume
 from models.job import JobPosting
+from models.saved_job import SavedJob
 from models.match import Match
 from models.application import Application, ApplicationStatus
 from models.notification import Notification, NotificationType
@@ -45,6 +46,7 @@ __all__ = [
     "User", "UserRole", "JobType", "CompanyType", "ExternalCandidate", "ExternalCandidateMatch",
     "Resume",
     "JobPosting",
+    "SavedJob",
     "Match",
     "Application", "ApplicationStatus",
     "Notification", "NotificationType",

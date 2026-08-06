@@ -561,24 +561,97 @@ _STREET_PART_RE = re.compile(
 _PINCODE_RE = re.compile(r"\s*[-–]?\s*\b\d{6}\b")
 
 
-def _extract_city_state(location: str) -> Optional[str]:
-    """Normalize a free-text job location to 'City' or 'City, State'."""
+def _location_place_parts(location: str) -> list[str]:
+    """Split a free-text job location into city/state tokens (never 'City, State')."""
     text = _PINCODE_RE.sub("", (location or "").strip())
     text = re.sub(r"\s+", " ", text).strip(" ,-|/")
     if not text:
-        return None
+        return []
 
     parts = [p.strip(" ,-|/") for p in text.split(",") if p.strip(" ,-|/")]
     if not parts:
-        return None
+        return []
 
     place_parts = [p for p in parts if not _STREET_PART_RE.search(p)]
     if not place_parts:
         place_parts = [parts[-1]]
 
+    # Prefer last two place tokens (city, state) when address has more segments
     if len(place_parts) >= 2:
-        return f"{place_parts[-2]}, {place_parts[-1]}"
-    return place_parts[0]
+        return [place_parts[-2], place_parts[-1]]
+    return [place_parts[0]]
+
+
+_PROTECTED_PLURALS = frozenset(
+    {
+        "sales",
+        "business",
+        "human resources",
+        "operations",
+        "logistics",
+        "analytics",
+        "graphics",
+        "electronics",
+        "mathematics",
+        "physics",
+        "economics",
+        "news",
+        "series",
+        "status",
+        "campus",
+        "bonus",
+        "focus",
+        "hr",
+        "it",
+        "ui",
+        "ux",
+    }
+)
+
+
+def _singularize_word(word: str) -> str:
+    w = word.lower()
+    if len(w) <= 3 or w in _PROTECTED_PLURALS:
+        return w
+    if w.endswith("ies") and len(w) > 4:
+        return w[:-3] + "y"
+    if w.endswith(("ches", "shes", "xes", "zes", "sses")) and len(w) > 5:
+        return w[:-2]
+    if w.endswith("es") and len(w) > 4 and w[-3] in "sxz":
+        return w[:-2]
+    if w.endswith("s") and not w.endswith(("ss", "us", "is", "os")):
+        return w[:-1]
+    return w
+
+
+def _title_dedupe_key(title: str) -> str:
+    """Collapse singular/plural variants so 'Computer Operator' ≈ 'Computer Operators'."""
+    words = re.sub(r"\s+", " ", (title or "").strip().lower()).split()
+    if not words:
+        return ""
+    return " ".join(_singularize_word(w) for w in words)
+
+
+def _prefer_title(existing: str, candidate: str) -> str:
+    """Keep the shorter / singular-leaning display form when titles collide."""
+    if len(candidate) < len(existing):
+        return candidate
+    if len(candidate) == len(existing) and candidate.lower().endswith("s") is False:
+        return candidate
+    return existing
+
+
+def _suggestion_matches_term(display: str, term: str, *, normalize_title: bool) -> bool:
+    if not term:
+        return True
+    lower = display.lower()
+    if term in lower:
+        return True
+    if not normalize_title:
+        return False
+    term_key = _title_dedupe_key(term)
+    key = _title_dedupe_key(display)
+    return bool(term_key) and bool(key) and (term_key == key or term_key in key or key in term_key)
 
 
 async def get_job_suggestions(
@@ -591,38 +664,165 @@ async def get_job_suggestions(
     limit = min(max(1, limit), 20)
     query = select(JobPosting).filter(JobPosting.is_active == True)
     term = q.strip().lower()
+    normalize_title = suggest_type != "location"
 
-    if suggest_type == "location":
-        col = JobPosting.location
-    else:
-        col = JobPosting.title
-
+    col = JobPosting.location if suggest_type == "location" else JobPosting.title
     if term:
-        query = query.filter(func.lower(col).like(f"%{term}%"))
+        like_term = func.lower(col).like(f"%{term}%")
+        if normalize_title:
+            term_key = _title_dedupe_key(term)
+            if term_key and term_key != term:
+                query = query.filter(or_(like_term, func.lower(col).like(f"%{term_key}%")))
+            else:
+                query = query.filter(like_term)
+        else:
+            query = query.filter(like_term)
 
-    result = await db.execute(query.limit(200))
+    result = await db.execute(query.limit(500))
     jobs = result.scalars().all()
 
-    seen: set[str] = set()
-    out: list[str] = []
+    counts: dict[str, int] = {}
+    chosen: dict[str, str] = {}
+
+    def _add(val: str) -> None:
+        display = (val or "").strip()
+        if not display or not _suggestion_matches_term(display, term, normalize_title=normalize_title):
+            return
+        key = _title_dedupe_key(display) if normalize_title else display.lower()
+        if not key:
+            return
+        counts[key] = counts.get(key, 0) + 1
+        if key in chosen:
+            if normalize_title:
+                chosen[key] = _prefer_title(chosen[key], display)
+        else:
+            chosen[key] = display
+
     for job in jobs:
         if suggest_type == "location":
-            val = _extract_city_state(job.location or "") or ""
+            # Prefer city token for autocomplete (first place part)
+            city = _extract_city_label(job.location or "")
+            if city:
+                _add(city)
         else:
-            val = (job.title or "").strip()
+            _add((job.title or "").strip())
 
-        if not val:
+    ranked = sorted(chosen.keys(), key=lambda k: (-counts.get(k, 0), chosen[k].lower()))
+    return [chosen[k] for k in ranked[:limit]]
+
+
+def _extract_city_label(location: str) -> Optional[str]:
+    """Return the city token from a job location (not 'City, State')."""
+    parts = _location_place_parts(location)
+    if not parts:
+        return None
+    return parts[0]
+
+
+# Only categories with count > 0 are returned. Counts use the same text search
+# as clicking the chip (title/industry/location/experience) — not description
+# keyword scans, which produced false positives.
+_BROWSE_CATEGORIES: list[dict[str, Any]] = [
+    {"key": "remote", "label": "Remote", "query": "remote"},
+    {"key": "mnc", "label": "MNC", "query": "mnc"},
+    {"key": "fresher", "label": "Fresher", "query": "fresher"},
+    {"key": "supply_chain", "label": "Supply Chain", "query": "supply chain"},
+    {"key": "software_it", "label": "Software & IT", "query": "software"},
+    {"key": "marketing", "label": "Marketing", "query": "marketing"},
+    {"key": "banking_finance", "label": "Banking & Finance", "query": "banking"},
+    {"key": "project_mgmt", "label": "Project Mgmt", "query": "project manager"},
+    {"key": "sales", "label": "Sales", "query": "sales"},
+    {"key": "data_science", "label": "Data Science", "query": "data science"},
+    {"key": "internship", "label": "Internship", "query": "internship"},
+]
+
+
+async def _count_category_jobs(db: AsyncSession, cat: dict[str, Any]) -> int:
+    """Count active jobs that would appear when the category chip is clicked."""
+    base = select(func.count()).select_from(JobPosting).filter(JobPosting.is_active == True)
+    # Same `q` filter as public job search — chip only if click returns jobs
+    result = await db.execute(_apply_text_search(base, cat["query"]))
+    return int(result.scalar() or 0)
+
+
+async def get_job_browse_meta(
+    db: AsyncSession,
+    *,
+    title_limit: int = 10,
+    city_limit: int = 12,
+) -> dict[str, Any]:
+    """Popular job titles, cities, and category chips that have live jobs."""
+    title_limit = min(max(1, title_limit), 30)
+    city_limit = min(max(1, city_limit), 40)
+
+    total_q = await db.execute(
+        select(func.count()).select_from(JobPosting).filter(JobPosting.is_active == True)
+    )
+    total_jobs = int(total_q.scalar() or 0)
+
+    result = await db.execute(
+        select(JobPosting.title, JobPosting.location)
+        .filter(JobPosting.is_active == True)
+        .limit(2000)
+    )
+    rows = result.all()
+
+    title_counts: dict[str, int] = {}
+    title_labels: dict[str, str] = {}
+    city_counts: dict[str, int] = {}
+    city_labels: dict[str, str] = {}
+
+    for title, location in rows:
+        display = (title or "").strip()
+        if display:
+            key = _title_dedupe_key(display)
+            if key:
+                title_counts[key] = title_counts.get(key, 0) + 1
+                title_labels[key] = (
+                    _prefer_title(title_labels[key], display)
+                    if key in title_labels
+                    else display
+                )
+
+        city = _extract_city_label(location or "")
+        if city:
+            ckey = city.lower()
+            city_counts[ckey] = city_counts.get(ckey, 0) + 1
+            city_labels[ckey] = city_labels.get(ckey) or city
+
+    categories: list[dict[str, Any]] = []
+    for cat in _BROWSE_CATEGORIES:
+        count = await _count_category_jobs(db, cat)
+        if count <= 0:
             continue
-        key = val.lower()
-        if key in seen:
-            continue
-        if term and term not in key:
-            continue
-        seen.add(key)
-        out.append(val)
-        if len(out) >= limit:
-            break
-    return out
+        categories.append(
+            {
+                "key": cat["key"],
+                "label": cat["label"],
+                "query": cat["query"],
+                "count": count,
+            }
+        )
+
+    popular_titles = [
+        {"label": title_labels[k], "count": title_counts[k]}
+        for k in sorted(title_counts.keys(), key=lambda x: (-title_counts[x], title_labels[x].lower()))[
+            :title_limit
+        ]
+    ]
+    cities = [
+        {"label": city_labels[k], "count": city_counts[k]}
+        for k in sorted(city_counts.keys(), key=lambda x: (-city_counts[x], city_labels[x].lower()))[
+            :city_limit
+        ]
+    ]
+
+    return {
+        "total_jobs": total_jobs,
+        "popular_titles": popular_titles,
+        "cities": cities,
+        "categories": categories,
+    }
 
 
 async def get_similar_jobs(

@@ -40,7 +40,7 @@ async def init_db():
     """Create all tables and enable pgvector extension."""
     async with engine.begin() as conn:
         await conn.execute(__import__("sqlalchemy").text("CREATE EXTENSION IF NOT EXISTS vector"))
-        from models import user, resume, job, match, application, notification, otp, interview, provider_interview_settings, provider_availability_window, assessment, portfolio, master, ai_interview, roadmap, ai_coach, imported_user_password, attendance, job_fair, email_template, email_campaign, support_ticket, platform_feedback, contact_inquiry, company_internship, training_course, training_portal_course, training_portal_category, training_portal_teacher, training_portal_internship, training_portal_batch, training_portal_enrollment, training_portal_class_session, training_portal_payment, training_portal_candidate_notification, training_portal_transaction, training_portal_refund_request, training_portal_attendance, training_portal_leave_request, training_portal_behavior_report, google_calendar_token, training_portal_class_calendar_link  # noqa
+        from models import user, resume, job, saved_job, match, application, notification, otp, interview, provider_interview_settings, provider_availability_window, assessment, portfolio, master, ai_interview, roadmap, ai_coach, imported_user_password, attendance, job_fair, email_template, email_campaign, support_ticket, platform_feedback, contact_inquiry, company_internship, training_course, training_portal_course, training_portal_category, training_portal_teacher, training_portal_internship, training_portal_batch, training_portal_enrollment, training_portal_class_session, training_portal_payment, training_portal_candidate_notification, training_portal_transaction, training_portal_refund_request, training_portal_attendance, training_portal_leave_request, training_portal_behavior_report, google_calendar_token, training_portal_class_calendar_link  # noqa
         await conn.run_sync(Base.metadata.create_all)
 
 
@@ -455,6 +455,8 @@ async def patch_training_portal_schema():
         "ALTER TABLE training_portal_transactions ADD COLUMN IF NOT EXISTS provider VARCHAR(30)",
         "ALTER TABLE training_portal_transactions ADD COLUMN IF NOT EXISTS provider_transaction_id VARCHAR(120)",
         "ALTER TABLE training_portal_transactions ADD COLUMN IF NOT EXISTS reference_order_id VARCHAR(50)",
+        "ALTER TABLE training_portal_transactions ADD COLUMN IF NOT EXISTS transaction_reference VARCHAR(120)",
+        "ALTER TABLE training_portal_transactions ADD COLUMN IF NOT EXISTS bank_name VARCHAR(150)",
         "ALTER TABLE training_portal_transactions ADD COLUMN IF NOT EXISTS batch_id VARCHAR(50)",
         "ALTER TABLE training_portal_transactions ADD COLUMN IF NOT EXISTS batch_name VARCHAR(200)",
         "ALTER TABLE training_portal_transactions ADD COLUMN IF NOT EXISTS notes TEXT",

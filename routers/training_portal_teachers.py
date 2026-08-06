@@ -2,7 +2,7 @@ import uuid
 import logging
 from datetime import datetime
 from typing import List, Optional
-
+from fastapi import HTTPException, BackgroundTasks
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy import select, or_, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,7 +21,7 @@ from services.auth_service import (
     require_training_portal_user,
     hash_password,
 )
-
+from services.email_service import send_welcome_email
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/training-portal/teachers", tags=["Training Portal Teachers"])
@@ -154,7 +154,7 @@ async def list_portal_teachers(
 
 @router.post("/", response_model=TrainingPortalTeacherOut, status_code=status.HTTP_201_CREATED)
 async def create_portal_teacher(
-    teacher_in: TrainingPortalTeacherCreate,
+    teacher_in: TrainingPortalTeacherCreate,background_tasks: BackgroundTasks,
     current_user: User = Depends(require_super_admin),
     db: AsyncSession = Depends(get_db),
 ):
@@ -212,6 +212,7 @@ async def create_portal_teacher(
 
     await db.flush()
     await db.refresh(teacher)
+    background_tasks.add_task(send_welcome_email,teacher.email, teacher.name, "teacher")
     return _to_out(teacher)
 
 

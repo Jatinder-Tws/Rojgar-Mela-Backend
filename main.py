@@ -76,7 +76,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="JobMatch AI API",
+    title="RojgarMela AI API",
     description="AI-powered bidirectional job matching platform",
     version="1.0.0",
     lifespan=lifespan,
@@ -119,7 +119,7 @@ app.add_middleware(
 )
 
 # ── Routers ─────────────────────────────────────────────────────────────────
-from routers import auth, users, jobs, resumes, matches, applications, notifications, interviews, assessment, portfolio, analytics, resume_builder, onboarding, master, ai_interview, roadmap, external_candidate, master_data, ai_coach ,interview_scheduling, import_users, superadmin, super_admin, super_admin_support, support, help_desk_bot, attendance, job_fair, email_admin, dashboard, company_internships, training_courses, training_portal_courses, training_portal_categories, training_portal_teachers, training_portal_internships, training_portal_runtime, google_calendar # noqa
+from routers import auth, users, jobs, resumes, matches, applications, saved_jobs, notifications, interviews, assessment, portfolio, analytics, resume_builder, onboarding, master, ai_interview, roadmap, external_candidate, master_data, ai_coach ,interview_scheduling, import_users, superadmin, super_admin, super_admin_support, support, help_desk_bot, attendance, job_fair, email_admin, dashboard, company_internships, training_courses, training_portal_courses, training_portal_categories, training_portal_teachers, training_portal_internships, training_portal_runtime, google_calendar # noqa
 
 
 API_PREFIX = ""
@@ -130,6 +130,7 @@ routers = [
     attendance.router,
     matches.router,
     applications.router,
+    saved_jobs.router,
     notifications.router,
     interviews.router,
     assessment.router,

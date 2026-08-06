@@ -17,6 +17,7 @@ from services.email_service import send_job_fair_welcome_email, send_welcome_ema
 from services.public_jobs_service import (
     search_public_jobs,
     get_job_suggestions,
+    get_job_browse_meta,
     serialize_public_job_detail,
     get_similar_jobs,
     get_job_filter_facets,
@@ -246,6 +247,16 @@ async def public_job_suggestions(
     """Autocomplete suggestions for job title or location search."""
     suggest_type = "location" if type == "location" else "title"
     return await get_job_suggestions(db, suggest_type=suggest_type, q=q, limit=limit)
+
+
+@router.get("/jobs/browse-meta")
+async def public_job_browse_meta(
+    title_limit: int = Query(10, ge=1, le=30),
+    city_limit: int = Query(12, ge=1, le=40),
+    db: AsyncSession = Depends(get_db),
+):
+    """Popular titles and cities derived from active job postings."""
+    return await get_job_browse_meta(db, title_limit=title_limit, city_limit=city_limit)
 
 
 @router.get("/jobs/facets")

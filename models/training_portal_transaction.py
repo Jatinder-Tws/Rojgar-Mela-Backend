@@ -33,6 +33,8 @@ class TrainingPortalTransaction(Base):
     provider = Column(String(30), nullable=True)
     provider_transaction_id = Column(String(120), nullable=True, index=True)
     reference_order_id = Column(String(50), nullable=True)
+    transaction_reference = Column(String(120), nullable=True)
+    bank_name = Column(String(150), nullable=True)
     batch_id = Column(String(50), nullable=True)
     batch_name = Column(String(200), nullable=True)
     notes = Column(Text, nullable=True)

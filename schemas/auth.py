@@ -212,6 +212,28 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class GoogleLoginRequest(BaseModel):
+    """Google Identity Services ID token (`credential`) from the frontend button."""
+    credential: str
+    role: str = "seeker"
+
+    @field_validator("credential")
+    @classmethod
+    def validate_credential(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("Google credential is required")
+        return v
+
+    @field_validator("role")
+    @classmethod
+    def validate_google_role(cls, v: str) -> str:
+        v = (v or "seeker").strip().lower()
+        if v not in {"seeker", "provider"}:
+            raise ValueError("Role must be seeker or provider")
+        return v
+
+
 class TokenResponse(BaseModel):
     access_token: str
     refresh_token: Optional[str] = None

@@ -11,6 +11,7 @@ from controllers.users_controller import (
     update_settings as ctrl_update_settings,
     upload_profile_pic as ctrl_upload_profile_pic,
     get_public_user as ctrl_get_public_user,
+    delete_own_account as ctrl_delete_own_account,
 )
 from fastapi import File, UploadFile
 
@@ -35,6 +36,12 @@ async def update_settings(body: UpdateSettingsRequest, background_tasks: Backgro
 @router.post("/me/profile-pic", response_model=UserOut)
 async def upload_profile_pic(file: UploadFile = File(...), user: User = Depends(require_verified), db: AsyncSession = Depends(get_db)):
     return await ctrl_upload_profile_pic(file, user, db)
+
+
+@router.delete("/me", status_code=204)
+async def delete_own_account(user: User = Depends(require_verified), db: AsyncSession = Depends(get_db)):
+    """Permanently delete the authenticated user's own account."""
+    await ctrl_delete_own_account(user, db)
 
 
 @router.get("/public/{user_id}", response_model=UserOut)

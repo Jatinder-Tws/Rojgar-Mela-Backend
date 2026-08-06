@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, List, Optional
 import re
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, field_validator, field_serializer, model_validator
 
 _EXPERIENCE_RANGE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)")
 _SALARY_RANGE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)")
@@ -314,6 +314,11 @@ class NotificationOut(BaseModel):
     related_user_id: Optional[str] = None
     created_at: datetime
 
+    @field_serializer('created_at')
+    def serialize_created_at(self, value: datetime) -> str:
+        """Serialize created_at as UTC ISO string with Z suffix."""
+        return value.isoformat() + 'Z' if value else ''
+
     class Config:
         from_attributes = True
 
@@ -414,4 +419,4 @@ class JobListResponse(BaseModel):
     items: List[JobOut]
     total: int
     page: int
-    page_size: int
+    page_size: int

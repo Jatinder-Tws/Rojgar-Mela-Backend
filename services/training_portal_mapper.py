@@ -237,6 +237,8 @@ def transaction_to_out(row: TrainingPortalTransaction) -> PortalTransactionOut:
         provider=row.provider,
         provider_transaction_id=row.provider_transaction_id,
         reference_order_id=row.reference_order_id,
+        transaction_reference=row.transaction_reference,
+        bank_name=row.bank_name,
         batch_id=row.batch_id,
         batch_name=row.batch_name,
         notes=row.notes,
