@@ -119,7 +119,7 @@ app.add_middleware(
 )
 
 # ── Routers ─────────────────────────────────────────────────────────────────
-from routers import auth, users, jobs, resumes, matches, applications, saved_jobs, notifications, interviews, assessment, portfolio, analytics, resume_builder, onboarding, master, ai_interview, roadmap, external_candidate, master_data, ai_coach ,interview_scheduling, import_users, superadmin, super_admin, super_admin_support, support, help_desk_bot, attendance, job_fair, email_admin, dashboard, company_internships, training_courses, training_portal_courses, training_portal_categories, training_portal_teachers, training_portal_internships, training_portal_runtime, google_calendar # noqa
+from routers import auth, users, jobs, resumes, matches, applications, saved_jobs, notifications, interviews, assessment, portfolio, analytics, resume_builder, onboarding, master, ai_interview, roadmap, external_candidate, master_data, ai_coach ,interview_scheduling, import_users, superadmin, super_admin, super_admin_support, support, help_desk_bot, attendance, job_fair, email_admin, dashboard, company_internships, training_courses, training_portal_courses, training_portal_categories, training_portal_teachers, training_portal_internships, training_portal_runtime, google_calendar, career_enquiry # noqa
 
 
 API_PREFIX = ""
@@ -149,6 +149,8 @@ routers = [
     super_admin_support.router,
     support.router,
     help_desk_bot.router,
+    career_enquiry.public_router,
+    career_enquiry.admin_router,
     job_fair.router,
     email_admin.router,
     company_internships.router,
