@@ -25,6 +25,7 @@ from models.email_campaign import EmailCampaign, EmailCampaignRecipient, Campaig
 from models.support_ticket import SupportTicket, TicketMessage, TicketStatus, TicketCategory, TicketPriority
 from models.platform_feedback import PlatformFeedback, FeedbackCategory
 from models.contact_inquiry import ContactInquiry
+from models.career_enquiry import CareerEnquiry
 from models.company_internship import CompanyInternship, CompanyInternshipApplication
 from models.training_course import TrainingCourse, TrainingModule, TrainingModuleTopic, TrainingCourseApplication
 from models.training_portal_course import TrainingPortalCourse
@@ -67,6 +68,7 @@ __all__ = [
     "SupportTicket", "TicketMessage", "TicketStatus", "TicketCategory", "TicketPriority",
     "PlatformFeedback", "FeedbackCategory",
     "ContactInquiry",
+    "CareerEnquiry",
     "CompanyInternship", "CompanyInternshipApplication",
     "TrainingCourse", "TrainingModule", "TrainingModuleTopic", "TrainingCourseApplication",
     "TrainingPortalCourse",

@@ -122,6 +122,15 @@ class AdminUserListResponse(BaseModel):
     page_size: int
 
 
+class AdminUserExportRequest(BaseModel):
+    fields: List[str]
+    format: str = "csv"  # csv | xlsx
+    search: Optional[str] = None
+    industry: Optional[str] = None
+    status: Optional[str] = None
+    job_fair_id: Optional[str] = None
+
+
 class BulkImportResult(BaseModel):
     created: int
     failed: int

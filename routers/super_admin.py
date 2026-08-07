@@ -12,7 +12,7 @@ from models.user import User
 from schemas.super_admin import (
     AdminApplicationListItem, AdminApplicationListResponse, AdminAssessmentListResponse, AdminInterviewListResponse,
     AdminJobListResponse, AdminMatchListResponse, AdminProviderCreate, AdminProviderUpdate,
-    AdminSeekerCreate, AdminSeekerUpdate, AdminSetPasswordRequest, AdminUserListResponse,
+    AdminSeekerCreate, AdminSeekerUpdate, AdminSetPasswordRequest, AdminUserExportRequest, AdminUserListResponse,
     AdminUserOut, BulkImportJobStarted, DashboardAnalyticsResponse, DetailedPlatformAnalytics,
     ImportJobStatus, PlatformStatsResponse, SuperAdminChangePasswordRequest, SuperAdminLoginRequest,
     SuperAdminLoginResponse, SuperAdminProfileOut, SuperAdminProfileUpdate,
@@ -53,6 +53,8 @@ from controllers.super_admin_controller import (
     delete_provider as ctrl_delete_provider,
     set_provider_password as ctrl_set_provider_password,
     bulk_import_providers as ctrl_bulk_import_providers,
+    export_seekers as ctrl_export_seekers,
+    export_providers as ctrl_export_providers,
 )
 
 router = APIRouter(prefix="/super-admin", tags=["super-admin"])
@@ -217,6 +219,21 @@ async def create_seeker(body: AdminSeekerCreate, admin: User = Depends(require_s
     return await ctrl_create_seeker(body, db)
 
 
+@router.post("/seekers/export")
+async def export_seekers(
+    body: AdminUserExportRequest,
+    admin: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_export_seekers(body, db)
+
+
+@router.post("/seekers/bulk-import", response_model=BulkImportJobStarted)
+async def bulk_import_seekers(admin: User = Depends(require_super_admin), file: UploadFile = File(...)):
+    content = await file.read()
+    return await ctrl_bulk_import_seekers(content, file.filename)
+
+
 @router.get("/seekers/{user_id}", response_model=AdminUserOut)
 async def get_seeker(user_id: str, admin: User = Depends(require_super_admin), db: AsyncSession = Depends(get_db)):
     return await ctrl_get_seeker(user_id, db)
@@ -237,12 +254,6 @@ async def set_seeker_password(user_id: str, body: AdminSetPasswordRequest, admin
     return await ctrl_set_seeker_password(user_id, body, db)
 
 
-@router.post("/seekers/bulk-import", response_model=BulkImportJobStarted)
-async def bulk_import_seekers(admin: User = Depends(require_super_admin), file: UploadFile = File(...)):
-    content = await file.read()
-    return await ctrl_bulk_import_seekers(content, file.filename)
-
-
 # ── Job Providers ────────────────────────────────────────────────────────────
 
 @router.get("/providers", response_model=AdminUserListResponse)
@@ -257,6 +268,21 @@ async def list_providers(
 @router.post("/providers", response_model=AdminUserOut, status_code=201)
 async def create_provider(body: AdminProviderCreate, admin: User = Depends(require_super_admin), db: AsyncSession = Depends(get_db)):
     return await ctrl_create_provider(body, db)
+
+
+@router.post("/providers/export")
+async def export_providers(
+    body: AdminUserExportRequest,
+    admin: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_export_providers(body, db)
+
+
+@router.post("/providers/bulk-import", response_model=BulkImportJobStarted)
+async def bulk_import_providers(admin: User = Depends(require_super_admin), file: UploadFile = File(...)):
+    content = await file.read()
+    return await ctrl_bulk_import_providers(content, file.filename)
 
 
 @router.get("/providers/{user_id}", response_model=AdminUserOut)
@@ -295,9 +321,3 @@ async def delete_provider(user_id: str, admin: User = Depends(require_super_admi
 @router.patch("/providers/{user_id}/password", response_model=AdminUserOut)
 async def set_provider_password(user_id: str, body: AdminSetPasswordRequest, admin: User = Depends(require_super_admin), db: AsyncSession = Depends(get_db)):
     return await ctrl_set_provider_password(user_id, body, db)
-
-
-@router.post("/providers/bulk-import", response_model=BulkImportJobStarted)
-async def bulk_import_providers(admin: User = Depends(require_super_admin), file: UploadFile = File(...)):
-    content = await file.read()
-    return await ctrl_bulk_import_providers(content, file.filename)

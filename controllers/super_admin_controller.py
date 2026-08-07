@@ -2,10 +2,13 @@
 Super Admin controller – business logic from routers/super_admin.py
 """
 import asyncio
+import csv
+import io
 from datetime import datetime, timedelta
-from typing import Optional, List
+from typing import Optional, List, Tuple
 
 from fastapi import HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,10 +30,10 @@ from schemas.super_admin import (
     AdminAssessmentListResponse, AdminInterviewListItem, AdminInterviewListResponse,
     AdminJobListItem, AdminJobListResponse, AdminMatchListItem, AdminMatchListResponse,
     AdminProviderCreate, AdminProviderUpdate, AdminSeekerCreate, AdminSeekerUpdate,
-    AdminSetPasswordRequest, AdminUserListResponse, AdminUserOut, BulkImportJobStarted,
-    DashboardAnalyticsResponse, DetailedPlatformAnalytics, ImportJobStatus, PlatformStatsResponse,
-    SuperAdminChangePasswordRequest, SuperAdminLoginRequest, SuperAdminLoginResponse,
-    SuperAdminProfileOut, SuperAdminProfileUpdate,
+    AdminSetPasswordRequest, AdminUserExportRequest, AdminUserListResponse, AdminUserOut,
+    BulkImportJobStarted, DashboardAnalyticsResponse, DetailedPlatformAnalytics, ImportJobStatus,
+    PlatformStatsResponse, SuperAdminChangePasswordRequest, SuperAdminLoginRequest,
+    SuperAdminLoginResponse, SuperAdminProfileOut, SuperAdminProfileUpdate,
 )
 from schemas.super_admin_detail import (
     AdminProviderDetailResponse, AdminSeekerDetailResponse,
@@ -974,6 +977,221 @@ async def bulk_import_providers(content: bytes, filename: str) -> BulkImportJobS
     job_id = _create_job("providers", filename or "import.csv")
     _start_background_import(job_id, content, UserRole.provider)
     return BulkImportJobStarted(job_id=job_id)
+
+
+# ── Export helpers ───────────────────────────────────────────────────────────
+
+SEEKER_EXPORT_FIELDS: dict[str, str] = {
+    "first_name": "First Name",
+    "last_name": "Last Name",
+    "email": "Email",
+    "phone": "Phone",
+    "industry": "Industry",
+    "job_role": "Job Role",
+    "job_type": "Job Type",
+    "salary_range": "Salary Range",
+    "experience": "Experience",
+    "profile_completion_percentage": "Profile Completion %",
+    "has_resume": "Has Resume",
+    "registered_job_fairs": "Job Fair Participation",
+    "is_verified": "Verified",
+    "onboarding_complete": "Onboarding Complete",
+    "has_password": "Has Password",
+    "status": "Status",
+    "welcome_email_status": "Welcome Email Status",
+    "welcome_email_error": "Welcome Email Error",
+    "created_at": "Joined",
+}
+
+PROVIDER_EXPORT_FIELDS: dict[str, str] = {
+    "first_name": "First Name",
+    "last_name": "Last Name",
+    "email": "Email",
+    "phone": "Phone",
+    "company_name": "Company Name",
+    "company_type": "Company Type",
+    "company_location": "Company Location",
+    "company_size": "Company Size",
+    "is_verified": "Verified",
+    "onboarding_complete": "Onboarding Complete",
+    "has_password": "Has Password",
+    "status": "Status",
+    "created_at": "Joined",
+}
+
+
+def _format_export_value(key: str, user: AdminUserOut) -> str:
+    data = user.model_dump()
+    if key == "status":
+        if not user.has_password:
+            return "No password"
+        if user.is_verified and user.onboarding_complete:
+            return "Active"
+        if user.is_verified:
+            return "Verified"
+        if user.onboarding_complete:
+            return "Onboarded"
+        return "Pending"
+    value = data.get(key)
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    if isinstance(value, list):
+        return ", ".join(str(v) for v in value if v)
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M")
+    return str(value)
+
+
+def _build_export_file(
+    rows: List[dict],
+    headers: List[str],
+    field_keys: List[str],
+    fmt: str,
+    filename_stem: str,
+) -> StreamingResponse:
+    fmt = (fmt or "csv").lower().strip()
+    if fmt not in ("csv", "xlsx"):
+        raise HTTPException(status_code=400, detail="format must be csv or xlsx")
+
+    if fmt == "csv":
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(headers)
+        for row in rows:
+            writer.writerow([row.get(k, "") for k in field_keys])
+        data = output.getvalue().encode("utf-8-sig")
+        media_type = "text/csv"
+        filename = f"{filename_stem}.csv"
+    else:
+        import pandas as pd
+        df = pd.DataFrame([{headers[i]: row.get(field_keys[i], "") for i in range(len(field_keys))} for row in rows])
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name="Export")
+        data = buf.getvalue()
+        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        filename = f"{filename_stem}.xlsx"
+
+    return StreamingResponse(
+        io.BytesIO(data),
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _resolve_export_fields(
+    requested: List[str],
+    allowed: dict[str, str],
+) -> Tuple[List[str], List[str]]:
+    if not requested:
+        raise HTTPException(status_code=400, detail="Select at least one field to export")
+    keys: List[str] = []
+    seen = set()
+    for key in requested:
+        k = (key or "").strip()
+        if not k or k in seen:
+            continue
+        if k not in allowed:
+            raise HTTPException(status_code=400, detail=f"Invalid export field: {k}")
+        keys.append(k)
+        seen.add(k)
+    if not keys:
+        raise HTTPException(status_code=400, detail="Select at least one field to export")
+    return keys, [allowed[k] for k in keys]
+
+
+async def export_seekers(body: AdminUserExportRequest, db: AsyncSession) -> StreamingResponse:
+    field_keys, headers = _resolve_export_fields(body.fields, SEEKER_EXPORT_FIELDS)
+
+    from models.job_fair import JobFairSeeker
+    seeker_filters = [User.role == UserRole.seeker, User.is_super_admin.is_(False)]
+    if body.industry:
+        seeker_filters.append(User.industry.ilike(f"%{body.industry.strip()}%"))
+    if body.search:
+        seeker_filters.append(_build_user_search_filter(body.search.strip()))
+
+    if body.status:
+        has_pwd = and_(User.hashed_password.isnot(None), User.hashed_password != "")
+        no_pwd = or_(User.hashed_password.is_(None), User.hashed_password == "")
+        if body.status == "no_password":
+            seeker_filters.append(no_pwd)
+        elif body.status == "active":
+            seeker_filters.append(and_(has_pwd, User.is_verified.is_(True), User.onboarding_complete.is_(True)))
+        elif body.status == "verified":
+            seeker_filters.append(and_(has_pwd, User.is_verified.is_(True), User.onboarding_complete.is_(False)))
+        elif body.status == "onboarded":
+            seeker_filters.append(and_(has_pwd, User.is_verified.is_(False), User.onboarding_complete.is_(True)))
+        elif body.status == "pending":
+            seeker_filters.append(and_(has_pwd, User.is_verified.is_(False), User.onboarding_complete.is_(False)))
+
+    select_q = select(User, Portfolio).outerjoin(Portfolio, Portfolio.user_id == User.id).where(*seeker_filters)
+    if body.job_fair_id:
+        select_q = select_q.join(JobFairSeeker, JobFairSeeker.seeker_id == User.id).where(
+            JobFairSeeker.job_fair_id == body.job_fair_id
+        )
+
+    result = await db.execute(select_q.order_by(User.created_at.desc(), User.id.desc()))
+    rows_db = result.all()
+    needs_resume = "has_resume" in field_keys
+    needs_fairs = "registered_job_fairs" in field_keys
+    needs_pct = "profile_completion_percentage" in field_keys
+    has_resume_ids = await _seeker_has_resume_ids(db, [u.id for u, _ in rows_db]) if needs_resume else set()
+
+    export_rows: List[dict] = []
+    for user, portfolio in rows_db:
+        pct = None
+        if needs_pct:
+            pct = 0
+            if portfolio:
+                pct, _, _ = calculate_completion(portfolio, user)
+        jf_titles = await _seeker_job_fair_names(db, user.id) if needs_fairs else None
+        admin_out = _user_to_admin_out(
+            user,
+            "seeker",
+            profile_completion_percentage=pct,
+            registered_job_fairs=jf_titles,
+            has_resume=(user.id in has_resume_ids) if needs_resume else None,
+        )
+        export_rows.append({k: _format_export_value(k, admin_out) for k in field_keys})
+
+    stamp = datetime.utcnow().strftime("%Y%m%d_%H%M")
+    return _build_export_file(export_rows, headers, field_keys, body.format, f"seekers_export_{stamp}")
+
+
+async def export_providers(body: AdminUserExportRequest, db: AsyncSession) -> StreamingResponse:
+    field_keys, headers = _resolve_export_fields(body.fields, PROVIDER_EXPORT_FIELDS)
+
+    provider_filters = [User.role == UserRole.provider, User.is_super_admin.is_(False)]
+    if body.search:
+        provider_filters.append(_build_user_search_filter(body.search.strip(), include_company=True))
+
+    if body.status:
+        has_pwd = and_(User.hashed_password.isnot(None), User.hashed_password != "")
+        no_pwd = or_(User.hashed_password.is_(None), User.hashed_password == "")
+        if body.status == "no_password":
+            provider_filters.append(no_pwd)
+        elif body.status == "active":
+            provider_filters.append(and_(has_pwd, User.is_verified.is_(True), User.onboarding_complete.is_(True)))
+        elif body.status == "verified":
+            provider_filters.append(and_(has_pwd, User.is_verified.is_(True), User.onboarding_complete.is_(False)))
+        elif body.status == "onboarded":
+            provider_filters.append(and_(has_pwd, User.is_verified.is_(False), User.onboarding_complete.is_(True)))
+        elif body.status == "pending":
+            provider_filters.append(and_(has_pwd, User.is_verified.is_(False), User.onboarding_complete.is_(False)))
+
+    result = await db.execute(
+        select(User).where(*provider_filters).order_by(User.created_at.desc(), User.id.desc())
+    )
+    users = result.scalars().all()
+    export_rows = [
+        {k: _format_export_value(k, _user_to_admin_out(u, "provider")) for k in field_keys}
+        for u in users
+    ]
+
+    stamp = datetime.utcnow().strftime("%Y%m%d_%H%M")
+    return _build_export_file(export_rows, headers, field_keys, body.format, f"providers_export_{stamp}")
 
 
 async def ensure_super_admin_user():
