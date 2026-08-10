@@ -15,7 +15,7 @@ class TrainingPortalCourseCreate(BaseModel):
     category: str = Field(..., min_length=1, max_length=100)
     duration: str = Field(..., min_length=1, max_length=50)
     delivery_mode: DeliveryMode = "Offline"
-    status: CourseStatus = "published"
+    status: CourseStatus = "draft"
     skill_level: SkillLevel = "Beginner"
     fee: float = Field(default=12000.0, ge=0)
     thumbnail_url: Optional[str] = None

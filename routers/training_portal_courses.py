@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Response
 from sqlalchemy import select, or_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -116,17 +116,27 @@ async def _course_out(db: AsyncSession, course: TrainingPortalCourse) -> Trainin
 
 @router.get("/", response_model=List[TrainingPortalCourseOut])
 async def list_portal_courses(
+    response: Response,
     search: Optional[str] = Query(None),
     category: Optional[str] = Query(None),
     status_filter: Optional[str] = Query(None, alias="status"),
     delivery_mode: Optional[str] = Query(None),
+    page: Optional[int] = Query(None, ge=1),
+    limit: Optional[int] = Query(None, ge=1, le=100),
+    page_size: Optional[int] = Query(None, ge=1, le=100),
     current_user: User = Depends(require_training_portal_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List training portal courses for admin, teacher, and candidate views."""
-    query = select(TrainingPortalCourse).order_by(TrainingPortalCourse.created_at.desc())
+    """List training portal courses for admin, teacher, and candidate views with search, filtering, and pagination."""
+    query = select(TrainingPortalCourse)
 
-    if search:
+    is_super_admin = (
+        getattr(current_user, "is_super_admin", False)
+        or (hasattr(current_user.role, "value") and current_user.role.value == "superadmin")
+        or (str(current_user.role or "") == "superadmin")
+    )
+
+    if search and search.strip():
         term = f"%{search.strip()}%"
         query = query.where(
             or_(
@@ -135,12 +145,30 @@ async def list_portal_courses(
                 TrainingPortalCourse.category.ilike(term),
             )
         )
-    if category:
+    if category and category.strip() and category.strip().lower() != "all":
         query = query.where(TrainingPortalCourse.category == category.strip())
-    if status_filter and status_filter != "all":
+
+    if not is_super_admin:
+        query = query.where(TrainingPortalCourse.status == "published")
+    elif status_filter and status_filter.strip() and status_filter.strip().lower() != "all":
         query = query.where(TrainingPortalCourse.status == status_filter.strip())
-    if delivery_mode and delivery_mode != "all":
+
+    if delivery_mode and delivery_mode.strip() and delivery_mode.strip().lower() != "all":
         query = query.where(TrainingPortalCourse.delivery_mode == delivery_mode.strip())
+
+    query = query.order_by(TrainingPortalCourse.created_at.desc())
+
+    # Count total matching items before pagination
+    count_stmt = select(func.count()).select_from(query.order_by(None).subquery())
+    total_result = await db.execute(count_stmt)
+    total_count = total_result.scalar() or 0
+    response.headers["X-Total-Count"] = str(total_count)
+
+    # Apply pagination if page and limit/page_size are supplied
+    effective_limit = limit or page_size
+    if page is not None and effective_limit is not None:
+        offset = (page - 1) * effective_limit
+        query = query.offset(offset).limit(effective_limit)
 
     result = await db.execute(query)
     courses = list(result.scalars().all())
