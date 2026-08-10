@@ -694,12 +694,27 @@ async def admin_list_feedback(
     return FeedbackListResponse(items=items, total=total)
 
 
+def _inquiry_to_out(inquiry: ContactInquiry) -> InquiryOut:
+    return InquiryOut(
+        id=inquiry.id,
+        name=inquiry.name,
+        email=inquiry.email,
+        phone=inquiry.phone,
+        subject=inquiry.subject,
+        message=inquiry.message,
+        created_at=inquiry.created_at,
+    )
+
+
 async def create_contact_inquiry(body: InquiryCreate, db: AsyncSession) -> InquiryOut:
+    phone = body.phone.strip() if body.phone else None
     inquiry = ContactInquiry(
         name=body.name.strip(),
         email=body.email.strip(),
+        phone=phone or None,
         subject=body.subject.strip() if body.subject else None,
         message=body.message.strip(),
+        status="new",
     )
     db.add(inquiry)
     await db.commit()
@@ -714,14 +729,7 @@ async def create_contact_inquiry(body: InquiryCreate, db: AsyncSession) -> Inqui
         related_user_id=str(inquiry.id),
     )
 
-    return InquiryOut(
-        id=inquiry.id,
-        name=inquiry.name,
-        email=inquiry.email,
-        subject=inquiry.subject,
-        message=inquiry.message,
-        created_at=inquiry.created_at,
-    )
+    return _inquiry_to_out(inquiry)
 
 
 async def admin_list_inquiries(
@@ -738,6 +746,7 @@ async def admin_list_inquiries(
         filt = or_(
             ContactInquiry.name.ilike(term),
             ContactInquiry.email.ilike(term),
+            ContactInquiry.phone.ilike(term),
             ContactInquiry.subject.ilike(term),
             ContactInquiry.message.ilike(term),
         )
@@ -754,17 +763,7 @@ async def admin_list_inquiries(
     items = result.scalars().all()
 
     return InquiryListResponse(
-        items=[
-            InquiryOut(
-                id=item.id,
-                name=item.name,
-                email=item.email,
-                subject=item.subject,
-                message=item.message,
-                created_at=item.created_at,
-            )
-            for item in items
-        ],
+        items=[_inquiry_to_out(item) for item in items],
         total=total,
     )
 

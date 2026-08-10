@@ -5,7 +5,7 @@ from config import settings
 
 def _support_contact() -> str:
     phones = settings.SUPPORT_PHONES or ""
-    email = settings.SUPPORT_EMAIL or "support@rojgarmela.com"
+    email = settings.SUPPORT_EMAIL or "info@rojgarmela.ai"
     parts = [f"Email: {email}"]
     if phones.strip():
         parts.append(f"Phone: {phones}")

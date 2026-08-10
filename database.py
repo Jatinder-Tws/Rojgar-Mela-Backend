@@ -106,6 +106,10 @@ async def patch_support_bot_schema():
         "ALTER TABLE support_tickets ADD COLUMN IF NOT EXISTS bot_handled BOOLEAN NOT NULL DEFAULT FALSE",
         "ALTER TABLE support_tickets ADD COLUMN IF NOT EXISTS escalated_at TIMESTAMP",
         "ALTER TABLE ticket_messages ADD COLUMN IF NOT EXISTS is_bot_reply BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE contact_inquiries ADD COLUMN IF NOT EXISTS phone VARCHAR(20)",
+        "ALTER TABLE contact_inquiries ADD COLUMN IF NOT EXISTS status VARCHAR(40) NOT NULL DEFAULT 'new'",
+        "ALTER TABLE contact_inquiries ADD COLUMN IF NOT EXISTS admin_notes TEXT",
+        "ALTER TABLE contact_inquiries ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW()",
     ]
     async with engine.begin() as conn:
         for sql in statements:
