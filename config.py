@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     SMTP_TLS: bool = True
 
     # Platform support (used in transactional emails)
-    SUPPORT_EMAIL: str = "support@rojgarmela.com"
+    SUPPORT_EMAIL: str = "info@rojgarmela.ai"
     SUPPORT_PHONES: str = "+91-9915137531, +91-9915130531"
 
     # Redis

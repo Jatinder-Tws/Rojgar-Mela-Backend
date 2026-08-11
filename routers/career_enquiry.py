@@ -15,6 +15,7 @@ from schemas.career_enquiry import (
     CareerEnquiryListResponse,
     CareerEnquiryOut,
     CareerEnquiryStatusUpdate,
+    UnifiedEnquiryOut,
 )
 from services.auth_service import require_super_admin
 
@@ -39,6 +40,7 @@ async def list_enquiries(
     status: Optional[str] = None,
     domain: Optional[str] = None,
     qualification: Optional[str] = None,
+    source: Optional[str] = None,
     _admin: User = Depends(require_super_admin),
     db: AsyncSession = Depends(get_db),
 ):
@@ -50,10 +52,11 @@ async def list_enquiries(
         status=status,
         domain=domain,
         qualification=qualification,
+        source=source,
     )
 
 
-@admin_router.patch("/{enquiry_id}/status", response_model=CareerEnquiryOut)
+@admin_router.patch("/{enquiry_id}/status", response_model=UnifiedEnquiryOut)
 async def update_enquiry_status(
     enquiry_id: str,
     body: CareerEnquiryStatusUpdate,

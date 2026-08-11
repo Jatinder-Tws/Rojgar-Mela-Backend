@@ -117,6 +117,7 @@ class FeedbackListResponse(BaseModel):
 class InquiryCreate(BaseModel):
     name: str = Field(..., min_length=2, max_length=100)
     email: str = Field(..., min_length=5, max_length=100)
+    phone: Optional[str] = Field(None, max_length=20)
     subject: Optional[str] = Field(None, max_length=200)
     message: str = Field(..., min_length=5, max_length=5000)
 
@@ -125,6 +126,7 @@ class InquiryOut(BaseModel):
     id: str
     name: str
     email: str
+    phone: Optional[str] = None
     subject: Optional[str] = None
     message: str
     created_at: datetime

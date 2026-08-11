@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_serializer
 
@@ -11,6 +11,8 @@ VALID_ENQUIRY_STATUSES = {
     "not_interested",
     "closed",
 }
+
+EnquirySource = Literal["career", "contact"]
 
 
 def _utc_iso(dt: datetime) -> str:
@@ -30,6 +32,7 @@ class CareerEnquiryCreate(BaseModel):
 class CareerEnquiryStatusUpdate(BaseModel):
     status: str = Field(..., min_length=1, max_length=40)
     admin_notes: Optional[str] = Field(None, max_length=5000)
+    source: EnquirySource = "career"
 
 
 class CareerEnquiryOut(BaseModel):
@@ -52,8 +55,33 @@ class CareerEnquiryOut(BaseModel):
         from_attributes = True
 
 
+class UnifiedEnquiryOut(BaseModel):
+    id: str
+    source: EnquirySource
+    name: str
+    email: str
+    phone: Optional[str] = None
+    qualification: Optional[str] = None
+    domain: Optional[str] = None
+    subject: Optional[str] = None
+    message: Optional[str] = None
+    status: str
+    admin_notes: Optional[str] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    @field_serializer("created_at", "updated_at")
+    def serialize_datetimes(self, value: Optional[datetime]) -> Optional[str]:
+        if value is None:
+            return None
+        return _utc_iso(value)
+
+    class Config:
+        from_attributes = True
+
+
 class CareerEnquiryListResponse(BaseModel):
-    items: List[CareerEnquiryOut]
+    items: List[UnifiedEnquiryOut]
     total: int
     page: int = 1
     page_size: int = 20

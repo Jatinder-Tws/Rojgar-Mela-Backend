@@ -1,13 +1,14 @@
 import logging
 import re
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import HTTPException
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.career_enquiry import DEFAULT_STATUS, CareerEnquiry
+from models.contact_inquiry import DEFAULT_CONTACT_STATUS, ContactInquiry
 from models.notification import NotificationType
 from schemas.career_enquiry import (
     VALID_ENQUIRY_STATUSES,
@@ -15,6 +16,7 @@ from schemas.career_enquiry import (
     CareerEnquiryListResponse,
     CareerEnquiryOut,
     CareerEnquiryStatusUpdate,
+    UnifiedEnquiryOut,
 )
 from services.notification_service import notify_super_admins
 
@@ -26,7 +28,7 @@ def _normalize_phone(phone: str) -> str:
     return digits
 
 
-def _to_out(item: CareerEnquiry) -> CareerEnquiryOut:
+def _career_to_out(item: CareerEnquiry) -> CareerEnquiryOut:
     return CareerEnquiryOut(
         id=item.id,
         full_name=item.full_name,
@@ -35,6 +37,42 @@ def _to_out(item: CareerEnquiry) -> CareerEnquiryOut:
         qualification=item.qualification,
         domain=item.domain,
         status=item.status,
+        admin_notes=item.admin_notes,
+        created_at=item.created_at,
+        updated_at=item.updated_at,
+    )
+
+
+def _career_to_unified(item: CareerEnquiry) -> UnifiedEnquiryOut:
+    return UnifiedEnquiryOut(
+        id=item.id,
+        source="career",
+        name=item.full_name,
+        email=item.email,
+        phone=item.phone,
+        qualification=item.qualification,
+        domain=item.domain,
+        subject=None,
+        message=None,
+        status=item.status or DEFAULT_STATUS,
+        admin_notes=item.admin_notes,
+        created_at=item.created_at,
+        updated_at=item.updated_at,
+    )
+
+
+def _contact_to_unified(item: ContactInquiry) -> UnifiedEnquiryOut:
+    return UnifiedEnquiryOut(
+        id=item.id,
+        source="contact",
+        name=item.name,
+        email=item.email,
+        phone=item.phone,
+        qualification=None,
+        domain=None,
+        subject=item.subject,
+        message=item.message,
+        status=item.status or DEFAULT_CONTACT_STATUS,
         admin_notes=item.admin_notes,
         created_at=item.created_at,
         updated_at=item.updated_at,
@@ -72,21 +110,17 @@ async def create_career_enquiry(body: CareerEnquiryCreate, db: AsyncSession) -> 
     except Exception as exc:
         logger.warning("Career enquiry admin notify failed (non-fatal): %s", exc)
 
-    return _to_out(enquiry)
+    return _career_to_out(enquiry)
 
 
-async def admin_list_career_enquiries(
+async def _list_career_rows(
     db: AsyncSession,
-    page: int = 1,
-    page_size: int = 20,
     search: Optional[str] = None,
     status: Optional[str] = None,
     domain: Optional[str] = None,
     qualification: Optional[str] = None,
-) -> CareerEnquiryListResponse:
+) -> List[CareerEnquiry]:
     query = select(CareerEnquiry)
-    count_query = select(func.count()).select_from(CareerEnquiry)
-
     filters = []
     if search and search.strip():
         term = f"%{search.strip()}%"
@@ -105,22 +139,85 @@ async def admin_list_career_enquiries(
         filters.append(CareerEnquiry.domain == domain.strip())
     if qualification and qualification.strip() and qualification.strip() != "all":
         filters.append(CareerEnquiry.qualification == qualification.strip())
-
     if filters:
         query = query.where(*filters)
-        count_query = count_query.where(*filters)
+    result = await db.execute(query.order_by(CareerEnquiry.created_at.desc()))
+    return list(result.scalars().all())
 
-    total_result = await db.execute(count_query)
-    total = total_result.scalar() or 0
 
-    offset = (page - 1) * page_size
-    result = await db.execute(
-        query.order_by(CareerEnquiry.created_at.desc()).offset(offset).limit(page_size)
+async def _list_contact_rows(
+    db: AsyncSession,
+    search: Optional[str] = None,
+    status: Optional[str] = None,
+) -> List[ContactInquiry]:
+    query = select(ContactInquiry)
+    filters = []
+    if search and search.strip():
+        term = f"%{search.strip()}%"
+        filters.append(
+            or_(
+                ContactInquiry.name.ilike(term),
+                ContactInquiry.email.ilike(term),
+                ContactInquiry.phone.ilike(term),
+                ContactInquiry.subject.ilike(term),
+                ContactInquiry.message.ilike(term),
+            )
+        )
+    if status and status.strip() and status.strip() != "all":
+        filters.append(ContactInquiry.status == status.strip())
+    if filters:
+        query = query.where(*filters)
+    result = await db.execute(query.order_by(ContactInquiry.created_at.desc()))
+    return list(result.scalars().all())
+
+
+async def admin_list_career_enquiries(
+    db: AsyncSession,
+    page: int = 1,
+    page_size: int = 20,
+    search: Optional[str] = None,
+    status: Optional[str] = None,
+    domain: Optional[str] = None,
+    qualification: Optional[str] = None,
+    source: Optional[str] = None,
+) -> CareerEnquiryListResponse:
+    source_key = (source or "all").strip().lower()
+    if source_key not in {"all", "career", "contact"}:
+        raise HTTPException(status_code=400, detail="Invalid source. Allowed: all, career, contact")
+
+    # Domain / qualification only apply to Career Program rows.
+    career_only_filters = bool(
+        (domain and domain.strip() and domain.strip() != "all")
+        or (qualification and qualification.strip() and qualification.strip() != "all")
     )
-    items = result.scalars().all()
+
+    unified: List[UnifiedEnquiryOut] = []
+
+    include_career = source_key in {"all", "career"}
+    include_contact = source_key in {"all", "contact"} and not career_only_filters
+
+    if include_career:
+        career_rows = await _list_career_rows(
+            db,
+            search=search,
+            status=status,
+            domain=domain,
+            qualification=qualification,
+        )
+        unified.extend(_career_to_unified(row) for row in career_rows)
+
+    if include_contact:
+        contact_rows = await _list_contact_rows(db, search=search, status=status)
+        unified.extend(_contact_to_unified(row) for row in contact_rows)
+
+    unified.sort(key=lambda item: item.created_at or datetime.min, reverse=True)
+
+    total = len(unified)
+    offset = (page - 1) * page_size
+    page_items = unified[offset : offset + page_size]
 
     return CareerEnquiryListResponse(
-        items=[_to_out(item) for item in items],
+        items=page_items,
         total=total,
         page=page,
         page_size=page_size,
@@ -131,7 +228,7 @@ async def admin_update_career_enquiry_status(
     enquiry_id: str,
     body: CareerEnquiryStatusUpdate,
     db: AsyncSession,
-) -> CareerEnquiryOut:
+) -> UnifiedEnquiryOut:
     status = (body.status or "").strip().lower()
     if status not in VALID_ENQUIRY_STATUSES:
         raise HTTPException(
@@ -139,16 +236,33 @@ async def admin_update_career_enquiry_status(
             detail=f"Invalid status. Allowed: {', '.join(sorted(VALID_ENQUIRY_STATUSES))}",
         )
 
-    result = await db.execute(select(CareerEnquiry).where(CareerEnquiry.id == enquiry_id))
-    enquiry = result.scalar_one_or_none()
-    if not enquiry:
+    source = body.source or "career"
+
+    if source == "career":
+        result = await db.execute(select(CareerEnquiry).where(CareerEnquiry.id == enquiry_id))
+        enquiry = result.scalar_one_or_none()
+        if not enquiry:
+            raise HTTPException(status_code=404, detail="Enquiry not found")
+
+        enquiry.status = status
+        if body.admin_notes is not None:
+            enquiry.admin_notes = body.admin_notes.strip() or None
+        enquiry.updated_at = datetime.utcnow()
+
+        await db.commit()
+        await db.refresh(enquiry)
+        return _career_to_unified(enquiry)
+
+    result = await db.execute(select(ContactInquiry).where(ContactInquiry.id == enquiry_id))
+    inquiry = result.scalar_one_or_none()
+    if not inquiry:
         raise HTTPException(status_code=404, detail="Enquiry not found")
 
-    enquiry.status = status
+    inquiry.status = status
     if body.admin_notes is not None:
-        enquiry.admin_notes = body.admin_notes.strip() or None
-    enquiry.updated_at = datetime.utcnow()
+        inquiry.admin_notes = body.admin_notes.strip() or None
+    inquiry.updated_at = datetime.utcnow()
 
     await db.commit()
-    await db.refresh(enquiry)
-    return _to_out(enquiry)
+    await db.refresh(inquiry)
+    return _contact_to_unified(inquiry)
