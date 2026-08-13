@@ -27,10 +27,11 @@ class CareerEnquiryCreate(BaseModel):
     phone: str = Field(..., min_length=10, max_length=20)
     qualification: str = Field(..., min_length=1, max_length=100)
     domain: str = Field(..., min_length=1, max_length=150)
+    message: Optional[str] = Field(None, max_length=2000)
 
 
 class CareerEnquiryStatusUpdate(BaseModel):
-    status: str = Field(..., min_length=1, max_length=40)
+    status: Optional[str] = Field(None, min_length=1, max_length=40)
     admin_notes: Optional[str] = Field(None, max_length=5000)
     source: EnquirySource = "career"
 
@@ -42,6 +43,7 @@ class CareerEnquiryOut(BaseModel):
     phone: str
     qualification: str
     domain: str
+    message: Optional[str] = None
     status: str
     admin_notes: Optional[str] = None
     created_at: datetime

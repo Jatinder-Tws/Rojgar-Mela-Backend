@@ -36,6 +36,7 @@ def _career_to_out(item: CareerEnquiry) -> CareerEnquiryOut:
         phone=item.phone,
         qualification=item.qualification,
         domain=item.domain,
+        message=item.message,
         status=item.status,
         admin_notes=item.admin_notes,
         created_at=item.created_at,
@@ -53,7 +54,7 @@ def _career_to_unified(item: CareerEnquiry) -> UnifiedEnquiryOut:
         qualification=item.qualification,
         domain=item.domain,
         subject=None,
-        message=None,
+        message=item.message,
         status=item.status or DEFAULT_STATUS,
         admin_notes=item.admin_notes,
         created_at=item.created_at,
@@ -84,12 +85,15 @@ async def create_career_enquiry(body: CareerEnquiryCreate, db: AsyncSession) -> 
     if len(phone) < 10 or len(phone) > 12:
         raise HTTPException(status_code=400, detail="Enter a valid 10–12 digit phone number")
 
+    message = (body.message or "").strip() or None
+
     enquiry = CareerEnquiry(
         full_name=body.full_name.strip(),
         email=body.email.strip().lower(),
         phone=phone,
         qualification=body.qualification.strip(),
         domain=body.domain.strip(),
+        message=message,
         status=DEFAULT_STATUS,
     )
     db.add(enquiry)
@@ -131,6 +135,7 @@ async def _list_career_rows(
                 CareerEnquiry.phone.ilike(term),
                 CareerEnquiry.domain.ilike(term),
                 CareerEnquiry.qualification.ilike(term),
+                CareerEnquiry.message.ilike(term),
             )
         )
     if status and status.strip() and status.strip() != "all":
@@ -229,14 +234,20 @@ async def admin_update_career_enquiry_status(
     body: CareerEnquiryStatusUpdate,
     db: AsyncSession,
 ) -> UnifiedEnquiryOut:
-    status = (body.status or "").strip().lower()
-    if status not in VALID_ENQUIRY_STATUSES:
+    source = body.source or "career"
+    raw_status = (body.status or "").strip().lower()
+    has_status = bool(raw_status)
+    has_notes = body.admin_notes is not None
+
+    if not has_status and not has_notes:
+        raise HTTPException(status_code=400, detail="Provide status or admin_notes")
+
+    status = raw_status
+    if has_status and status not in VALID_ENQUIRY_STATUSES:
         raise HTTPException(
             status_code=400,
             detail=f"Invalid status. Allowed: {', '.join(sorted(VALID_ENQUIRY_STATUSES))}",
         )
-
-    source = body.source or "career"
 
     if source == "career":
         result = await db.execute(select(CareerEnquiry).where(CareerEnquiry.id == enquiry_id))
@@ -244,8 +255,9 @@ async def admin_update_career_enquiry_status(
         if not enquiry:
             raise HTTPException(status_code=404, detail="Enquiry not found")
 
-        enquiry.status = status
-        if body.admin_notes is not None:
+        if has_status:
+            enquiry.status = status
+        if has_notes:
             enquiry.admin_notes = body.admin_notes.strip() or None
         enquiry.updated_at = datetime.utcnow()
 
@@ -258,8 +270,9 @@ async def admin_update_career_enquiry_status(
     if not inquiry:
         raise HTTPException(status_code=404, detail="Enquiry not found")
 
-    inquiry.status = status
-    if body.admin_notes is not None:
+    if has_status:
+        inquiry.status = status
+    if has_notes:
         inquiry.admin_notes = body.admin_notes.strip() or None
     inquiry.updated_at = datetime.utcnow()
 

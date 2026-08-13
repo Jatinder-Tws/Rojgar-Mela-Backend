@@ -596,6 +596,19 @@ async def patch_google_calendar_schema():
                 pass
 
 
+async def patch_career_enquiry_schema():
+    """Add message column to career_enquiries for public enquiry form."""
+    statements = [
+        "ALTER TABLE career_enquiries ADD COLUMN IF NOT EXISTS message TEXT",
+    ]
+    async with engine.begin() as conn:
+        for sql in statements:
+            try:
+                await conn.execute(text(sql))
+            except Exception:
+                pass
+
+
 async def patch_teacher_role_schema():
     """Add teacher to userrole enum and apply training table indexes."""
     

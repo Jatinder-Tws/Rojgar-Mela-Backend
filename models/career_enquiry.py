@@ -25,6 +25,7 @@ class CareerEnquiry(Base):
     phone = Column(String(20), nullable=False)
     qualification = Column(String(100), nullable=False)
     domain = Column(String(150), nullable=False)
+    message = Column(Text, nullable=True)
     status = Column(String(40), nullable=False, default=DEFAULT_STATUS)
     admin_notes = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

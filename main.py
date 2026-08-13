@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
 from config import settings, get_cors_allow_origins, get_cors_origin_regex
-from database import init_db, patch_email_admin_schema, patch_interview_application_schema, patch_dashboard_indexes, patch_support_bot_schema, patch_company_internships_schema, patch_teacher_role_schema, patch_training_portal_schema, patch_users_registration_schema, patch_google_calendar_schema, AsyncSessionLocal, engine
+from database import init_db, patch_email_admin_schema, patch_interview_application_schema, patch_dashboard_indexes, patch_support_bot_schema, patch_company_internships_schema, patch_teacher_role_schema, patch_training_portal_schema, patch_users_registration_schema, patch_google_calendar_schema, patch_career_enquiry_schema, AsyncSessionLocal, engine
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +60,7 @@ async def lifespan(app: FastAPI):
     await patch_training_portal_schema()
     await patch_users_registration_schema()
     await patch_google_calendar_schema()
+    await patch_career_enquiry_schema()
     from controllers.super_admin_controller import ensure_super_admin_user
     await ensure_super_admin_user()
 
