@@ -18,6 +18,7 @@ class TrainingPortalCourseCreate(BaseModel):
     status: CourseStatus = "draft"
     skill_level: SkillLevel = "Beginner"
     fee: float = Field(default=12000.0, ge=0)
+    emi_fee: Optional[float] = Field(default=None, ge=0)
     thumbnail_url: Optional[str] = None
     prerequisites: Optional[str] = None
     key_highlights: Optional[List[str]] = []
@@ -33,6 +34,7 @@ class TrainingPortalCourseUpdate(BaseModel):
     status: Optional[CourseStatus] = None
     skill_level: Optional[SkillLevel] = None
     fee: Optional[float] = Field(None, ge=0)
+    emi_fee: Optional[float] = Field(None, ge=0)
     thumbnail_url: Optional[str] = None
     prerequisites: Optional[str] = None
     key_highlights: Optional[List[str]] = None
@@ -49,6 +51,7 @@ class TrainingPortalCourseOut(BaseModel):
     status: CourseStatus
     skill_level: SkillLevel
     fee: float
+    emi_fee: Optional[float] = None
     thumbnail_url: Optional[str] = None
     prerequisites: Optional[str] = None
     key_highlights: List[str] = []

@@ -248,6 +248,7 @@ async def patch_training_portal_schema():
         "ALTER TABLE training_portal_courses ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'published'",
         "ALTER TABLE training_portal_courses ADD COLUMN IF NOT EXISTS skill_level VARCHAR(20) NOT NULL DEFAULT 'Beginner'",
         "ALTER TABLE training_portal_courses ADD COLUMN IF NOT EXISTS fee FLOAT NOT NULL DEFAULT 12000.0",
+        "ALTER TABLE training_portal_courses ADD COLUMN IF NOT EXISTS emi_fee FLOAT",
         "ALTER TABLE training_portal_courses ADD COLUMN IF NOT EXISTS thumbnail_url VARCHAR(500)",
         "ALTER TABLE training_portal_courses ADD COLUMN IF NOT EXISTS prerequisites TEXT",
         "ALTER TABLE training_portal_courses ADD COLUMN IF NOT EXISTS key_highlights JSON NOT NULL DEFAULT '[]'::json",

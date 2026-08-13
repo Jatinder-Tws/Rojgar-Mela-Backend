@@ -44,7 +44,7 @@ class Settings(BaseSettings):
 
     # Platform support (used in transactional emails)
     SUPPORT_EMAIL: str = "info@rojgarmela.ai"
-    SUPPORT_PHONES: str = "+91-9915137531, +91-9915130531"
+    SUPPORT_PHONES: str = "+91-8968455531"
 
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"

@@ -441,6 +441,7 @@ class PortalOfflinePaymentRecord(BaseModel):
     bank_name: Optional[str] = None
     notes: Optional[str] = None
     date: Optional[str] = None
+    installment_number: Optional[int] = None
 
 
 class PortalRefundRecord(BaseModel):
@@ -539,6 +540,10 @@ class PortalPaymentInvoiceOut(BaseModel):
     notes: Optional[str] = None
     issuer_label: str = "RojgarMela Training Portal"
     line_items: list[PortalInvoiceLineItem] = Field(default_factory=list)
+    base_fee: Optional[float] = None
+    emi_interest_amount: Optional[float] = None
+    emi_interest_percent: Optional[float] = None
+    transactions: list[PortalTransactionOut] = Field(default_factory=list)
 
 
 # ── Dashboard summary ─────────────────────────────────────────────────────────
