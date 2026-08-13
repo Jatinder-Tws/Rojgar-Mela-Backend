@@ -95,6 +95,17 @@ def _support_context() -> dict[str, str]:
     }
 
 
+def _emi_interest(base_fee: Optional[float], total_fee: float) -> tuple[Optional[float], Optional[float]]:
+    """Returns (interest_amount, interest_percent) when total_fee exceeds base_fee, else (None, None)."""
+    if not base_fee or base_fee <= 0:
+        return None, None
+    interest_amount = round(total_fee - base_fee, 2)
+    if interest_amount <= 0:
+        return None, None
+    interest_percent = round((interest_amount / base_fee) * 100, 2)
+    return interest_amount, interest_percent
+
+
 def _notification_message_html(message: str) -> Markup:
     """Render notification body as HTML without exposing escaped source tags."""
     if re.search(r"</?[a-zA-Z][^>]*>", message or ""):
@@ -311,6 +322,51 @@ async def send_welcome_email(
         **_support_context(),
     )
     await _send_branded_email(to_email, f"Welcome to RojgarMela.AI, {first_name}!", html)
+
+
+async def send_enrollment_receipt_email(
+    to_email: str,
+    first_name: str,
+    program_title: str,
+    total_fee: float,
+    paid_amount: float,
+    balance_due: float,
+    payment_type: str = "Full Payment",
+    payment_mode: str = "Cash",
+    batch_name: Optional[str] = None,
+    enrollment_date: Optional[str] = None,
+    installments: Optional[list] = None,
+    password: Optional[str] = None,
+    base_fee: Optional[float] = None,
+) -> None:
+    """Send course enrollment confirmation & fee payment receipt email to candidate."""
+    template = _env.get_template("training_enrollment_receipt_email.html")
+    today = enrollment_date or datetime.utcnow().strftime("%Y-%m-%d")
+    emi_interest_amount, emi_interest_percent = _emi_interest(base_fee, total_fee)
+    html = template.render(
+        first_name=first_name,
+        email=to_email,
+        program_title=program_title,
+        batch_name=batch_name or "",
+        enrollment_date=today,
+        total_fee=total_fee,
+        paid_amount=paid_amount,
+        balance_due=balance_due,
+        payment_type=payment_type,
+        payment_mode=payment_mode,
+        installments=installments or [],
+        password=password or "",
+        emi_interest_amount=emi_interest_amount,
+        emi_interest_percent=emi_interest_percent,
+        login_url=f"{settings.FRONTEND_URL.rstrip('/')}/login",
+        year=datetime.utcnow().year,
+        **_support_context(),
+    )
+    await _send_branded_email(
+        to_email,
+        f"Enrollment Receipt: {program_title} – RojgarMela",
+        html,
+    )
 
 
 async def send_notification_email(to_email: str, first_name: str, title: str, message: str) -> None:
@@ -588,3 +644,63 @@ async def send_training_portal_payment_success_email(
     {invoice_url_html}
     """
     await send_notification_email(to_email, candidate_name, "Payment Received – RojgarMela Training", html)
+
+
+async def send_training_enrollment_receipt_email(
+    to_email: str,
+    first_name: str,
+    program_title: str,
+    total_fee: float,
+    paid_amount: float,
+    balance_due: float,
+    payment_type: str,
+    payment_mode: str,
+    receipt_number: str,
+    enrollment_date: str,
+    batch_name: Optional[str] = None,
+    password: Optional[str] = None,
+    installments: Optional[list[dict[str, Any]]] = None,
+    base_fee: Optional[float] = None,
+) -> None:
+    """Send formal course enrollment fee receipt email with HTML template & printable receipt attachment."""
+    template = _env.get_template("training_enrollment_receipt_email.html")
+    emi_interest_amount, emi_interest_percent = _emi_interest(base_fee, total_fee)
+    context = {
+        "first_name": first_name,
+        "email": to_email,
+        "program_title": program_title,
+        "total_fee": total_fee,
+        "paid_amount": paid_amount,
+        "balance_due": balance_due,
+        "payment_type": payment_type,
+        "payment_mode": payment_mode,
+        "receipt_number": receipt_number,
+        "enrollment_date": enrollment_date,
+        "batch_name": batch_name or "",
+        "password": password,
+        "installments": installments or [],
+        "emi_interest_amount": emi_interest_amount,
+        "emi_interest_percent": emi_interest_percent,
+        "login_url": f"{settings.TRAINING_URL.rstrip('/')}/login",
+        "year": datetime.now().year,
+        **_support_context(),
+    }
+    rendered_html = template.render(context)
+    plain_text = _html_to_plain_text(rendered_html)
+
+    subject = f"Fee Payment Receipt #{receipt_number} – RojgarMela Training"
+    msg = MIMEMultipart("mixed")
+    _apply_common_headers(msg, to_email, subject)
+
+    alt = MIMEMultipart("alternative")
+    alt.attach(MIMEText(plain_text, "plain", "utf-8"))
+    alt.attach(MIMEText(rendered_html, "html", "utf-8"))
+    msg.attach(alt)
+
+    # Attach formal printable payment receipt file
+    receipt_filename = f"Fee_Receipt_{receipt_number.replace('/', '_')}.html"
+    receipt_attachment = MIMEApplication(rendered_html.encode("utf-8"), _subtype="html")
+    receipt_attachment.add_header("Content-Disposition", "attachment", filename=receipt_filename)
+    msg.attach(receipt_attachment)
+
+    await _deliver_message(msg, to_email)

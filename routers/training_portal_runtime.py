@@ -15,7 +15,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
 from database import get_db
-from models.user import User
+from models.user import User, UserRole
+from services.auth_service import hash_password
+from services.email_service import (
+    send_welcome_email,
+    send_enrollment_receipt_email,
+    send_training_enrollment_receipt_email,
+)
+from schemas.training_admin_student import (
+    StudentLookupOut,
+    AdminRegisterAndEnrollStudentCreate,
+    AdminRegisterAndEnrollStudentOut,
+)
 from models.training_portal_internship import TrainingPortalInternship
 from models.training_portal_batch import TrainingPortalBatch
 from models.training_portal_enrollment import TrainingPortalEnrollment
@@ -387,10 +398,54 @@ async def _record_transaction(
     return row
 
 
-def _build_invoice(
+async def _emi_interest_for_enrollment(
+    db: AsyncSession, enrollment: TrainingPortalEnrollment
+) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    """Returns (base_fee, interest_amount, interest_percent) when the enrollment's
+    total fee exceeds the course's standard fee (i.e. an EMI surcharge applies)."""
+    if enrollment.enrollment_type != "course" or not enrollment.item_id:
+        return None, None, None
+    course_result = await db.execute(
+        select(TrainingPortalCourse).where(TrainingPortalCourse.id == enrollment.item_id)
+    )
+    course = course_result.scalar_one_or_none()
+    if not course or not course.fee or course.fee <= 0:
+        return None, None, None
+    base_fee = float(course.fee)
+    interest_amount = round(float(enrollment.total_fee) - base_fee, 2)
+    if interest_amount <= 0:
+        return base_fee, None, None
+    interest_percent = round((interest_amount / base_fee) * 100, 2)
+    return base_fee, interest_amount, interest_percent
+
+
+async def _build_invoice(
+    db: AsyncSession,
     transaction: TrainingPortalTransaction,
     enrollment: TrainingPortalEnrollment,
 ) -> PortalPaymentInvoiceOut:
+    base_fee, interest_amount, interest_percent = await _emi_interest_for_enrollment(db, enrollment)
+    line_items = [
+        PortalInvoiceLineItem(
+            label=f"{transaction.program_title} ({transaction.transaction_type.title()})",
+            amount=transaction.amount,
+        )
+    ]
+    if interest_amount:
+        line_items.append(
+            PortalInvoiceLineItem(
+                label=f"Includes EMI Interest / Surcharge ({interest_percent}% Interest)",
+                amount=interest_amount,
+            )
+        )
+
+    txn_history_result = await db.execute(
+        select(TrainingPortalTransaction)
+        .where(TrainingPortalTransaction.enrollment_id == enrollment.id)
+        .order_by(TrainingPortalTransaction.created_at.desc())
+    )
+    transaction_history = [transaction_to_out(row) for row in txn_history_result.scalars().all()]
+
     return PortalPaymentInvoiceOut(
         invoice_number=_make_invoice_number(transaction.transaction_id),
         transaction_id=transaction.transaction_id,
@@ -416,12 +471,11 @@ def _build_invoice(
         balance_due=enrollment.balance_due,
         enrollment_date=enrollment.enrollment_date,
         notes=transaction.notes or enrollment.notes,
-        line_items=[
-            PortalInvoiceLineItem(
-                label=f"{transaction.program_title} ({transaction.transaction_type.title()})",
-                amount=transaction.amount,
-            )
-        ],
+        line_items=line_items,
+        base_fee=base_fee,
+        emi_interest_amount=interest_amount,
+        emi_interest_percent=interest_percent,
+        transactions=transaction_history,
     )
 
 
@@ -1434,20 +1488,54 @@ async def record_offline_payment(
     if not enrollment:
         raise HTTPException(status_code=404, detail="Enrollment not found")
 
-    paid = body.amount or enrollment.balance_due or enrollment.total_fee
-    enrollment.paid_amount = paid
-    enrollment.balance_due = max(0.0, enrollment.total_fee - paid)
-    enrollment.payment_status = "paid_offline"
+    payment_amt = max(0.0, float(body.amount or 0.0))
+    if payment_amt <= 0 and enrollment.balance_due > 0:
+        payment_amt = enrollment.balance_due
+
+    new_paid_amount = min(enrollment.total_fee, (enrollment.paid_amount or 0.0) + payment_amt)
+    new_balance_due = max(0.0, enrollment.total_fee - new_paid_amount)
+
+    enrollment.paid_amount = new_paid_amount
+    enrollment.balance_due = new_balance_due
+    enrollment.payment_status = "paid_offline" if new_balance_due <= 0.01 else "partially_paid"
     enrollment.payment_mode = body.payment_mode
     enrollment.notes = body.notes or enrollment.notes or "Offline payment recorded by Admin"
     enrollment.status = "active"
     enrollment.updated_at = datetime.utcnow()
+
+    # Update EMI installments list if present
+    installments_list = enrollment.installments or []
+    if installments_list and isinstance(installments_list, list):
+        updated_installments = []
+        payment_date_str = body.date or datetime.utcnow().strftime("%Y-%m-%d")
+        matched = False
+
+        for inst in installments_list:
+            if isinstance(inst, dict):
+                inst_copy = dict(inst)
+                if not matched and inst_copy.get("status") != "paid":
+                    if body.installment_number:
+                        if inst_copy.get("number") == body.installment_number:
+                            inst_copy["status"] = "paid"
+                            inst_copy["paidDate"] = payment_date_str
+                            inst_copy["paymentMode"] = body.payment_mode
+                            matched = True
+                    else:
+                        inst_copy["status"] = "paid"
+                        inst_copy["paidDate"] = payment_date_str
+                        inst_copy["paymentMode"] = body.payment_mode
+                        matched = True
+                updated_installments.append(inst_copy)
+            else:
+                updated_installments.append(inst)
+        enrollment.installments = updated_installments
+
     await _try_assign_preferred_batch(db, enrollment)
     await _record_transaction(
         db,
         enrollment=enrollment,
         transaction_type="payment",
-        amount=paid,
+        amount=payment_amt,
         payment_mode=body.payment_mode,
         provider="offline",
         transaction_reference=body.transaction_reference,
@@ -1456,6 +1544,33 @@ async def record_offline_payment(
         created_by_id=current_user.id,
     )
     await db.flush()
+
+    # Dispatch formal payment receipt email with attachment to student
+    try:
+        receipt_no = f"REC-{str(enrollment.id)[:8].upper()}"
+        payment_date_str = body.date or datetime.utcnow().strftime("%Y-%m-%d")
+        base_fee, _interest_amt, _interest_pct = await _emi_interest_for_enrollment(db, enrollment)
+        import asyncio
+        asyncio.create_task(
+            send_training_enrollment_receipt_email(
+                to_email=enrollment.candidate_email,
+                first_name=(enrollment.candidate_name or "").split(" ")[0] or enrollment.candidate_name,
+                program_title=enrollment.title,
+                total_fee=float(enrollment.total_fee or 0.0),
+                paid_amount=float(enrollment.paid_amount or 0.0),
+                balance_due=float(enrollment.balance_due or 0.0),
+                payment_type=enrollment.payment_type or "Full Payment",
+                payment_mode=body.payment_mode,
+                receipt_number=receipt_no,
+                enrollment_date=payment_date_str,
+                batch_name=enrollment.batch_name,
+                installments=enrollment.installments,
+                base_fee=base_fee,
+            )
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).error(f"Failed to dispatch payment receipt email: {exc}")
+
     return enrollment_to_out(enrollment)
 
 
@@ -1603,7 +1718,7 @@ async def create_batch(
                     candidate_email=teacher_email.lower(),
                     recipient_role="teacher",
                     notification_type="batch_assigned",
-                    title="New Cohort Assigned",
+                    title="New Candidate Assigned",
                     description=f'You have been assigned to teach batch "{batch.batch_name}".',
                     detail=f"Start Date: {batch.start_date}. Days: {', '.join(batch.days or [])}.",
                     event_date=datetime.utcnow().strftime("%Y-%m-%d"),
@@ -1704,7 +1819,7 @@ async def update_batch(
                     candidate_email=teacher_email.lower(),
                     recipient_role="teacher",
                     notification_type="batch_assigned",
-                    title="New Cohort Assigned",
+                    title="New Candidate Assigned",
                     description=f'You have been assigned to teach batch "{batch.batch_name}".',
                     detail=f"Start Date: {batch.start_date}. Days: {', '.join(batch.days or [])}.",
                     event_date=datetime.utcnow().strftime("%Y-%m-%d"),
@@ -3210,7 +3325,7 @@ async def get_transaction_invoice(
     enrollment = enrollment_result.scalar_one_or_none()
     if not enrollment:
         raise HTTPException(status_code=404, detail="Enrollment not found")
-    return _build_invoice(transaction, enrollment)
+    return await _build_invoice(db, transaction, enrollment)
 
 
 @router.get("/enrollments/{enrollment_id}/invoice/latest", response_model=PortalPaymentInvoiceOut)
@@ -3239,7 +3354,7 @@ async def get_latest_enrollment_invoice(
     transaction = transaction_result.scalars().first()
     if not transaction:
         raise HTTPException(status_code=404, detail="No payment invoice found for this enrollment")
-    return _build_invoice(transaction, enrollment)
+    return await _build_invoice(db, transaction, enrollment)
 
 
 # ── Refund requests ───────────────────────────────────────────────────────────
@@ -3614,4 +3729,237 @@ async def razorpay_webhook(request: Request, db: AsyncSession = Depends(get_db))
     )
     await db.flush()
     return {"status": "ok"}
+
+
+@router.get("/admin/students/lookup-user", response_model=StudentLookupOut)
+async def lookup_student_by_email(
+    email: str = Query(..., description="Email address to lookup"),
+    current_user: User = Depends(require_training_portal_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Check if student user exists by email and return details for pre-filling."""
+    clean_email = email.strip().lower()
+    if not clean_email:
+        return StudentLookupOut(exists=False)
+
+    res = await db.execute(select(User).where(func.lower(User.email) == clean_email))
+    user = res.scalar_one_or_none()
+    if not user:
+        return StudentLookupOut(exists=False)
+
+    return StudentLookupOut(
+        exists=True,
+        user_id=str(user.id),
+        first_name=user.first_name,
+        last_name=user.last_name,
+        email=user.email,
+        phone=user.phone,
+        gender=user.gender,
+        qualification=user.highest_qualification,
+        address=user.address,
+        preferred_job_sector=user.preferred_job_sector,
+    )
+
+
+@router.post("/admin/students/register-and-enroll", response_model=AdminRegisterAndEnrollStudentOut)
+async def admin_register_and_enroll_student(
+    body: AdminRegisterAndEnrollStudentCreate,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(require_training_portal_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Unified endpoint for super admin to:
+    1. Register a new user (with role seeker) or link existing user.
+    2. Dispatch credentials via email if requested.
+    3. Enroll student into course/batch.
+    4. Record initial fee payment/EMI schedule & initial transaction if applicable.
+    """
+    email = body.email.strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="Student email is required")
+
+    # 1. Lookup or create User
+    res = await db.execute(select(User).where(func.lower(User.email) == email))
+    user = res.scalar_one_or_none()
+    user_created = False
+    credentials_sent = False
+
+    raw_password = body.password or "Student@2026"
+
+    if not user:
+        user = User(
+            id=str(uuid.uuid4()),
+            first_name=body.first_name.strip(),
+            last_name=(body.last_name or "").strip(),
+            email=email,
+            phone=body.phone,
+            hashed_password=hash_password(raw_password),
+            role=UserRole.seeker,
+            is_verified=True,
+            onboarding_complete=True,
+            gender=body.gender,
+            highest_qualification=body.qualification,
+            address=body.address,
+        )
+        db.add(user)
+        await db.flush()
+        user_created = True
+    else:
+        # Update missing profile fields on existing user if provided
+        if body.first_name and not user.first_name:
+            user.first_name = body.first_name.strip()
+        if body.last_name and not user.last_name:
+            user.last_name = body.last_name.strip()
+        if body.phone and not user.phone:
+            user.phone = body.phone
+        if body.gender and not user.gender:
+            user.gender = body.gender
+        if body.qualification and not user.highest_qualification:
+            user.highest_qualification = body.qualification
+        if body.address and not user.address:
+            user.address = body.address
+        if not user.role:
+            user.role = UserRole.seeker
+
+    # Dispatch email credentials if new user or explicit send_credentials flag is true
+    if body.send_credentials:
+        background_tasks.add_task(
+            send_welcome_email,
+            email,
+            user.first_name or "Student",
+            "seeker",
+            password=raw_password,
+        )
+        credentials_sent = True
+
+    # 2. Check for active enrollment duplicate
+    dup_res = await db.execute(
+        select(TrainingPortalEnrollment).where(
+            TrainingPortalEnrollment.candidate_email == email,
+            TrainingPortalEnrollment.item_id == body.item_id,
+            TrainingPortalEnrollment.status != "dropped",
+        )
+    )
+    if dup_res.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="Student is already enrolled in this program")
+
+    # 3. Batch validation
+    batch_name = None
+    batch_id = None
+    if body.batch_id:
+        batch_res = await db.execute(select(TrainingPortalBatch).where(TrainingPortalBatch.id == body.batch_id))
+        batch = batch_res.scalar_one_or_none()
+        if batch and batch.course_id == body.item_id:
+            batch_id = batch.id
+            batch_name = batch.batch_name
+
+    # 3b. Look up course standard fee (for EMI interest/surcharge display on the receipt)
+    base_fee: Optional[float] = None
+    if body.enrollment_type == "course":
+        course_result = await db.execute(
+            select(TrainingPortalCourse).where(TrainingPortalCourse.id == body.item_id)
+        )
+        course = course_result.scalar_one_or_none()
+        if course and course.fee:
+            base_fee = float(course.fee)
+
+    # 4. Calculate amounts
+    total_fee = max(0.0, float(body.total_fee))
+    paid_amount = max(0.0, float(body.paid_amount))
+    paid_amount = min(paid_amount, total_fee)
+    balance_due = max(0.0, total_fee - paid_amount)
+
+    payment_status = body.payment_status
+    if not payment_status:
+        if balance_due <= 0.01:
+            payment_status = "paid_offline"
+        elif paid_amount > 0:
+            payment_status = "partially_paid"
+        else:
+            payment_status = "pending"
+
+    today_str = datetime.utcnow().strftime("%Y-%m-%d")
+    full_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or email.split("@")[0]
+
+    enrollment = TrainingPortalEnrollment(
+        id=str(uuid.uuid4()),
+        candidate_user_id=user.id,
+        candidate_name=full_name,
+        candidate_email=email,
+        candidate_phone=user.phone,
+        enrollment_type=body.enrollment_type,
+        item_id=body.item_id,
+        title=body.title,
+        batch_id=batch_id,
+        batch_name=batch_name,
+        enrollment_date=today_str,
+        payment_type=body.payment_type,
+        payment_status=payment_status,
+        payment_mode=body.payment_mode or "Cash",
+        total_fee=total_fee,
+        paid_amount=paid_amount,
+        balance_due=balance_due,
+        installments=body.installments or [],
+        laptop_confirmed=body.laptop_confirmed,
+        notes=body.notes,
+        status="active",
+    )
+    db.add(enrollment)
+    await db.flush()
+
+    # 5. Create Transaction if initial payment was collected
+    if paid_amount > 0:
+        txn_id = f"TXN-{uuid.uuid4().hex[:10].upper()}"
+        txn = TrainingPortalTransaction(
+            id=str(uuid.uuid4()),
+            transaction_id=txn_id,
+            enrollment_id=enrollment.id,
+            candidate_email=email,
+            candidate_name=full_name,
+            program_title=body.title,
+            transaction_type="offline_payment",
+            amount=paid_amount,
+            currency="INR",
+            payment_mode=body.payment_mode or "Cash",
+            status="completed",
+            batch_id=batch_id,
+            batch_name=batch_name,
+            notes=body.notes or "Initial payment upon admin student registration",
+            created_by_id=current_user.id,
+        )
+    await db.commit()
+
+    # Queue enrollment receipt email to student
+    background_tasks.add_task(
+        send_enrollment_receipt_email,
+        email,
+        user.first_name or "Student",
+        body.title,
+        total_fee,
+        paid_amount,
+        balance_due,
+        payment_type=body.payment_type,
+        payment_mode=body.payment_mode or "Cash",
+        batch_name=batch_name,
+        enrollment_date=today_str,
+        installments=body.installments or [],
+        password=raw_password if (user_created and body.send_credentials) else None,
+        base_fee=base_fee,
+    )
+
+    return AdminRegisterAndEnrollStudentOut(
+        message="Student registered and enrolled successfully",
+        user_id=str(user.id),
+        user_created=user_created,
+        credentials_sent=credentials_sent,
+        enrollment_id=enrollment.id,
+        candidate_email=email,
+        candidate_name=full_name,
+        total_fee=total_fee,
+        paid_amount=paid_amount,
+        balance_due=balance_due,
+        payment_status=payment_status,
+    )
+
 

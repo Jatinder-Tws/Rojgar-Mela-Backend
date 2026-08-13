@@ -27,6 +27,7 @@ class TrainingPortalCourse(Base):
     status = Column(String(20), nullable=False, default="published", index=True)
     skill_level = Column(String(20), nullable=False, default="Beginner")
     fee = Column(Float, nullable=False, default=12000.0)
+    emi_fee = Column(Float, nullable=True, default=None)
     thumbnail_url = Column(String(500), nullable=True)
     prerequisites = Column(Text, nullable=True)
     key_highlights = Column(JSON, nullable=False, default=list)
