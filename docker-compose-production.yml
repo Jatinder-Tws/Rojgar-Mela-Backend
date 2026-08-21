@@ -45,7 +45,7 @@ services:
       - .:/app
       - uploads_data_prod:/app/uploads
     # In production, we typically don't use --reload.
-    command: uvicorn main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips='*'
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips='*'
 
   celery-worker:
     build:
@@ -65,7 +65,7 @@ services:
     volumes:
       - .:/app
       - uploads_data_prod:/app/uploads
-    command: celery -A services.celery_app worker --loglevel=info --pool=solo
+    command: celery -A app.core.celery_app worker --loglevel=info --pool=solo
 
   celery-beat:
     build:
@@ -87,7 +87,7 @@ services:
         condition: service_started
     volumes:
       - .:/app
-    command: celery -A services.celery_app beat --loglevel=info
+    command: celery -A app.core.celery_app beat --loglevel=info
 
 volumes:
   pg_data_prod:

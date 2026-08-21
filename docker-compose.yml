@@ -6,7 +6,7 @@ services:
       POSTGRES_PASSWORD: secret
       POSTGRES_DB: jobmatch_db
     ports:
-      - "5432:5432"
+      - "5435:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
     healthcheck:
@@ -44,6 +44,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - FRONTEND_URL=http://localhost:5173
       - PYTHONPATH=/app
+      - WATCHFILES_FORCE_POLLING=true
     env_file:
       - .env
     depends_on:
@@ -54,7 +55,7 @@ services:
     volumes:
       - .:/app
       - uploads_data:/app/uploads
-    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --timeout-graceful-shutdown 2
 
   celery-worker:
     build:
@@ -74,7 +75,7 @@ services:
     volumes:
       - .:/app
       - uploads_data:/app/uploads
-    command: celery -A services.celery_app worker --loglevel=info --pool=solo
+    command: celery -A app.core.celery_app worker --loglevel=info -Q high_priority,emails,broadcast,ai_and_heavy,default --pool=solo
 
   celery-beat:
     build:
@@ -95,7 +96,7 @@ services:
         condition: service_started
     volumes:
       - .:/app
-    command: celery -A services.celery_app beat --loglevel=info
+    command: celery -A app.core.celery_app beat --loglevel=info
 
 volumes:
   pg_data:

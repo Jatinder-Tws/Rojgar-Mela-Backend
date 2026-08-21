@@ -1,8 +1,8 @@
-# JobMatch AI — Backend
+# RojgarMela AI — Backend
 
 > **AI-Powered Bidirectional Job Matching Platform**
 
-JobMatch AI is a modern backend API that intelligently connects job seekers with recruiters using semantic AI matching, automated interviews, personalized career roadmaps, and real-time notifications.
+RojgarMela AI is a modern backend API that intelligently connects job seekers with recruiters using semantic AI matching, automated interviews, personalized career roadmaps, and real-time notifications.
 
 ---
 
@@ -128,25 +128,28 @@ JobMatch AI is a modern backend API that intelligently connects job seekers with
 ```bash
 # Clone the repository
 git clone <repo-url>
-cd backend/combined_backend
+cd Rojgar-mela-backend
 
 # Copy and edit environment variables
 cp .env.example .env
-# Edit .env with your actual credentials (API keys, DB credentials, SMTP, etc.)
+# Edit .env with your own credentials (API keys, DB credentials, SMTP, etc.)
 ```
 
 ### 2. Run with Docker (Recommended)
 
 ```bash
-# Build and start all services (PostgreSQL + pgAdmin + Redis + Backend)
-docker-compose up --build
+# Build the images
+docker-compose build
+
+# Start all services (PostgreSQL + Redis + Backend + Celery worker/beat)
+docker-compose up
 ```
 
 This will:
-- Start PostgreSQL with pgvector on port `5432`
-- Start pgAdmin on port `5050` (email: `admin@jobmatch.ai`, password: `admin`)
+- Start PostgreSQL with the `pgvector` extension on port `5435` (mapped to `5432` inside the container)
 - Start Redis on port `6379`
 - Start the FastAPI backend on port `8000` with hot-reload
+- Start a Celery worker + beat scheduler for background/email/AI jobs
 
 The API is available at: **http://localhost:8000**
 
@@ -171,37 +174,14 @@ pip install -r requirements.txt
 
 # Make sure PostgreSQL + pgvector + Redis are running locally
 # Then start the server
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 ---
 
 ## Environment Variables
 
-Configure these in your `.env` file:
-
-| Variable                        | Default                                  | Description                          |
-| ------------------------------- | ---------------------------------------- | ------------------------------------ |
-| `DATABASE_URL`                  | `postgresql+asyncpg://jobmatch:secret@localhost:5432/jobmatch_db` | PostgreSQL connection string |
-| `SECRET_KEY`                    | `change-this-secret`                     | JWT signing key (change in production!) |
-| `ALGORITHM`                     | `HS256`                                  | JWT algorithm                        |
-| `ACCESS_TOKEN_EXPIRE_MINUTES`   | `10080` (7 days)                         | Token expiry                         |
-| `OPENAI_API_KEY`                | _(required for AI features)_             | OpenAI API key                       |
-| `OPENAI_CHAT_MODEL`             | `gpt-4o`                                 | Chat model                           |
-| `OPENAI_EMBEDDING_MODEL`        | `text-embedding-3-small`                 | Embedding model                      |
-| `GOOGLE_API_KEY`                | _(required for Gemini mode)_             | Google Gemini API key                |
-| `GEMINI_CHAT_MODEL`             | `gemini-2.5-flash`                       | Gemini chat model                    |
-| `AI_MODE`                       | `openai`                                 | `openai` / `gemini` / `mock`         |
-| `SMTP_HOST`                     | `smtp.gmail.com`                         | SMTP server                          |
-| `SMTP_PORT`                     | `587`                                    | SMTP port                            |
-| `SMTP_USER` / `SMTP_PASSWORD`   | _(required for emails)_                  | SMTP credentials                     |
-| `REDIS_URL`                     | `redis://localhost:6379/0`               | Redis connection                     |
-| `FRONTEND_URL`                  | `http://localhost:5173`                  | Frontend origin for CORS             |
-| `CORS_ORIGINS`                  | _(optional)_                             | Comma-separated extra origins        |
-| `UPLOAD_DIR`                    | `uploads`                                | File upload directory                |
-| `MAX_UPLOAD_MB`                 | `10`                                     | Max upload size                      |
-| `AUTO_MATCH_THRESHOLD`          | `0.70`                                   | Minimum match score for auto-matching |
-| `PROVIDER_MATCH_THRESHOLD`      | `0.75`                                   | Provider-side match threshold        |
+The app is configured entirely through a `.env` file at the project root (see `app/core/config.py` for the full list of settings). Copy `.env.example` to `.env` and fill in your own values — database credentials, JWT secret, AI provider keys, SMTP credentials, Redis URL, CORS origins, etc. Values are intentionally not documented here.
 
 ---
 
@@ -366,11 +346,4 @@ These are run manually as needed — they are **not** part of the auto-startup f
 
 Proprietary — All rights reserved.
 
-
-<!-- Setup commands or run the backend services -->
-cd combined_backend
-
-<!-- Docker setup commands  -->
-docker-compose build 
-
-docker-compose up 
+© 2026 Rojgar Mela. Unauthorized copying, distribution, or use of this software, in whole or in part, is strictly prohibited without prior written permission.

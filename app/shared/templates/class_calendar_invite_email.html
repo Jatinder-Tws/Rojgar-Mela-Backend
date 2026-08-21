@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{ 'Class Cancelled' if cancelled else 'Class Scheduled' }} – RojgarMela.AI</title>
+</head>
+
+<body
+  style="margin:0;padding:0;background:#eef4f9;font-family:'Segoe UI',Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased;">
+
+  <table width="100%" cellpadding="0" cellspacing="0" role="presentation"
+    style="background:#eef4f9;padding:32px 16px;">
+    <tr>
+      <td align="center">
+
+        <table width="600" cellpadding="0" cellspacing="0" role="presentation"
+          style="max-width:600px;width:100%;background:#ffffff;border-radius:4px;overflow:hidden;box-shadow:0 4px 18px rgba(15,40,80,0.08);">
+
+          <tr>
+            <td style="padding:30px 32px 12px;background:#ffffff;" align="center">
+              <img src="cid:rojgar_logo"
+                alt="RojgarMela.AI"
+                style="height:55px;width:auto;max-width:260px;display:block;margin:0 auto;" />
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding:12px 36px 30px;background:#ffffff;">
+
+              <h1
+                style="margin:0 0 18px 0;font-size:24px;font-weight:700;color:#0f2d52;line-height:1.3;border-bottom:3px solid {{ '#dc2626' if cancelled else '#ea580c' }};padding-bottom:12px;">
+                {{ 'Class Cancelled' if cancelled else 'Class Scheduled' }}
+              </h1>
+
+              <p style="margin:0 0 16px 0;font-size:13px;line-height:1.7;color:#1f2937;">
+                Hi <strong>{{ recipient_name }}</strong>,
+              </p>
+
+              <p style="margin:0 0 20px 0;font-size:13px;line-height:1.7;color:#1f2937;">
+                {{ intro }}
+              </p>
+
+              <table width="100%" cellpadding="0" cellspacing="0" role="presentation"
+                style="margin:0 0 24px 0;background:#f8fafc;border:1px solid #e2e8f0;{{ 'border-left:4px solid #dc2626;' if cancelled else '' }}border-radius:6px;">
+                <tr>
+                  <td style="padding:18px 20px;">
+                    <p
+                      style="margin:0 0 10px 0;font-size:12px;font-weight:700;color:#0f2d52;text-transform:uppercase;letter-spacing:0.06em;">
+                      Class Details
+                    </p>
+                    <p style="margin:0 0 8px 0;font-size:14px;color:#334155;">
+                      <strong>Class:</strong> {{ class_title }}
+                    </p>
+                    <p style="margin:0 0 8px 0;font-size:14px;color:#334155;">
+                      <strong>When:</strong> {{ schedule_line }}
+                    </p>
+                    <p style="margin:0;font-size:14px;color:#334155;">
+                      <strong>Venue:</strong> {{ venue }}
+                    </p>
+                  </td>
+                </tr>
+              </table>
+
+              <table width="100%" cellpadding="0" cellspacing="0" role="presentation"
+                style="margin:0 0 24px 0;background:{{ '#fef2f2' if cancelled else '#eff6ff' }};border-left:4px solid {{ '#dc2626' if cancelled else '#2563eb' }};border-radius:0 4px 4px 0;">
+                <tr>
+                  <td style="padding:16px 18px;">
+                    <p style="margin:0;font-size:13px;line-height:1.7;color:{{ '#7f1d1d' if cancelled else '#1e3a8a' }};">
+                      {{ note }}
+                    </p>
+                  </td>
+                </tr>
+              </table>
+
+              <p style="margin:0;font-size:13px;line-height:1.7;color:#1f2937;">
+                Regards,<br />
+                <strong style="color:#0f2d52;">Team RojgarMela.AI</strong><br />
+                <span style="font-size:13px;color:#64748b;">Connecting Talent with Opportunity</span>
+              </p>
+
+            </td>
+          </tr>
+
+          <tr>
+            <td style="background:#eef5fb;padding:24px 32px 10px;border-top:1px solid #dbeafe;">
+              <table width="100%" cellpadding="0" cellspacing="0" role="presentation">
+                <tr>
+                  <td align="center">
+                    <img src="cid:rojgar_logo"
+                      alt="RojgarMela.AI"
+                      style="height:40px;width:auto;max-width:220px;display:block;margin:0 auto;" />
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <tr>
+            <td align="center" style="background:#eef5fb;padding:10px 32px 32px;">
+              <p style="margin:0 0 8px 0;font-size:14px;color:#475569;line-height:1.6;">
+                Questions about this class?
+              </p>
+              <p style="margin:0 0 6px 0;font-size:14px;color:#475569;line-height:1.6;">
+                Email:
+                <a href="mailto:{{ support_email }}" style="color:#2563eb;text-decoration:none;font-weight:600;">{{ support_email }}</a>
+              </p>
+              <p style="margin:0 0 16px 0;font-size:14px;color:#475569;line-height:1.6;">
+                Phone: <strong>{{ support_phones }}</strong>
+              </p>
+              <p style="margin:0;font-size:12px;color:#94a3b8;line-height:1.6;">
+                You received this email because you are enrolled in a class on RojgarMela.AI Training.<br />
+                © {{ year }} RojgarMela.AI. All rights reserved.
+              </p>
+            </td>
+          </tr>
+
+        </table>
+
+      </td>
+    </tr>
+  </table>
+
+</body>
+
+</html>
