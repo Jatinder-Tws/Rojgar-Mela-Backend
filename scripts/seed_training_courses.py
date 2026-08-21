@@ -7,9 +7,15 @@ import os
 # Add parent directory to sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from database import AsyncSessionLocal
+from app.core.database import AsyncSessionLocal, import_all_models
 from sqlalchemy import select, delete
-from models.training_portal_course import TrainingPortalCourse
+from app.modules.training_portal.models.training_portal_course import TrainingPortalCourse
+
+# TrainingPortalCourse has a string-based relationship("User", ...); SQLAlchemy
+# only resolves that against models that have been imported into the process.
+# The app registers everything via import_all_models() during init_db() at
+# startup, but this standalone script needs to do it explicitly.
+import_all_models()
 
 
 def make_id(prefix: str, idx: int) -> str:
@@ -571,7 +577,8 @@ async def seed_courses():
             delivery_mode="Offline",
             status="published",
             skill_level="Beginner",
-            fee=15000.0,
+            fee=25000.0,
+            emi_fee=9000.0,
             thumbnail_url=None,
             prerequisites="Basic computer literacy, logical reasoning, and passion for programming.",
             key_highlights=[
@@ -596,7 +603,8 @@ async def seed_courses():
             delivery_mode="Offline",
             status="published",
             skill_level="Beginner",
-            fee=28000.0,
+            fee=42000.0,
+            emi_fee=7500.0,
             thumbnail_url=None,
             prerequisites="Basic computer literacy and problem-solving skills.",
             key_highlights=[
@@ -621,7 +629,8 @@ async def seed_courses():
             delivery_mode="Offline",
             status="published",
             skill_level="Beginner",
-            fee=15000.0,
+            fee=25000.0,
+            emi_fee=9000.0,
             thumbnail_url=None,
             prerequisites="Basic understanding of programming concepts and logic.",
             key_highlights=[
@@ -646,7 +655,8 @@ async def seed_courses():
             delivery_mode="Offline",
             status="published",
             skill_level="Beginner",
-            fee=28000.0,
+            fee=42000.0,
+            emi_fee=7500.0,
             thumbnail_url=None,
             prerequisites="Basic computer skills and problem-solving mindset.",
             key_highlights=[

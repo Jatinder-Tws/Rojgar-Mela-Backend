@@ -6,3 +6,19 @@ secrets.*
 credentials.json
 *.pem
 *.key
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Celery & virtualenv
+celerybeat-schedule*
+.venv/
+venv/
+ENV/
+uploads/
