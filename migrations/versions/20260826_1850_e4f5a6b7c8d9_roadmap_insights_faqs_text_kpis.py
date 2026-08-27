@@ -54,24 +54,25 @@ def upgrade() -> None:
             """
         )
     )
-
-    op.add_column(
-        "career_roadmaps",
-        sa.Column(
-            "career_insights",
-            postgresql.JSON(astext_type=sa.Text()),
-            server_default=sa.text("'{}'::json"),
-            nullable=False,
-        ),
+    op.execute(
+        sa.text(
+            """
+            ALTER TABLE career_roadmaps
+            ADD COLUMN IF NOT EXISTS career_insights JSON
+            DEFAULT '{}'::json
+            NOT NULL
+            """
+        )
     )
-    op.add_column(
-        "career_roadmaps",
-        sa.Column(
-            "faqs",
-            postgresql.JSON(astext_type=sa.Text()),
-            server_default=sa.text("'[]'::json"),
-            nullable=False,
-        ),
+    op.execute(
+        sa.text(
+            """
+            ALTER TABLE career_roadmaps
+            ADD COLUMN IF NOT EXISTS faqs JSON
+            DEFAULT '[]'::json
+            NOT NULL
+            """
+        )
     )
 
 
