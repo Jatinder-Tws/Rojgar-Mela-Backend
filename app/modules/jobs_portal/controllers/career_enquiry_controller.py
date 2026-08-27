@@ -1,7 +1,7 @@
 import logging
 import re
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from fastapi import HTTPException
 from sqlalchemy import func, or_, select
@@ -117,14 +117,12 @@ async def create_career_enquiry(body: CareerEnquiryCreate, db: AsyncSession) -> 
     return _career_to_out(enquiry)
 
 
-async def _list_career_rows(
-    db: AsyncSession,
+def _career_filters(
     search: Optional[str] = None,
     status: Optional[str] = None,
     domain: Optional[str] = None,
     qualification: Optional[str] = None,
-) -> List[CareerEnquiry]:
-    query = select(CareerEnquiry)
+) -> list:
     filters = []
     if search and search.strip():
         term = f"%{search.strip()}%"
@@ -144,18 +142,13 @@ async def _list_career_rows(
         filters.append(CareerEnquiry.domain == domain.strip())
     if qualification and qualification.strip() and qualification.strip() != "all":
         filters.append(CareerEnquiry.qualification == qualification.strip())
-    if filters:
-        query = query.where(*filters)
-    result = await db.execute(query.order_by(CareerEnquiry.created_at.desc()))
-    return list(result.scalars().all())
+    return filters
 
 
-async def _list_contact_rows(
-    db: AsyncSession,
+def _contact_filters(
     search: Optional[str] = None,
     status: Optional[str] = None,
-) -> List[ContactInquiry]:
-    query = select(ContactInquiry)
+) -> list:
     filters = []
     if search and search.strip():
         term = f"%{search.strip()}%"
@@ -170,23 +163,108 @@ async def _list_contact_rows(
         )
     if status and status.strip() and status.strip() != "all":
         filters.append(ContactInquiry.status == status.strip())
+    return filters
+
+
+async def _list_career_page(
+    db: AsyncSession,
+    page: int,
+    page_size: int,
+    search: Optional[str] = None,
+    status: Optional[str] = None,
+    domain: Optional[str] = None,
+    qualification: Optional[str] = None,
+) -> Tuple[List[CareerEnquiry], int]:
+    filters = _career_filters(search=search, status=status, domain=domain, qualification=qualification)
+    count_query = select(func.count()).select_from(CareerEnquiry)
+    query = select(CareerEnquiry)
     if filters:
+        count_query = count_query.where(*filters)
         query = query.where(*filters)
-    result = await db.execute(query.order_by(ContactInquiry.created_at.desc()))
-    return list(result.scalars().all())
+
+    total = int((await db.execute(count_query)).scalar() or 0)
+    offset = (page - 1) * page_size
+    result = await db.execute(
+        query.order_by(CareerEnquiry.created_at.desc()).offset(offset).limit(page_size)
+    )
+    return list(result.scalars().all()), total
+
+
+async def _list_contact_page(
+    db: AsyncSession,
+    page: int,
+    page_size: int,
+    search: Optional[str] = None,
+    status: Optional[str] = None,
+) -> Tuple[List[ContactInquiry], int]:
+    filters = _contact_filters(search=search, status=status)
+    count_query = select(func.count()).select_from(ContactInquiry)
+    query = select(ContactInquiry)
+    if filters:
+        count_query = count_query.where(*filters)
+        query = query.where(*filters)
+
+    total = int((await db.execute(count_query)).scalar() or 0)
+    offset = (page - 1) * page_size
+    result = await db.execute(
+        query.order_by(ContactInquiry.created_at.desc()).offset(offset).limit(page_size)
+    )
+    return list(result.scalars().all()), total
+
+
+async def _list_all_merged(
+    db: AsyncSession,
+    page: int,
+    page_size: int,
+    search: Optional[str] = None,
+    status: Optional[str] = None,
+    domain: Optional[str] = None,
+    qualification: Optional[str] = None,
+    include_contact: bool = True,
+) -> CareerEnquiryListResponse:
+    """Merge career + contact rows (rare path). Still paginates the merged result."""
+    career_filters = _career_filters(
+        search=search, status=status, domain=domain, qualification=qualification
+    )
+    career_query = select(CareerEnquiry)
+    if career_filters:
+        career_query = career_query.where(*career_filters)
+    career_result = await db.execute(career_query.order_by(CareerEnquiry.created_at.desc()))
+
+    unified: List[UnifiedEnquiryOut] = [
+        _career_to_unified(row) for row in career_result.scalars().all()
+    ]
+
+    if include_contact:
+        contact_filters = _contact_filters(search=search, status=status)
+        contact_query = select(ContactInquiry)
+        if contact_filters:
+            contact_query = contact_query.where(*contact_filters)
+        contact_result = await db.execute(contact_query.order_by(ContactInquiry.created_at.desc()))
+        unified.extend(_contact_to_unified(row) for row in contact_result.scalars().all())
+
+    unified.sort(key=lambda item: item.created_at or datetime.min, reverse=True)
+    total = len(unified)
+    offset = (page - 1) * page_size
+    return CareerEnquiryListResponse(
+        items=unified[offset : offset + page_size],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
 
 
 async def admin_list_career_enquiries(
     db: AsyncSession,
     page: int = 1,
-    page_size: int = 20,
+    page_size: int = 10,
     search: Optional[str] = None,
     status: Optional[str] = None,
     domain: Optional[str] = None,
     qualification: Optional[str] = None,
     source: Optional[str] = None,
 ) -> CareerEnquiryListResponse:
-    source_key = (source or "all").strip().lower()
+    source_key = (source or "career").strip().lower()
     if source_key not in {"all", "career", "contact"}:
         raise HTTPException(status_code=400, detail="Invalid source. Allowed: all, career, contact")
 
@@ -196,36 +274,50 @@ async def admin_list_career_enquiries(
         or (qualification and qualification.strip() and qualification.strip() != "all")
     )
 
-    unified: List[UnifiedEnquiryOut] = []
-
-    include_career = source_key in {"all", "career"}
-    include_contact = source_key in {"all", "contact"} and not career_only_filters
-
-    if include_career:
-        career_rows = await _list_career_rows(
+    # Single-source paths use DB-level OFFSET/LIMIT (frontend always sends career|contact).
+    if source_key == "career":
+        rows, total = await _list_career_page(
             db,
+            page=page,
+            page_size=page_size,
             search=search,
             status=status,
             domain=domain,
             qualification=qualification,
         )
-        unified.extend(_career_to_unified(row) for row in career_rows)
+        return CareerEnquiryListResponse(
+            items=[_career_to_unified(row) for row in rows],
+            total=total,
+            page=page,
+            page_size=page_size,
+        )
 
-    if include_contact:
-        contact_rows = await _list_contact_rows(db, search=search, status=status)
-        unified.extend(_contact_to_unified(row) for row in contact_rows)
+    if source_key == "contact":
+        if career_only_filters:
+            return CareerEnquiryListResponse(items=[], total=0, page=page, page_size=page_size)
+        rows, total = await _list_contact_page(
+            db,
+            page=page,
+            page_size=page_size,
+            search=search,
+            status=status,
+        )
+        return CareerEnquiryListResponse(
+            items=[_contact_to_unified(row) for row in rows],
+            total=total,
+            page=page,
+            page_size=page_size,
+        )
 
-    unified.sort(key=lambda item: item.created_at or datetime.min, reverse=True)
-
-    total = len(unified)
-    offset = (page - 1) * page_size
-    page_items = unified[offset : offset + page_size]
-
-    return CareerEnquiryListResponse(
-        items=page_items,
-        total=total,
+    return await _list_all_merged(
+        db,
         page=page,
         page_size=page_size,
+        search=search,
+        status=status,
+        domain=domain,
+        qualification=qualification,
+        include_contact=not career_only_filters,
     )
 
 
@@ -279,3 +371,29 @@ async def admin_update_career_enquiry_status(
     await db.commit()
     await db.refresh(inquiry)
     return _contact_to_unified(inquiry)
+
+
+async def admin_delete_enquiry(
+    enquiry_id: str,
+    source: str,
+    db: AsyncSession,
+) -> None:
+    source_key = (source or "career").strip().lower()
+    if source_key not in {"career", "contact"}:
+        raise HTTPException(status_code=400, detail="Invalid source. Allowed: career, contact")
+
+    if source_key == "career":
+        result = await db.execute(select(CareerEnquiry).where(CareerEnquiry.id == enquiry_id))
+        enquiry = result.scalar_one_or_none()
+        if not enquiry:
+            raise HTTPException(status_code=404, detail="Enquiry not found")
+        await db.delete(enquiry)
+        await db.commit()
+        return
+
+    result = await db.execute(select(ContactInquiry).where(ContactInquiry.id == enquiry_id))
+    inquiry = result.scalar_one_or_none()
+    if not inquiry:
+        raise HTTPException(status_code=404, detail="Enquiry not found")
+    await db.delete(inquiry)
+    await db.commit()

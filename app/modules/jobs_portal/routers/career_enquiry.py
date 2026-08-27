@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.jobs_portal.controllers.career_enquiry_controller import (
+    admin_delete_enquiry as ctrl_delete,
     admin_list_career_enquiries as ctrl_list,
     admin_update_career_enquiry_status as ctrl_update_status,
     create_career_enquiry as ctrl_create,
@@ -35,7 +36,7 @@ async def create_enquiry(
 @admin_router.get("", response_model=CareerEnquiryListResponse)
 async def list_enquiries(
     page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
+    page_size: int = Query(10, ge=1, le=100),
     search: Optional[str] = None,
     status: Optional[str] = None,
     domain: Optional[str] = None,
@@ -64,3 +65,13 @@ async def update_enquiry_status(
     db: AsyncSession = Depends(get_db),
 ):
     return await ctrl_update_status(enquiry_id, body, db)
+
+
+@admin_router.delete("/{enquiry_id}", status_code=204)
+async def delete_enquiry(
+    enquiry_id: str,
+    source: str = Query("career"),
+    _admin: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    await ctrl_delete(enquiry_id, source, db)

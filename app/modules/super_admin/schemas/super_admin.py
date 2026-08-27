@@ -110,6 +110,7 @@ class AdminUserOut(BaseModel):
     welcome_email_error: Optional[str] = None
     has_resume: Optional[bool] = None
     created_at: datetime
+    last_active_at: Optional[datetime] = None
     registered_job_fairs: Optional[List[str]] = None
 
     class Config:

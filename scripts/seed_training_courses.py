@@ -13,8 +13,8 @@ from app.modules.training_portal.models.training_portal_course import TrainingPo
 
 # TrainingPortalCourse has a string-based relationship("User", ...); SQLAlchemy
 # only resolves that against models that have been imported into the process.
-# The app registers everything via import_all_models() during init_db() at
-# startup, but this standalone script needs to do it explicitly.
+# The app registers everything via import_all_models() at startup, but this
+# standalone script needs to do it explicitly.
 import_all_models()
 
 

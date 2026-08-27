@@ -86,4 +86,4 @@ class CareerEnquiryListResponse(BaseModel):
     items: List[UnifiedEnquiryOut]
     total: int
     page: int = 1
-    page_size: int = 20
+    page_size: int = 10

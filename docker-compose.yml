@@ -1,5 +1,6 @@
 services:
   postgres:
+    container_name: rojgar-mela-postgres
     image: ankane/pgvector:latest
     environment:
       POSTGRES_USER: jobmatch
@@ -15,18 +16,8 @@ services:
       timeout: 5s
       retries: 10
 
-  # pgadmin:
-  #   image: dpage/pgadmin4
-  #   environment:
-  #     PGADMIN_DEFAULT_EMAIL: admin@jobmatch.ai
-  #     PGADMIN_DEFAULT_PASSWORD: admin
-  #   ports:
-  #     - "5050:80"
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-
   redis:
+    container_name: rojgar-mela-redis
     image: redis:7-alpine
     ports:
       - "6379:6379"
@@ -34,6 +25,7 @@ services:
       - redis_data:/data
 
   backend:
+    container_name: rojgar-mela-backend
     build:
       context: .
       dockerfile: Dockerfile
@@ -54,10 +46,17 @@ services:
         condition: service_started
     volumes:
       - .:/app
-      - uploads_data:/app/uploads
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --timeout-graceful-shutdown 2
+      - ./uploads:/app/uploads
+    command: sh -c "uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --timeout-graceful-shutdown 2"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8000/health\")'"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
 
   celery-worker:
+    container_name: rojgar-mela-celery-worker
     build:
       context: .
       dockerfile: Dockerfile
@@ -72,12 +71,15 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+      backend:
+        condition: service_healthy
     volumes:
       - .:/app
-      - uploads_data:/app/uploads
+      - ./uploads:/app/uploads
     command: celery -A app.core.celery_app worker --loglevel=info -Q high_priority,emails,broadcast,ai_and_heavy,default --pool=solo
 
   celery-beat:
+    container_name: rojgar-mela-celery-beat
     build:
       context: .
       dockerfile: Dockerfile
@@ -101,4 +103,3 @@ services:
 volumes:
   pg_data:
   redis_data:
-  uploads_data:

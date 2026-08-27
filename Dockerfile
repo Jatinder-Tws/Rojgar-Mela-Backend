@@ -38,4 +38,5 @@ RUN mkdir -p /app/uploads
 # Expose the port the app runs on
 EXPOSE 8000
 
-# The command is provided in docker-compose.yml
+# Default command: run migrations then start server (overridden in docker-compose)
+CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]

@@ -184,6 +184,51 @@ async def list_portal_courses(
     ]
 
 
+@router.get("/public", response_model=List[TrainingPortalCourseOut])
+async def list_public_paid_portal_courses(
+    search: Optional[str] = Query(None),
+    category: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Published paid training courses for the public /courses catalog."""
+    query = select(TrainingPortalCourse).where(
+        TrainingPortalCourse.status == "published",
+        TrainingPortalCourse.fee > 0,
+    )
+    if search and search.strip():
+        term = f"%{search.strip()}%"
+        query = query.where(
+            or_(
+                TrainingPortalCourse.title.ilike(term),
+                TrainingPortalCourse.description.ilike(term),
+                TrainingPortalCourse.category.ilike(term),
+            )
+        )
+    if category and category.strip() and category.strip().lower() != "all":
+        query = query.where(TrainingPortalCourse.category == category.strip())
+    query = query.order_by(TrainingPortalCourse.created_at.desc())
+    result = await db.execute(query)
+    courses = list(result.scalars().all())
+    counts = await _course_counts(db, [c.id for c in courses])
+    return [
+        _to_out(
+            course,
+            batches_count=counts.get(course.id, (0, 0))[0],
+            enrollments_count=counts.get(course.id, (0, 0))[1],
+        )
+        for course in courses
+    ]
+
+
+@router.get("/public/{course_id}", response_model=TrainingPortalCourseOut)
+async def get_public_paid_portal_course(course_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(TrainingPortalCourse).where(TrainingPortalCourse.id == course_id))
+    course = result.scalar_one_or_none()
+    if not course or course.status != "published" or (course.fee or 0) <= 0:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Course not found")
+    return await _course_out(db, course)
+
+
 @router.post("/", response_model=TrainingPortalCourseOut, status_code=status.HTTP_201_CREATED)
 async def create_portal_course(
     course_in: TrainingPortalCourseCreate,
