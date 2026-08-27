@@ -117,6 +117,7 @@ class AdminProviderDetailResponse(BaseModel):
     # Timestamps
     created_at: datetime
     updated_at: Optional[datetime] = None
+    last_active_at: Optional[datetime] = None
 
     # Provider job postings (detailed)
     job_postings: List[ProviderJobItem] = []
@@ -129,6 +130,32 @@ class AdminProviderDetailResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# ── Seeker portfolio snippets ─────────────────────────────────────────────
+
+class SeekerSkillItem(BaseModel):
+    name: str
+    level: Optional[str] = None
+
+
+class SeekerEducationItem(BaseModel):
+    institution: Optional[str] = None
+    degree: Optional[str] = None
+    field: Optional[str] = None
+    start_year: Optional[str] = None
+    end_year: Optional[str] = None
+    grade: Optional[str] = None
+
+
+class SeekerExperienceItem(BaseModel):
+    company: Optional[str] = None
+    role: Optional[str] = None
+    location: Optional[str] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    description: Optional[str] = None
+    is_current: Optional[bool] = None
 
 
 # ── Seeker Detail ─────────────────────────────────────────────────────────
@@ -161,6 +188,8 @@ class AdminSeekerDetailResponse(BaseModel):
     experience: Optional[str] = None
     preferred_locations: Optional[List[str]] = None
     profile_completion_percentage: Optional[int] = None
+    profile_sections_filled: int = 0
+    profile_sections_total: int = 0
     has_resume: bool = False
 
     # Extended personal info
@@ -172,12 +201,28 @@ class AdminSeekerDetailResponse(BaseModel):
     college_institute_name: Optional[str] = None
     preferred_job_sector: Optional[str] = None
 
+    # Portfolio (real profile data)
+    headline: Optional[str] = None
+    bio: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    linkedin_url: Optional[str] = None
+    github_url: Optional[str] = None
+    website_url: Optional[str] = None
+    total_experience_years: Optional[float] = None
+    current_company: Optional[str] = None
+    current_role: Optional[str] = None
+    skills: List[SeekerSkillItem] = []
+    education_history: List[SeekerEducationItem] = []
+    work_experiences: List[SeekerExperienceItem] = []
+
     # Job fair participation
     registered_job_fairs: Optional[List[str]] = None
 
     # Timestamps
     created_at: datetime
     updated_at: Optional[datetime] = None
+    last_active_at: Optional[datetime] = None
 
     # Seeker applications
     applications: List[SeekerApplicationItem] = []

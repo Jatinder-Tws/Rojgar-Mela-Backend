@@ -56,7 +56,10 @@ def generate_otp() -> str:
 def otp_expiry() -> datetime:
     # Naive UTC: otp_records.expires_at is TIMESTAMP WITHOUT TIME ZONE.
     # asyncpg rejects tz-aware datetimes for that column.
-    return datetime.utcnow() + timedelta(minutes=10)
+    # Prefer Redis OTP TTL (settings.OTP_EXPIRE_MINUTES); this remains for
+    # any legacy DB OTP paths (e.g. password reset until migrated).
+    minutes = int(getattr(settings, "OTP_EXPIRE_MINUTES", 5) or 5)
+    return datetime.utcnow() + timedelta(minutes=minutes)
 
 
 def generate_secure_password(min_len: int = 8, max_len: int = 15) -> str:

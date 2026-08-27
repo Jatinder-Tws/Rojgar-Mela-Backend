@@ -46,7 +46,12 @@ from app.modules.super_admin.services.import_job_store import create_job as _cre
 from app.modules.super_admin.services.super_admin_analytics import get_detailed_platform_analytics
 from app.modules.jobs_portal.services.dashboard_analytics import get_dashboard_analytics
 from app.modules.super_admin.services.super_admin_bulk_import import run_bulk_import_job
-from app.modules.jobs_portal.services.portfolio_service import calculate_completion
+from app.modules.jobs_portal.services.portfolio_service import (
+    calculate_completion,
+    normalize_education,
+    normalize_skills,
+    normalize_work_experiences,
+)
 from app.modules.super_admin.services.super_admin_utils import normalize_phone as _normalize_phone, temp_password as _temp_password
 
 
@@ -68,9 +73,11 @@ def _user_to_admin_out(
     profile_completion_percentage: Optional[int] = None,
     registered_job_fairs: Optional[List[str]] = None,
     has_resume: Optional[bool] = None,
+    last_active_at: Optional[datetime] = None,
 ) -> AdminUserOut:
     job_type = user.job_type.value if user.job_type and hasattr(user.job_type, "value") else user.job_type
     company_type = user.company_type.value if user.company_type and hasattr(user.company_type, "value") else user.company_type
+    resolved_last_active = last_active_at if last_active_at is not None else getattr(user, "last_login_at", None)
     return AdminUserOut(
         id=user.id, first_name=user.first_name, last_name=user.last_name, email=user.email,
         profile_pic_url=user.profile_pic_url, phone=user.phone, role=role_label,
@@ -80,8 +87,31 @@ def _user_to_admin_out(
         company_name=user.company_name, company_type=company_type, company_location=user.company_location,
         company_size=user.company_size, profile_completion_percentage=profile_completion_percentage,
         welcome_email_status=user.welcome_email_status, welcome_email_error=user.welcome_email_error,
-        has_resume=has_resume, created_at=user.created_at, registered_job_fairs=registered_job_fairs,
+        has_resume=has_resume, created_at=user.created_at,
+        last_active_at=resolved_last_active,
+        registered_job_fairs=registered_job_fairs,
     )
+
+
+async def _last_active_map(db: AsyncSession, user_ids: List[str]) -> dict:
+    """Best-effort last activity: max(user.last_login_at, latest auth_session.last_active_at)."""
+    if not user_ids:
+        return {}
+    from app.shared.models.auth_session import AuthSession
+
+    result = await db.execute(
+        select(AuthSession.user_id, func.max(AuthSession.last_active_at))
+        .where(AuthSession.user_id.in_(user_ids))
+        .group_by(AuthSession.user_id)
+    )
+    session_map = {uid: ts for uid, ts in result.all() if uid and ts}
+
+    users = await db.execute(select(User.id, User.last_login_at).where(User.id.in_(user_ids)))
+    out: dict = {}
+    for uid, login_at in users.all():
+        candidates = [t for t in (login_at, session_map.get(uid)) if t is not None]
+        out[uid] = max(candidates) if candidates else None
+    return out
 
 
 async def _seeker_has_resume_ids(db: AsyncSession, user_ids: List[str]) -> set:
@@ -585,18 +615,15 @@ async def list_seekers(
         seeker_filters.append(_build_user_search_filter(search.strip()))
 
     if status:
-        has_pwd = and_(User.hashed_password.isnot(None), User.hashed_password != "")
-        no_pwd = or_(User.hashed_password.is_(None), User.hashed_password == "")
-        if status == "no_password":
-            seeker_filters.append(no_pwd)
-        elif status == "active":
-            seeker_filters.append(and_(has_pwd, User.is_verified.is_(True), User.onboarding_complete.is_(True)))
-        elif status == "verified":
-            seeker_filters.append(and_(has_pwd, User.is_verified.is_(True), User.onboarding_complete.is_(False)))
-        elif status == "onboarded":
-            seeker_filters.append(and_(has_pwd, User.is_verified.is_(False), User.onboarding_complete.is_(True)))
-        elif status == "pending":
-            seeker_filters.append(and_(has_pwd, User.is_verified.is_(False), User.onboarding_complete.is_(False)))
+        if status == "active":
+            seeker_filters.append(User.is_verified.is_(True))
+        elif status == "inactive":
+            seeker_filters.append(User.is_verified.is_(False))
+        # Legacy aliases kept for old clients / bookmarks
+        elif status in {"verified"}:
+            seeker_filters.append(User.is_verified.is_(True))
+        elif status in {"pending", "onboarded", "no_password"}:
+            seeker_filters.append(User.is_verified.is_(False))
 
     count_q = select(func.count(User.id)).where(*seeker_filters)
     select_q = select(User, Portfolio).outerjoin(Portfolio, Portfolio.user_id == User.id).where(*seeker_filters)
@@ -611,7 +638,9 @@ async def list_seekers(
         .offset((page - 1) * page_size).limit(page_size)
     )
     rows = result.all()
-    has_resume_ids = await _seeker_has_resume_ids(db, [user.id for user, _ in rows])
+    user_ids = [user.id for user, _ in rows]
+    has_resume_ids = await _seeker_has_resume_ids(db, user_ids)
+    last_active = await _last_active_map(db, user_ids)
     items = []
     for user, portfolio in rows:
         pct = 0
@@ -625,6 +654,7 @@ async def list_seekers(
                 profile_completion_percentage=pct,
                 registered_job_fairs=jf_titles,
                 has_resume=user.id in has_resume_ids,
+                last_active_at=last_active.get(user.id),
             )
         )
     return AdminUserListResponse(items=items, total=total or 0, page=page, page_size=page_size)
@@ -669,11 +699,21 @@ async def get_seeker_detail(user_id: str, db: AsyncSession) -> AdminSeekerDetail
     """Full seeker detail including applications, interviews, and extended personal info."""
     user = await _get_role_user(db, user_id, UserRole.seeker)
 
-    # Profile completion
+    # Profile completion + portfolio payload
     portfolio = (await db.execute(select(Portfolio).where(Portfolio.user_id == user.id))).scalar_one_or_none()
     pct = 0
+    sections_filled = 0
+    sections_total = 0
+    skills = []
+    education_history = []
+    work_experiences = []
     if portfolio:
-        pct, _, _ = calculate_completion(portfolio, user)
+        pct, filled, missing = calculate_completion(portfolio, user)
+        sections_filled = len(filled)
+        sections_total = len(filled) + len(missing)
+        skills = normalize_skills(portfolio.skills)
+        education_history = normalize_education(portfolio.education)
+        work_experiences = normalize_work_experiences(portfolio.work_experiences)
 
     # Job fair names
     jf_titles = await _seeker_job_fair_names(db, user.id)
@@ -761,6 +801,8 @@ async def get_seeker_detail(user_id: str, db: AsyncSession) -> AdminSeekerDetail
         experience=user.experience,
         preferred_locations=user.preferred_locations,
         profile_completion_percentage=pct,
+        profile_sections_filled=sections_filled,
+        profile_sections_total=sections_total,
         has_resume=has_resume,
         father_or_mother_name=user.father_or_mother_name,
         gender=user.gender,
@@ -769,9 +811,23 @@ async def get_seeker_detail(user_id: str, db: AsyncSession) -> AdminSeekerDetail
         stream_specialization=user.stream_specialization,
         college_institute_name=user.college_institute_name,
         preferred_job_sector=user.preferred_job_sector,
+        headline=portfolio.headline if portfolio else None,
+        bio=portfolio.bio if portfolio else None,
+        city=portfolio.city if portfolio else None,
+        state=portfolio.state if portfolio else None,
+        linkedin_url=portfolio.linkedin_url if portfolio else None,
+        github_url=portfolio.github_url if portfolio else None,
+        website_url=portfolio.website_url if portfolio else None,
+        total_experience_years=portfolio.total_experience_years if portfolio else None,
+        current_company=portfolio.current_company if portfolio else None,
+        current_role=portfolio.current_role if portfolio else None,
+        skills=skills,
+        education_history=education_history,
+        work_experiences=work_experiences,
         registered_job_fairs=jf_titles,
         created_at=user.created_at,
         updated_at=user.updated_at,
+        last_active_at=(await _last_active_map(db, [user.id])).get(user.id),
         applications=app_items,
         total_applications=len(app_items),
         shortlisted_count=shortlisted_count,
@@ -824,19 +880,14 @@ async def list_providers(
         provider_filters.append(_build_user_search_filter(search.strip(), include_company=True))
 
     if status:
-        has_pwd = and_(User.hashed_password.isnot(None), User.hashed_password != "")
-        no_pwd = or_(User.hashed_password.is_(None), User.hashed_password == "")
-
-        if status == "no_password":
-            provider_filters.append(no_pwd)
-        elif status == "active":
-            provider_filters.append(and_(has_pwd, User.is_verified.is_(True), User.onboarding_complete.is_(True)))
-        elif status == "verified":
-            provider_filters.append(and_(has_pwd, User.is_verified.is_(True), User.onboarding_complete.is_(False)))
-        elif status == "onboarded":
-            provider_filters.append(and_(has_pwd, User.is_verified.is_(False), User.onboarding_complete.is_(True)))
-        elif status == "pending":
-            provider_filters.append(and_(has_pwd, User.is_verified.is_(False), User.onboarding_complete.is_(False)))
+        if status == "active":
+            provider_filters.append(User.is_verified.is_(True))
+        elif status == "inactive":
+            provider_filters.append(User.is_verified.is_(False))
+        elif status in {"verified"}:
+            provider_filters.append(User.is_verified.is_(True))
+        elif status in {"pending", "onboarded", "no_password"}:
+            provider_filters.append(User.is_verified.is_(False))
 
     total = await db.scalar(select(func.count(User.id)).where(*provider_filters))
     result = await db.execute(
@@ -844,7 +895,16 @@ async def list_providers(
         .offset((page - 1) * page_size).limit(page_size)
     )
     users = result.scalars().all()
-    return AdminUserListResponse(items=[_user_to_admin_out(u, "provider") for u in users], total=total or 0, page=page, page_size=page_size)
+    last_active = await _last_active_map(db, [u.id for u in users])
+    return AdminUserListResponse(
+        items=[
+            _user_to_admin_out(u, "provider", last_active_at=last_active.get(u.id))
+            for u in users
+        ],
+        total=total or 0,
+        page=page,
+        page_size=page_size,
+    )
 
 
 async def create_provider(body: AdminProviderCreate, db: AsyncSession) -> AdminUserOut:
@@ -964,6 +1024,7 @@ async def get_provider_detail(user_id: str, db: AsyncSession) -> AdminProviderDe
         specific_requirements=user.specific_requirements,
         created_at=user.created_at,
         updated_at=user.updated_at,
+        last_active_at=(await _last_active_map(db, [user.id])).get(user.id),
         job_postings=job_items,
         total_jobs=len(job_items),
         active_jobs=active_count,
@@ -1026,9 +1087,8 @@ SEEKER_EXPORT_FIELDS: dict[str, str] = {
     "onboarding_complete": "Onboarding Complete",
     "has_password": "Has Password",
     "status": "Status",
-    "welcome_email_status": "Welcome Email Status",
-    "welcome_email_error": "Welcome Email Error",
     "created_at": "Joined",
+    "last_active_at": "Last Active",
 }
 
 PROVIDER_EXPORT_FIELDS: dict[str, str] = {
@@ -1045,21 +1105,19 @@ PROVIDER_EXPORT_FIELDS: dict[str, str] = {
     "has_password": "Has Password",
     "status": "Status",
     "created_at": "Joined",
+    "last_active_at": "Last Active",
 }
 
 
 def _format_export_value(key: str, user: AdminUserOut) -> str:
     data = user.model_dump()
     if key == "status":
-        if not user.has_password:
-            return "No password"
-        if user.is_verified and user.onboarding_complete:
-            return "Active"
-        if user.is_verified:
-            return "Verified"
-        if user.onboarding_complete:
-            return "Onboarded"
-        return "Pending"
+        return "Active" if user.is_verified else "Inactive"
+    if key == "profile_completion_percentage":
+        pct = data.get("profile_completion_percentage")
+        if pct is None:
+            return ""
+        return f"{int(round(float(pct)))}%"
     value = data.get(key)
     if value is None:
         return ""
@@ -1141,18 +1199,14 @@ async def export_seekers(body: AdminUserExportRequest, db: AsyncSession) -> Stre
         seeker_filters.append(_build_user_search_filter(body.search.strip()))
 
     if body.status:
-        has_pwd = and_(User.hashed_password.isnot(None), User.hashed_password != "")
-        no_pwd = or_(User.hashed_password.is_(None), User.hashed_password == "")
-        if body.status == "no_password":
-            seeker_filters.append(no_pwd)
-        elif body.status == "active":
-            seeker_filters.append(and_(has_pwd, User.is_verified.is_(True), User.onboarding_complete.is_(True)))
-        elif body.status == "verified":
-            seeker_filters.append(and_(has_pwd, User.is_verified.is_(True), User.onboarding_complete.is_(False)))
-        elif body.status == "onboarded":
-            seeker_filters.append(and_(has_pwd, User.is_verified.is_(False), User.onboarding_complete.is_(True)))
-        elif body.status == "pending":
-            seeker_filters.append(and_(has_pwd, User.is_verified.is_(False), User.onboarding_complete.is_(False)))
+        if body.status == "active":
+            seeker_filters.append(User.is_verified.is_(True))
+        elif body.status == "inactive":
+            seeker_filters.append(User.is_verified.is_(False))
+        elif body.status in {"verified"}:
+            seeker_filters.append(User.is_verified.is_(True))
+        elif body.status in {"pending", "onboarded", "no_password"}:
+            seeker_filters.append(User.is_verified.is_(False))
 
     select_q = select(User, Portfolio).outerjoin(Portfolio, Portfolio.user_id == User.id).where(*seeker_filters)
     if body.job_fair_id:
@@ -1196,18 +1250,14 @@ async def export_providers(body: AdminUserExportRequest, db: AsyncSession) -> St
         provider_filters.append(_build_user_search_filter(body.search.strip(), include_company=True))
 
     if body.status:
-        has_pwd = and_(User.hashed_password.isnot(None), User.hashed_password != "")
-        no_pwd = or_(User.hashed_password.is_(None), User.hashed_password == "")
-        if body.status == "no_password":
-            provider_filters.append(no_pwd)
-        elif body.status == "active":
-            provider_filters.append(and_(has_pwd, User.is_verified.is_(True), User.onboarding_complete.is_(True)))
-        elif body.status == "verified":
-            provider_filters.append(and_(has_pwd, User.is_verified.is_(True), User.onboarding_complete.is_(False)))
-        elif body.status == "onboarded":
-            provider_filters.append(and_(has_pwd, User.is_verified.is_(False), User.onboarding_complete.is_(True)))
-        elif body.status == "pending":
-            provider_filters.append(and_(has_pwd, User.is_verified.is_(False), User.onboarding_complete.is_(False)))
+        if body.status == "active":
+            provider_filters.append(User.is_verified.is_(True))
+        elif body.status == "inactive":
+            provider_filters.append(User.is_verified.is_(False))
+        elif body.status in {"verified"}:
+            provider_filters.append(User.is_verified.is_(True))
+        elif body.status in {"pending", "onboarded", "no_password"}:
+            provider_filters.append(User.is_verified.is_(False))
 
     result = await db.execute(
         select(User).where(*provider_filters).order_by(User.created_at.desc(), User.id.desc())

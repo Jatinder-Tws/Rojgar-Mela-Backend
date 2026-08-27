@@ -24,6 +24,9 @@ class Settings(BaseSettings):
 
     # Google Gemini
     GOOGLE_API_KEY: str = ""
+
+    # YouTube Data API v3 — free-course playlist import (optional; yt-dlp is fallback)
+    YOUTUBE_API_KEY: str = ""
     GEMINI_EMBEDDING_MODEL: str = "gemini-embedding-001"
     GEMINI_CHAT_MODEL: str = "gemini-2.5-flash"
     GEMINI_LIVE_MODEL: str = "gemini-2.5-flash-native-audio-latest"
@@ -45,6 +48,9 @@ class Settings(BaseSettings):
 
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
+
+    # Email OTP (stored in Redis, not the database)
+    OTP_EXPIRE_MINUTES: int = 5
 
     # CORS
     FRONTEND_URL: str = "http://localhost:5173"

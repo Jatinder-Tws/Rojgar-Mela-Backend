@@ -6,6 +6,7 @@ from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import relationship
 
 from app.core.database import Base
+from app.shared.models.user import User
 
 
 def _uuid():

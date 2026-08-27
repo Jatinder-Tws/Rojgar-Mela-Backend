@@ -36,7 +36,6 @@ from app.core.dependencies import (
     generate_secure_password,
 )
 from app.shared.services.totp_service import totp_service
-from app.shared.services.email_service import send_job_fair_welcome_email
 from app.modules.jobs_portal.services.job_fair_db import (
     get_job_fair_db,
     list_job_fairs_db,
@@ -464,7 +463,7 @@ async def register_company_to_job_fair(
     user = user_result.scalars().first()
 
     if not user:
-        # Create new provider user
+        # Create new provider user — unverified until email OTP is confirmed
         temp_pwd = generate_secure_password()
         hashed_pwd = hash_password(temp_pwd)
 
@@ -486,7 +485,7 @@ async def register_company_to_job_fair(
             company_address=company_address,
             job_roles_offering=_json.dumps(parsed_openings) if parsed_openings else None,
             specific_requirements=extra_meta_json,
-            is_verified=True,
+            is_verified=False,
             onboarding_complete=True,
             totp_secret=totp_service.generate_secret(),
             totp_enabled=False,
@@ -497,7 +496,7 @@ async def register_company_to_job_fair(
         db.add(user)
         await db.flush()
 
-        # Save ImportedUserPassword
+        # Save ImportedUserPassword (emailed after OTP verification)
         db_pwd = ImportedUserPassword(
             id=str(uuid.uuid4()),
             user_id=user.id,
@@ -507,16 +506,6 @@ async def register_company_to_job_fair(
         )
         db.add(db_pwd)
         await db.flush()
-
-        background_tasks.add_task(
-            send_job_fair_welcome_email,
-            email,
-            (contact_person_name or company_name).strip(),
-            temp_pwd,
-            f"{settings.FRONTEND_URL.rstrip('/')}/login",
-            job_fair=jf,
-            role="provider",
-        )
     else:
         # Update details if missing
         if not user.company_name:
@@ -597,6 +586,22 @@ async def register_company_to_job_fair(
         jfc.city = city or jfc.city
 
     await db.commit()
+    await db.refresh(user)
+
+    requires_otp = not bool(user.is_verified)
+    if requires_otp and user.email:
+        from app.shared.controllers.auth_controller import _issue_email_verification_otp
+
+        try:
+            await _issue_email_verification_otp(
+                user.email,
+                user.first_name or company_name,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Registration saved but we could not send the verification code. Please try Resend OTP from the verify page.",
+            ) from exc
 
     if is_new_registration:
         from app.shared.services.notification_service import notify_super_admins
@@ -609,7 +614,15 @@ async def register_company_to_job_fair(
             related_user_id=str(user.id),
         )
 
-    return {"status": "success", "message": "Company registered successfully"}
+    if requires_otp:
+        return {
+            "status": "success",
+            "message": "Registration saved. Please verify your email with the OTP sent to your inbox. Your account stays unverified until then.",
+            "requires_otp": True,
+            "email": user.email,
+        }
+
+    return {"status": "success", "message": "Company registered successfully", "requires_otp": False}
 
 
 # ── QR CODE GENERATION ───────────────────────────────────────────────────────

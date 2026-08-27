@@ -295,7 +295,7 @@ async def send_otp_email(to_email: str, otp: str, first_name: str = "there") -> 
         first_name=first_name or "there",
         otp=otp,
         year=datetime.utcnow().year,
-        expires_minutes=10,
+        expires_minutes=int(getattr(settings, "OTP_EXPIRE_MINUTES", 5) or 5),
         login_url=f"{settings.FRONTEND_URL.rstrip('/')}/login",
         **_support_context(),
     )

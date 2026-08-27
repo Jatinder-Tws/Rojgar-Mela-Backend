@@ -1,43 +1,24 @@
-from contextlib import asynccontextmanager
-import asyncio
 import logging
-from typing import Optional
-from fastapi import FastAPI, Request, Depends
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
 from sqlalchemy import text
+
 from app.core.config import settings, get_upload_dir, get_cors_allow_origins, get_cors_origin_regex
-from app.core.dependencies import require_authenticated
-from app.shared.models.user import User
-from app.core.database import (
-    init_db,
-    AsyncSessionLocal,
-)
+from app.core.database import AsyncSessionLocal, import_all_models
 
 logger = logging.getLogger(__name__)
 
-
-# @asynccontextmanager
-# async def lifespan(app: FastAPI):
-#     await init_db()
-
-#     from app.modules.super_admin.controllers.super_admin_controller import ensure_super_admin_user
-#     await ensure_super_admin_user()
-
-#     async with AsyncSessionLocal() as session:
-#         from app.shared.services.auth_provider_settings_service import seed_provider_settings
-#         await seed_provider_settings(session)
-
-#     yield
+# Register all ORM models for cross-module relationship resolution
+import_all_models()
 
 
 app = FastAPI(
     title="RojgarMela Modular API",
     description="AI-powered Job Match & Training Portal Backend",
     version="2.0.0",
-    # lifespan=lifespan,
 )
 
 
@@ -73,26 +54,25 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
-# ── Import and Register All Routers ─────────────────────────────────────────
+# ── Router Registrations ───────────────────────────────────────────────────
 from app.shared.routers import (
     auth, master_data, notifications, users
 )
 from app.modules.jobs_portal.routers import (
-    ai_coach, ai_coach_live_ws, ai_interview, analytics, applications, assessment, career_enquiry,
-    company_internships, dashboard, external_candidate, interviews, interview_scheduling,
+    ai_coach, ai_coach_live_ws, ai_interview, analytics, applications, assessment, blog_public, career_enquiry,
+    career_roadmap, company_internships, dashboard, external_candidate, interviews, interview_scheduling,
     jobs, job_fair, master, matches, onboarding, portfolio, resumes, resume_builder,
     roadmap, saved_jobs
 )
 from app.modules.training_portal.routers import (
     google_calendar, training_courses, training_portal_categories,
-    training_portal_courses, training_portal_internships, training_portal_runtime,
-    training_portal_teachers
+    training_portal_courses, training_portal_free_courses, training_portal_internships,
+    training_portal_runtime, training_portal_teachers
 )
-# Registers ORM event listeners (import for side effects) so every
-# TrainingPortalCandidateNotification insert is pushed live over SSE.
+# Registers ORM event listeners for real-time notification streams
 from app.modules.training_portal.services import training_portal_notification_stream  # noqa: F401
 from app.modules.super_admin.routers import (
-    attendance, email_admin, help_desk_bot, import_users, superadmin,
+    attendance, career_roadmap_options_admin,  help_desk_bot, import_users, superadmin, blog_admin, career_roadmap_admin, email_admin,
     super_admin, super_admin_support, support
 )
 
@@ -116,6 +96,9 @@ routers = [
     master.router,
     ai_interview.router,
     roadmap.router,
+    career_roadmap.router,
+    career_roadmap_admin.router,
+    career_roadmap_options_admin.router,
     ai_coach.router,
     ai_coach_live_ws.router,
     interview_scheduling.router,
@@ -128,9 +111,12 @@ routers = [
     career_enquiry.admin_router,
     job_fair.router,
     email_admin.router,
+    blog_admin.router,
+    blog_public.router,
     company_internships.router,
     training_courses.router,
     training_portal_courses.router,
+    training_portal_free_courses.router,
     training_portal_categories.router,
     training_portal_teachers.router,
     training_portal_internships.router,
@@ -151,11 +137,6 @@ app.mount(
     StaticFiles(directory=str(get_upload_dir())),
     name="uploads",
 )
-
-
-
-
-
 
 
 @app.get("/api/notifications/stream/{user_id}")
@@ -207,7 +188,6 @@ async def health():
         content={
             "status": status_str,
             "service": "RojgarMela Modular API",
-            "details": details,
         },
     )
 

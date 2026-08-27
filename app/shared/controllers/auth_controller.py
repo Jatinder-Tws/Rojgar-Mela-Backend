@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 import secrets
 import string
@@ -51,7 +51,20 @@ from app.core.dependencies import (
 )
 from app.shared.services.email_service import send_otp_email, send_password_email
 from app.shared.services.celery_tasks import send_otp_email_task
+from app.shared.services.otp_redis_service import (
+    PURPOSE_EMAIL_VERIFY,
+    store_otp,
+    verify_and_consume_otp,
+)
 from app.shared.services.totp_service import totp_service
+
+
+async def _issue_email_verification_otp(email: str, first_name: str | None = None) -> str:
+    """Generate a 6-digit OTP, store it in Redis (5 min TTL), and email it."""
+    otp_code = generate_otp()
+    await store_otp(email, otp_code, purpose=PURPOSE_EMAIL_VERIFY)
+    send_otp_email_task.delay(email, otp_code, first_name or "there")
+    return otp_code
 
 
 def _generate_temp_password(length: int = 12) -> str:
@@ -83,11 +96,14 @@ async def register(
     resume_file=None,
     registration_ip: str | None = None,
 ) -> RegisterResponse:
-    duplicate_filters = [User.email == body.email]
+    # OR(email, phone) can match different rows — use limit(1), never scalar_one*.
+    duplicate_filters = [func.lower(User.email) == str(body.email).strip().lower()]
     if body.phone:
         duplicate_filters.append(User.phone == body.phone)
-    existing = await db.execute(select(User).where(or_(*duplicate_filters)))
-    if existing.scalar_one_or_none():
+    existing_id = await db.scalar(
+        select(User.id).where(or_(*duplicate_filters)).limit(1)
+    )
+    if existing_id:
         raise HTTPException(
             status_code=409, detail="An account with this email or phone already exists"
         )
@@ -133,48 +149,67 @@ async def register(
         except Exception as e:
             print(f"[REGISTER] Optional resume upload failed: {e}")
 
-    if user.email:
-        otp_code = generate_otp()
-        otp_record = OTPRecord(
-            email=user.email, code=otp_code, expires_at=otp_expiry()
-        )
-        db.add(otp_record)
-
     await db.commit()
     await db.refresh(user)
 
     if user.email:
-        send_otp_email_task.delay(user.email, otp_code, user.first_name or "there")
+        try:
+            await _issue_email_verification_otp(user.email, user.first_name)
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Registration saved but we could not send the verification code. Please use Resend OTP.",
+            ) from exc
 
     return RegisterResponse(
-        message="Registration successful. Please check your email for the verification code.",
+        message="Registration successful. Please check your email for the verification code. Your account stays unverified until you enter the correct OTP.",
         requires_otp=True,
     )
 
 
 async def verify_otp(body: VerifyOtpRequest, db: AsyncSession) -> TokenResponse:
-    now = datetime.utcnow()
-    result = await db.execute(
-        select(OTPRecord).where(
-            and_(
-                OTPRecord.email == body.email,
-                OTPRecord.code == body.code,
-                OTPRecord.used == False,  # noqa
-                OTPRecord.expires_at > now,
-            )
-        )
-    )
-    otp_record = result.scalar_one_or_none()
-    if not otp_record:
-        raise HTTPException(status_code=400, detail="Invalid or expired OTP code")
+    try:
+        ok = await verify_and_consume_otp(body.email, body.code, purpose=PURPOSE_EMAIL_VERIFY)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    otp_record.used = True
-    user_result = await db.execute(select(User).where(User.email == body.email))
+    if not ok:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or expired OTP code. OTP is valid for 5 minutes only.",
+        )
+
+    user_result = await db.execute(
+        select(User).where(func.lower(User.email) == body.email.strip().lower())
+    )
     user = user_result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+
     user.is_verified = True
     await db.commit()
+    await db.refresh(user)
+
+    # Job-fair / imported provider accounts: send login credentials after email is verified
+    if getattr(user, "is_first_login", False) and user.email:
+        try:
+            from app.shared.models.imported_user_password import ImportedUserPassword
+
+            pwd_row = await db.scalar(
+                select(ImportedUserPassword).where(ImportedUserPassword.user_id == user.id)
+            )
+            if pwd_row and pwd_row.plain_password:
+                from app.shared.services.email_service import send_job_fair_welcome_email
+
+                await send_job_fair_welcome_email(
+                    user.email,
+                    user.first_name or user.company_name or "there",
+                    pwd_row.plain_password,
+                    f"{settings.FRONTEND_URL.rstrip('/')}/login",
+                    role="provider" if (user.role and user.role.value == "provider") else "seeker",
+                )
+        except Exception as e:
+            print(f"[VERIFY_OTP] Deferred welcome email failed: {e}")
 
     token = create_access_token({"sub": user.id})
     refresh_token = create_refresh_token({"sub": user.id})
@@ -267,13 +302,12 @@ async def resend_otp(
     if user.is_verified:
         raise HTTPException(status_code=400, detail="Email already verified")
 
-    otp_code = generate_otp()
-    otp_record = OTPRecord(email=body.email, code=otp_code, expires_at=otp_expiry())
-    db.add(otp_record)
-    await db.commit()
+    try:
+        await _issue_email_verification_otp(body.email, user.first_name)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    send_otp_email_task.delay(body.email, otp_code, user.first_name or "there")
-    return {"message": "OTP resent successfully"}
+    return {"message": "OTP resent successfully. Code is valid for 5 minutes."}
 
 
 async def login(
@@ -390,17 +424,17 @@ async def login(
             )
 
         if not user.is_verified:
-            otp_code = generate_otp()
-            otp_record = OTPRecord(
-                email=body.email, code=otp_code, expires_at=otp_expiry()
-            )
-            db.add(otp_record)
-            await db.commit()
-            background_tasks.add_task(send_otp_email, body.email, otp_code, user.first_name)
+            try:
+                await _issue_email_verification_otp(user.email, user.first_name)
+            except RuntimeError as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail={"general": str(exc)},
+                ) from exc
             return LoginResponse(
-                message="Email verification required. A new OTP has been sent to your email.",
+                message="You are not verified. Please verify your email first, then try again. A new OTP has been sent to your email.",
                 requires_otp=True,
-                email=body.email,
+                email=user.email,
             )
 
         if user.totp_enabled:
