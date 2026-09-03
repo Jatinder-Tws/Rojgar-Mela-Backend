@@ -8,6 +8,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_upload_dir
+from app.modules.jobs_portal.services.career_roadmap_seed import CATALOG_ROADMAPS
 from app.modules.jobs_portal.models.career_roadmap import CareerRoadmap
 from app.modules.jobs_portal.schemas.career_roadmap import (
     CareerInsightsOut,
@@ -16,6 +17,8 @@ from app.modules.jobs_portal.schemas.career_roadmap import (
     CareerRoadmapOut,
     CareerRoadmapUpdate,
     RoadmapFaqOut,
+    RoadmapImportItemResult,
+    RoadmapImportResponse,
     RoadmapLessonOut,
     RoadmapResourceIn,
     RoadmapResourceOut,
@@ -35,75 +38,7 @@ _ALLOWED_IMAGE_TYPES = {
 HERO_IMAGE_MAX_BYTES = 2 * 1024 * 1024
 
 SEED_ROADMAPS: list[dict] = [
-    {
-        "title": "Full Stack Developer",
-        "slug": "full-stack-developer",
-        "category": "Technology",
-        "level": "Intermediate",
-        "industries": ["IT", "Software", "Startup"],
-        "short_description": "Master frontend, backend, databases and cloud deployment to become a job-ready full stack developer.",
-        "long_description": (
-            "This roadmap takes you from HTML/CSS fundamentals through React, Node.js, databases, "
-            "and production deployment. Each step includes lessons, hands-on projects, and quizzes "
-            "aligned with hiring demand on Rojgar Mela."
-        ),
-        "skill_tags": ["React", "Node.js", "Databases", "TypeScript", "REST APIs", "Git"],
-        "duration_months": "6 months",
-        "salary_lpa": "₹12L",
-        "growth_percent": "High",
-        "openings_count": "5800+",
-        "is_published": True,
-        "is_featured": True,
-        "is_trending": True,
-        "sort_order": 1,
-        "steps": [
-            {
-                "title": "Frontend Fundamentals",
-                "content": "HTML5, modern CSS, responsive layouts, and JavaScript ES6+ foundations.",
-                "lessons_count": 8,
-                "projects_count": 2,
-                "quizzes_count": 3,
-                "lessons": [
-                    {"title": "Semantic HTML & accessibility"},
-                    {"title": "Flexbox, Grid & responsive CSS"},
-                    {"title": "JavaScript ES6+, DOM & Fetch"},
-                ],
-            },
-            {
-                "title": "React & State Management",
-                "content": "Build interactive UIs with React 18, hooks, and client-side state.",
-                "lessons_count": 10,
-                "projects_count": 2,
-                "quizzes_count": 2,
-                "lessons": [
-                    {"title": "Components, props and hooks"},
-                    {"title": "React Router & forms"},
-                ],
-            },
-            {
-                "title": "Backend APIs & Databases",
-                "content": "Node.js, Express, REST APIs, PostgreSQL and authentication.",
-                "lessons_count": 9,
-                "projects_count": 2,
-                "quizzes_count": 2,
-                "lessons": [
-                    {"title": "Express REST APIs"},
-                    {"title": "SQL & PostgreSQL modeling"},
-                ],
-            },
-            {
-                "title": "Projects, Testing & Placement",
-                "content": "Ship a production app, write tests, and prepare for interviews.",
-                "lessons_count": 6,
-                "projects_count": 1,
-                "quizzes_count": 2,
-                "lessons": [
-                    {"title": "Deployment on cloud"},
-                    {"title": "Interview checklist"},
-                ],
-            },
-        ],
-    },
+    *CATALOG_ROADMAPS,
     {
         "title": "DevOps & Cloud Engineer",
         "slug": "devops-cloud-engineer",
@@ -262,14 +197,17 @@ def _normalize_steps(steps: list[RoadmapStepIn] | list[dict] | None) -> list[dic
     return normalized
 
 
-def _normalize_insights(insights) -> dict:
+def _normalize_insights(insights, video_link: Optional[str] = None) -> dict:
     if insights is None:
-        return {"top_hiring_companies": [], "in_demand_skills": [], "related_career_paths": []}
-    data = insights.model_dump() if hasattr(insights, "model_dump") else dict(insights or {})
+        data = {}
+    else:
+        data = insights.model_dump() if hasattr(insights, "model_dump") else dict(insights or {})
+    stored_video = video_link if video_link is not None else data.get("video_link")
     return {
         "top_hiring_companies": _as_list(data.get("top_hiring_companies")),
         "in_demand_skills": _as_list(data.get("in_demand_skills")),
         "related_career_paths": _as_list(data.get("related_career_paths")),
+        "video_link": (str(stored_video).strip() if stored_video else None) or None,
     }
 
 
@@ -412,6 +350,7 @@ def _to_out(row: CareerRoadmap) -> CareerRoadmapOut:
         ),
         faqs=faqs,
         hero_image_url=row.hero_image_url,
+        video_link=(insights_raw.get("video_link") or None),
         is_published=bool(row.is_published),
         is_featured=bool(row.is_featured),
         is_trending=bool(row.is_trending),
@@ -566,7 +505,7 @@ async def create_roadmap(db: AsyncSession, body: CareerRoadmapCreate, admin_id: 
         openings_count=body.openings_count,
         steps=_normalize_steps(body.steps),
         resources=_normalize_resources(body.resources),
-        career_insights=_normalize_insights(body.career_insights),
+        career_insights=_normalize_insights(body.career_insights, body.video_link),
         faqs=_normalize_faqs(body.faqs),
         hero_image_url=body.hero_image_url,
         is_published=body.is_published,
@@ -612,8 +551,11 @@ async def update_roadmap(db: AsyncSession, roadmap_id: str, body: CareerRoadmapU
         row.steps = _normalize_steps(data["steps"])
     if "resources" in data:
         row.resources = _normalize_resources(data["resources"])
-    if "career_insights" in data:
-        row.career_insights = _normalize_insights(data["career_insights"])
+    if "career_insights" in data or "video_link" in data:
+        current = row.career_insights if isinstance(row.career_insights, dict) else {}
+        incoming = data["career_insights"] if "career_insights" in data else current
+        video_value = data["video_link"] if "video_link" in data else current.get("video_link")
+        row.career_insights = _normalize_insights(incoming, video_value)
     if "faqs" in data:
         row.faqs = _normalize_faqs(data["faqs"])
     if "hero_image_url" in data:
@@ -635,6 +577,102 @@ async def delete_roadmap(db: AsyncSession, roadmap_id: str) -> None:
     row = await get_by_id(db, roadmap_id)
     await db.delete(row)
     await db.commit()
+
+
+async def import_roadmaps_from_json(db: AsyncSession, raw: bytes, admin_id: Optional[str]) -> RoadmapImportResponse:
+    from app.modules.jobs_portal.services.career_roadmap_import import (
+        IMPORT_LIMIT,
+        IMPORT_MAX_BYTES,
+        decode_import_payload,
+        extract_import_items,
+        to_create_payload,
+    )
+
+    if not raw:
+        raise HTTPException(status_code=400, detail="Empty file")
+    if len(raw) > IMPORT_MAX_BYTES:
+        raise HTTPException(status_code=400, detail="JSON file must be 8MB or smaller")
+    try:
+        payload = decode_import_payload(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    records = extract_import_items(payload)
+    if not records:
+        raise HTTPException(status_code=400, detail="JSON has no roadmap records to import")
+    if len(records) > IMPORT_LIMIT:
+        raise HTTPException(status_code=400, detail=f"Import at most {IMPORT_LIMIT} roadmaps at a time")
+
+    created = 0
+    updated = 0
+    failed = 0
+    results: list[RoadmapImportItemResult] = []
+
+    for index, record in enumerate(records, start=1):
+        title = str(record.get("title") or record.get("detail_title") or f"Item {index}")
+        try:
+            body = to_create_payload(record, sort_order=index)
+            existing = (
+                await db.execute(select(CareerRoadmap).where(CareerRoadmap.slug == body.slug))
+            ).scalar_one_or_none()
+            if existing:
+                update = CareerRoadmapUpdate(
+                    title=body.title,
+                    slug=body.slug,
+                    category=body.category,
+                    level=body.level,
+                    industries=body.industries,
+                    short_description=body.short_description,
+                    long_description=body.long_description,
+                    skill_tags=body.skill_tags,
+                    duration_months=body.duration_months,
+                    salary_lpa=body.salary_lpa,
+                    growth_percent=body.growth_percent,
+                    openings_count=body.openings_count,
+                    steps=body.steps,
+                    resources=body.resources,
+                    career_insights=body.career_insights,
+                    faqs=body.faqs,
+                    video_link=body.video_link,
+                    is_published=True,
+                    is_featured=body.is_featured,
+                    is_trending=body.is_trending,
+                    sort_order=body.sort_order,
+                )
+                await update_roadmap(db, existing.id, update)
+                updated += 1
+                results.append(
+                    RoadmapImportItemResult(title=body.title, slug=body.slug, action="updated")
+                )
+            else:
+                body.is_published = True
+                await create_roadmap(db, body, admin_id)
+                created += 1
+                results.append(
+                    RoadmapImportItemResult(title=body.title, slug=body.slug, action="created")
+                )
+        except HTTPException as exc:
+            failed += 1
+            results.append(
+                RoadmapImportItemResult(
+                    title=title,
+                    slug="",
+                    action="failed",
+                    message=str(exc.detail),
+                )
+            )
+        except Exception as exc:
+            failed += 1
+            results.append(
+                RoadmapImportItemResult(
+                    title=title,
+                    slug="",
+                    action="failed",
+                    message=str(exc)[:240],
+                )
+            )
+
+    return RoadmapImportResponse(created=created, updated=updated, failed=failed, items=results)
 
 
 async def save_hero_image(file: UploadFile) -> str:

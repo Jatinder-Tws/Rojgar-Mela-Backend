@@ -29,6 +29,7 @@ from app.modules.jobs_portal.services.jobs_service import (
     schedule_activation,
 )
 from app.modules.jobs_portal.services.seeker_matching_service import embed_and_store_job
+from app.shared.services.audit_service import log_audit_event
 
 
 
@@ -75,6 +76,16 @@ async def create_job(
         perks=body.perks or [],
     )
     db.add(job)
+    await log_audit_event(
+        db,
+        user,
+        action="CREATE",
+        entity_type="job",
+        entity_id=str(job.id),
+        entity_name=job.title,
+        description=f"Created job posting: '{job.title}' ({job.location or 'Remote'})",
+        changes={"title": job.title, "location": job.location, "job_type": str(job_type) if job_type else None},
+    )
     await db.commit()
     await db.refresh(job)
 
@@ -247,6 +258,15 @@ async def update_job_put(
         raise HTTPException(status_code=404, detail="Job not found")
 
     content_changed = await update_job_service(job, body, background_tasks)
+    await log_audit_event(
+        db,
+        user,
+        action="UPDATE",
+        entity_type="job",
+        entity_id=str(job.id),
+        entity_name=job.title,
+        description=f"Updated job posting: '{job.title}'",
+    )
     await db.commit()
     await db.refresh(job)
 
@@ -265,6 +285,15 @@ async def delete_job(
 ) -> None:
     job = await get_job_or_404(job_id, user, db)
     # Hard delete — cascades to applications and matches via DB relationship
+    await log_audit_event(
+        db,
+        user,
+        action="DELETE",
+        entity_type="job",
+        entity_id=str(job.id),
+        entity_name=job.title,
+        description=f"Deleted job posting: '{job.title}'",
+    )
     await db.delete(job)
     await db.commit()
 
@@ -277,6 +306,16 @@ async def deactivate_job(
 ) -> None:
     job = await get_job_or_404(job_id, user, db)
     await deactivate_job_service(job)
+    await log_audit_event(
+        db,
+        user,
+        action="STATUS_CHANGE",
+        entity_type="job",
+        entity_id=str(job.id),
+        entity_name=job.title,
+        description=f"Deactivated job posting: '{job.title}'",
+        changes={"is_active": False},
+    )
     await db.commit()
     schedule_cleanup(background_tasks, job)
 
@@ -284,6 +323,16 @@ async def deactivate_job(
 async def activate_job(job_id: str, user: User, db: AsyncSession) -> None:
     job = await get_job_or_404(job_id, user, db)
     await activate_job_service(job)
+    await log_audit_event(
+        db,
+        user,
+        action="STATUS_CHANGE",
+        entity_type="job",
+        entity_id=str(job.id),
+        entity_name=job.title,
+        description=f"Activated job posting: '{job.title}'",
+        changes={"is_active": True},
+    )
     await db.commit()
 
 

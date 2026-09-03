@@ -397,3 +397,4 @@ async def admin_delete_enquiry(
         raise HTTPException(status_code=404, detail="Enquiry not found")
     await db.delete(inquiry)
     await db.commit()
+

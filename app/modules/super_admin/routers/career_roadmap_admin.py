@@ -1,16 +1,17 @@
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.dependencies import require_super_admin
+from app.core.dependencies import require_super_admin, require_super_admin_or_permission
 from app.modules.jobs_portal.schemas.career_roadmap import (
     CareerRoadmapCreate,
     CareerRoadmapImageUploadResponse,
     CareerRoadmapListResponse,
     CareerRoadmapOut,
     CareerRoadmapUpdate,
+    RoadmapImportResponse,
 )
 from app.modules.jobs_portal.services import career_roadmap_service as svc
 from app.shared.models.user import User
@@ -26,7 +27,7 @@ async def list_career_roadmaps(
     status_filter: Optional[str] = Query(None, alias="status"),
     category: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("roadmaps")),
 ):
     items, total = await svc.list_roadmaps(
         db,
@@ -48,17 +49,30 @@ async def list_career_roadmaps(
 @router.post("/career-roadmaps/upload-image", response_model=CareerRoadmapImageUploadResponse)
 async def upload_career_roadmap_image(
     file: UploadFile = File(...),
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("roadmaps")),
 ):
     url = await svc.save_hero_image(file)
     return CareerRoadmapImageUploadResponse(url=url)
+
+
+@router.post("/career-roadmaps/import", response_model=RoadmapImportResponse)
+async def import_career_roadmaps(
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_super_admin_or_permission("roadmaps")),
+):
+    filename = (file.filename or "").lower()
+    if filename and not filename.endswith(".json"):
+        raise HTTPException(status_code=400, detail="Please upload a .json file")
+    raw = await file.read()
+    return await svc.import_roadmaps_from_json(db, raw, admin.id)
 
 
 @router.post("/career-roadmaps", response_model=CareerRoadmapOut, status_code=status.HTTP_201_CREATED)
 async def create_career_roadmap(
     body: CareerRoadmapCreate,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_super_admin),
+    admin: User = Depends(require_super_admin_or_permission("roadmaps")),
 ):
     row = await svc.create_roadmap(db, body, admin.id)
     return svc._to_out(row)
@@ -68,7 +82,7 @@ async def create_career_roadmap(
 async def get_career_roadmap(
     roadmap_id: str,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("roadmaps")),
 ):
     row = await svc.get_by_id(db, roadmap_id)
     return svc._to_out(row)
@@ -79,7 +93,7 @@ async def update_career_roadmap(
     roadmap_id: str,
     body: CareerRoadmapUpdate,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("roadmaps")),
 ):
     row = await svc.update_roadmap(db, roadmap_id, body)
     return svc._to_out(row)
@@ -89,7 +103,7 @@ async def update_career_roadmap(
 async def delete_career_roadmap(
     roadmap_id: str,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("roadmaps")),
 ):
     await svc.delete_roadmap(db, roadmap_id)
     return None

@@ -20,6 +20,7 @@ class UserRole(str, enum.Enum):
     provider = "provider"
     superadmin = "superadmin"
     teacher = "teacher"
+    supervisor = "supervisor"
 
 
 class JobType(str, enum.Enum):
@@ -133,6 +134,13 @@ class User(Base):
     support_tickets = relationship(
         "SupportTicket", back_populates="user", cascade="all, delete-orphan"
     )
+    supervisor_profile = relationship(
+        "SupervisorProfile",
+        uselist=False,
+        back_populates="user",
+        cascade="all, delete-orphan",
+        foreign_keys="SupervisorProfile.user_id",
+    )
     platform_feedback = relationship(
         "PlatformFeedback", back_populates="user", cascade="all, delete-orphan"
     )
@@ -166,8 +174,16 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan",
     )
+    supervisor_profile = relationship(
+        "SupervisorProfile",
+        back_populates="user",
+        uselist=False,
+        cascade="all, delete-orphan",
+        foreign_keys="SupervisorProfile.user_id",
+    )
 
 
 # Ensure relationship targets are registered in SQLAlchemy mapper
 import app.shared.models.user_credit  # noqa: F401
+import app.shared.models.supervisor_profile  # noqa: F401
 

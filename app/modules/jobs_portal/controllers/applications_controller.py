@@ -15,6 +15,7 @@ from app.modules.jobs_portal.schemas.jobs import ApplicationCreate, ApplicationO
 from app.modules.jobs_portal.services.ai_feedback_service import generate_rejection_feedback
 from app.shared.services.notification_service import create_notification
 from app.modules.jobs_portal.services.auto_interview_service import auto_schedule_for_application
+from app.shared.services.audit_service import log_audit_event
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,17 @@ async def apply_to_job(
             "New Application",
             f"{user.first_name} {user.last_name} has applied to your '{job.title}' posting.",
         )
+
+    await log_audit_event(
+        db,
+        user,
+        action="APPLICATION_SUBMIT",
+        entity_type="application",
+        entity_id=str(app.id),
+        entity_name=job.title,
+        description=f"Applied for job '{job.title}' at {provider.company_name if provider and provider.company_name else 'Company'}",
+        changes={"job_id": str(job.id), "job_title": job.title},
+    )
 
     await db.commit()
     if provider:
@@ -424,6 +436,16 @@ async def reject_application(
 
     app.status = ApplicationStatus.rejected
     app.rejection_reason = body.rejection_reason
+    await log_audit_event(
+        db,
+        user,
+        action="STATUS_CHANGE",
+        entity_type="application",
+        entity_id=str(app.id),
+        entity_name=job.title,
+        description=f"Rejected application for '{job.title}'. Reason: {body.rejection_reason or 'None'}",
+        changes={"status": "rejected", "rejection_reason": body.rejection_reason},
+    )
     await db.commit()
 
     seeker_result = await db.execute(select(User).where(User.id == app.seeker_id))
@@ -492,6 +514,16 @@ async def update_application_status(
             if app.status in (ApplicationStatus.shortlisted, ApplicationStatus.interviewing, ApplicationStatus.selected):
                 raise HTTPException(status_code=409, detail="Candidate is already shortlisted")
             app.status = ApplicationStatus.shortlisted
+            await log_audit_event(
+                db,
+                user,
+                action="STATUS_CHANGE",
+                entity_type="application",
+                entity_id=str(app.id),
+                entity_name=job.title,
+                description=f"Shortlisted candidate for '{job.title}'",
+                changes={"new_status": "shortlisted"},
+            )
             await db.commit()
 
             seeker_result = await db.execute(select(User).where(User.id == app.seeker_id))
@@ -519,16 +551,46 @@ async def update_application_status(
         elif status == "rejected":
             app.status = ApplicationStatus.rejected
             app.rejection_reason = ai_feedback or "Not specified"
+            await log_audit_event(
+                db,
+                user,
+                action="STATUS_CHANGE",
+                entity_type="application",
+                entity_id=str(app.id),
+                entity_name=job.title,
+                description=f"Rejected candidate for '{job.title}'",
+                changes={"new_status": "rejected", "rejection_reason": app.rejection_reason},
+            )
             await db.commit()
 
         elif status in ("interviewing", "selected"):
             app.status = ApplicationStatus(status)
+            await log_audit_event(
+                db,
+                user,
+                action="STATUS_CHANGE",
+                entity_type="application",
+                entity_id=str(app.id),
+                entity_name=job.title,
+                description=f"Updated candidate application status to '{status}' for '{job.title}'",
+                changes={"new_status": status},
+            )
             await db.commit()
 
         else:
             app.status = status
             if ai_feedback:
                 app.ai_feedback = ai_feedback
+            await log_audit_event(
+                db,
+                user,
+                action="STATUS_CHANGE",
+                entity_type="application",
+                entity_id=str(app.id),
+                entity_name=job.title,
+                description=f"Updated candidate application status to '{status}' for '{job.title}'",
+                changes={"new_status": str(status)},
+            )
             await db.commit()
 
         await db.refresh(app)

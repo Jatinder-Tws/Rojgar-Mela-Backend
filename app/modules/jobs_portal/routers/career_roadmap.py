@@ -13,7 +13,7 @@ router = APIRouter(tags=["career-roadmaps"])
 @router.get("/career-roadmaps", response_model=CareerRoadmapPublicListResponse)
 async def list_public_career_roadmaps(
     page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=100),
+    page_size: int = Query(50, ge=1, le=200),
     search: Optional[str] = None,
     category: Optional[str] = None,
     db: AsyncSession = Depends(get_db),

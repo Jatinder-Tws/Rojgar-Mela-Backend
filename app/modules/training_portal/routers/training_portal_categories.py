@@ -16,7 +16,7 @@ from app.modules.training_portal.schemas.training_portal_category import (
     TrainingPortalCategoryUpdate,
     TrainingPortalCategoryOut,
 )
-from app.core.dependencies import require_super_admin, require_training_portal_user
+from app.core.dependencies import require_super_admin, require_training_portal_user, require_super_admin_or_permission
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +87,7 @@ async def list_categories(
 @router.post("/", response_model=TrainingPortalCategoryOut, status_code=status.HTTP_201_CREATED)
 async def create_category(
     payload: TrainingPortalCategoryCreate,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_super_admin_or_permission("training_courses")),
     db: AsyncSession = Depends(get_db),
 ):
     name = payload.name.strip()
@@ -117,7 +117,7 @@ async def create_category(
 async def update_category(
     category_id: str,
     payload: TrainingPortalCategoryUpdate,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_super_admin_or_permission("training_courses")),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
@@ -158,7 +158,7 @@ async def update_category(
 @router.delete("/{category_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_category(
     category_id: str,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_super_admin_or_permission("training_courses")),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(

@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
-from app.core.dependencies import require_super_admin, require_training_portal_user
+from app.core.dependencies import require_super_admin, require_training_portal_user, require_super_admin_or_permission
 from app.modules.training_portal.models.training_portal_free_course import (
     TrainingPortalFreeCourse,
     TrainingPortalFreeCourseLesson,
@@ -145,12 +145,9 @@ async def list_free_courses(
     db: AsyncSession = Depends(get_db),
 ):
     query = select(TrainingPortalFreeCourse)
-    is_super_admin = (
-        getattr(current_user, "is_super_admin", False)
-        or (hasattr(current_user.role, "value") and current_user.role.value == "superadmin")
-        or (str(current_user.role or "") == "superadmin")
-    )
-    if not is_super_admin:
+    role_val = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role or "")
+    is_admin = getattr(current_user, "is_super_admin", False) or role_val in ("superadmin", "supervisor")
+    if not is_admin:
         query = query.where(TrainingPortalFreeCourse.status == "published")
     elif status_filter and status_filter.strip() and status_filter.strip().lower() != "all":
         query = query.where(TrainingPortalFreeCourse.status == status_filter.strip())
@@ -174,7 +171,7 @@ async def list_free_courses(
 @router.post("/import", response_model=FreeCourseOut, status_code=status.HTTP_201_CREATED)
 async def import_free_course(
     body: FreeCourseImportIn,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_super_admin_or_permission("training_courses")),
     db: AsyncSession = Depends(get_db),
 ):
     youtube_url = body.youtube_url.strip()
@@ -228,12 +225,9 @@ async def get_free_course(
     db: AsyncSession = Depends(get_db),
 ):
     course = await _get_course(db, course_id)
-    is_super_admin = (
-        getattr(current_user, "is_super_admin", False)
-        or (hasattr(current_user.role, "value") and current_user.role.value == "superadmin")
-        or (str(current_user.role or "") == "superadmin")
-    )
-    if course.status != "published" and not is_super_admin:
+    role_val = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role or "")
+    is_admin = getattr(current_user, "is_super_admin", False) or role_val in ("superadmin", "supervisor")
+    if course.status != "published" and not is_admin:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Free course not found")
     return _to_out(course, include_lessons=True)
 
@@ -242,7 +236,7 @@ async def get_free_course(
 async def update_free_course(
     course_id: str,
     body: FreeCourseUpdateIn,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_super_admin_or_permission("training_courses")),
     db: AsyncSession = Depends(get_db),
 ):
     course = await _get_course(db, course_id)
@@ -259,7 +253,7 @@ async def update_free_course(
 @router.post("/{course_id}/resync", response_model=FreeCourseOut)
 async def resync_free_course(
     course_id: str,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_super_admin_or_permission("training_courses")),
     db: AsyncSession = Depends(get_db),
 ):
     course = await _get_course(db, course_id)
@@ -285,7 +279,7 @@ async def resync_free_course(
 @router.delete("/{course_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_free_course(
     course_id: str,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_super_admin_or_permission("training_courses")),
     db: AsyncSession = Depends(get_db),
 ):
     course = await _get_course(db, course_id)

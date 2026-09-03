@@ -18,7 +18,7 @@ from app.modules.jobs_portal.schemas.career_enquiry import (
     CareerEnquiryStatusUpdate,
     UnifiedEnquiryOut,
 )
-from app.core.dependencies import require_super_admin
+from app.core.dependencies import require_super_admin_or_permission
 
 # Public submit + super-admin management under one router module
 public_router = APIRouter(prefix="/career-program", tags=["career-program"])
@@ -42,7 +42,7 @@ async def list_enquiries(
     domain: Optional[str] = None,
     qualification: Optional[str] = None,
     source: Optional[str] = None,
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("enquiries")),
     db: AsyncSession = Depends(get_db),
 ):
     return await ctrl_list(
@@ -61,7 +61,7 @@ async def list_enquiries(
 async def update_enquiry_status(
     enquiry_id: str,
     body: CareerEnquiryStatusUpdate,
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("enquiries")),
     db: AsyncSession = Depends(get_db),
 ):
     return await ctrl_update_status(enquiry_id, body, db)
@@ -71,7 +71,8 @@ async def update_enquiry_status(
 async def delete_enquiry(
     enquiry_id: str,
     source: str = Query("career"),
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("enquiries")),
     db: AsyncSession = Depends(get_db),
 ):
     await ctrl_delete(enquiry_id, source, db)
+

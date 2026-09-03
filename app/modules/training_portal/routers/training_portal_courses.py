@@ -19,7 +19,7 @@ from app.modules.training_portal.schemas.training_portal_course import (
     TrainingPortalCourseUpdate,
     TrainingPortalCourseOut,
 )
-from app.core.dependencies import require_super_admin, require_training_portal_user
+from app.core.dependencies import require_super_admin, require_training_portal_user, require_super_admin_or_permission
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ router = APIRouter(prefix="/training-portal/courses", tags=["Training Portal Cou
 @router.post("/thumbnail", response_model=dict)
 async def upload_portal_course_thumbnail(
     file: UploadFile = File(...),
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_super_admin_or_permission("training_courses")),
 ):
     ext = Path(file.filename or "thumbnail").suffix.lower()
     if ext not in {".jpg", ".jpeg", ".png", ".webp"}:
@@ -232,10 +232,10 @@ async def get_public_paid_portal_course(course_id: str, db: AsyncSession = Depen
 @router.post("/", response_model=TrainingPortalCourseOut, status_code=status.HTTP_201_CREATED)
 async def create_portal_course(
     course_in: TrainingPortalCourseCreate,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_super_admin_or_permission("training_courses")),
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a new training portal course (super admin only)."""
+    """Create a new training portal course (super admin or supervisor with training permission)."""
     now = datetime.utcnow()
     course = TrainingPortalCourse(
         id=str(uuid.uuid4()),
@@ -279,7 +279,7 @@ async def get_portal_course(
 async def update_portal_course(
     course_id: str,
     course_update: TrainingPortalCourseUpdate,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_super_admin_or_permission("training_courses")),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(select(TrainingPortalCourse).where(TrainingPortalCourse.id == course_id))
@@ -300,7 +300,7 @@ async def update_portal_course(
 @router.delete("/{course_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_portal_course(
     course_id: str,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_super_admin_or_permission("training_courses")),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(select(TrainingPortalCourse).where(TrainingPortalCourse.id == course_id))

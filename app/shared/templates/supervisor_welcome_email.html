@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Welcome to RojgarMela.AI - Supervisor Portal Access</title>
+</head>
+
+<body
+  style="margin:0;padding:0;background:#eef4f9;font-family:'Segoe UI',Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased;">
+
+  <table width="100%" cellpadding="0" cellspacing="0" role="presentation"
+    style="background:#eef4f9;padding:32px 16px;">
+    <tr>
+      <td align="center">
+
+        <table width="600" cellpadding="0" cellspacing="0" role="presentation"
+          style="max-width:600px;width:100%;background:#ffffff;border-radius:4px;overflow:hidden;box-shadow:0 4px 18px rgba(15,40,80,0.08);">
+
+          <!-- Logo Header -->
+          <tr>
+            <td style="padding:30px 32px 12px;background:#ffffff;" align="center">
+              <img src="cid:rojgar_logo"
+                alt="RojgarMela.AI"
+                style="height:55px;width:auto;max-width:260px;display:block;margin:0 auto;" />
+            </td>
+          </tr>
+
+          <!-- Main Content -->
+          <tr>
+            <td style="padding:12px 36px 30px;background:#ffffff;">
+
+              <h1
+                style="margin:0 0 18px 0;font-size:26px;font-weight:700;color:#0f2d52;line-height:1.3;border-bottom:3px solid #ea580c;padding-bottom:12px;">
+                Welcome to RojgarMela.AI!
+              </h1>
+
+              <p style="margin:0 0 16px 0;font-size:13px;line-height:1.7;color:#1f2937;">
+                Hi <strong>{{ first_name }}</strong>,
+              </p>
+
+              <p style="margin:0 0 18px 0;font-size:13px;line-height:1.7;color:#1f2937;">
+                You have been registered as an authorized <strong>Supervisor</strong> on <strong>RojgarMela.AI</strong>.
+                We're excited to have you on board to manage and coordinate key operations across the platform.
+              </p>
+
+              <p style="margin:0 0 20px 0;font-size:13px;line-height:1.7;color:#1f2937;">
+                Use the credentials below to sign in to the dedicated Supervisor Portal and get started with your assigned operational workflows.
+              </p>
+
+              <!-- Credentials Card -->
+              <table width="100%" cellpadding="0" cellspacing="0" role="presentation"
+                style="margin:0 0 24px 0;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;">
+                <tr>
+                  <td style="padding:18px 20px;">
+                    <p style="margin:0 0 10px 0;font-size:12px;font-weight:700;color:#0f2d52;text-transform:uppercase;letter-spacing:0.08em;">
+                      Your Supervisor Portal Credentials
+                    </p>
+                    <p style="margin:0 0 8px 0;font-size:14px;color:#334155;">
+                      <strong>Portal URL:</strong>
+                      <a href="{{ portal_url }}" target="_blank" style="color:#2563eb;text-decoration:none;font-weight:600;">{{ portal_url }}</a>
+                    </p>
+                    <p style="margin:0 0 8px 0;font-size:14px;color:#334155;">
+                      <strong>Login Email:</strong> {{ email }}
+                    </p>
+                    {% if department %}
+                    <p style="margin:0 0 8px 0;font-size:14px;color:#334155;">
+                      <strong>Department:</strong> {{ department }}
+                    </p>
+                    {% endif %}
+                    <p style="margin:0;font-size:14px;color:#334155;">
+                      <strong>Temporary Password:</strong>
+                      <span style="font-family:monospace;font-size:16px;font-weight:bold;color:#ea580c;background:#fff7ed;padding:4px 8px;border-radius:4px;border:1px solid #ffedd5;">{{ password }}</span>
+                    </p>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Getting Started Box -->
+              <table width="100%" cellpadding="0" cellspacing="0" role="presentation"
+                style="margin:0 0 24px 0;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;">
+                <tr>
+                  <td style="padding:18px 20px;">
+                    <p style="margin:0 0 12px 0;font-size:12px;font-weight:700;color:#0f2d52;text-transform:uppercase;letter-spacing:0.08em;">
+                      Getting Started
+                    </p>
+                    <p style="margin:0;font-size:14px;line-height:1.9;color:#334155;">
+                      ✓ Sign in to the Supervisor Portal using the link and credentials above.<br />
+                      ✓ Review your active dashboard modules and assigned workflows.<br />
+                      ✓ Coordinate regional operations, candidates, and job fairs effectively.<br />
+                      ✓ Reach out to your administrator whenever you need additional guidance.
+                    </p>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Security Notice Box -->
+              <table width="100%" cellpadding="0" cellspacing="0" role="presentation"
+                style="margin:0 0 24px 0;background:#fff7ed;border-left:4px solid #ea580c;border-radius:0 4px 4px 0;">
+                <tr>
+                  <td style="padding:18px;">
+                    <p style="margin:0 0 8px 0;font-size:14px;font-weight:700;color:#c2410c;">
+                      Security & Access Notice
+                    </p>
+                    <p style="margin:0;font-size:14px;line-height:1.7;color:#334155;">
+                      Please keep your login credentials secure. Do not share your temporary password with anyone. We recommend updating your password after logging in.
+                    </p>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- CTA Button -->
+              <table cellpadding="0" cellspacing="0" role="presentation" width="100%" style="margin:0 0 28px 0;">
+                <tr>
+                  <td align="center">
+                    <a href="{{ portal_url }}" target="_blank"
+                      style="display:inline-block;background:#0f2d52;color:#ffffff;text-decoration:none;font-size:13px;font-weight:600;padding:14px 32px;border-radius:4px;">
+                      Login to Supervisor Portal
+                    </a>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Operations Banner Box -->
+              <table width="100%" cellpadding="0" cellspacing="0" role="presentation"
+                style="margin:0 0 24px 0;background:#ecfdf5;border-left:4px solid #0d9488;border-radius:0 4px 4px 0;">
+                <tr>
+                  <td style="padding:18px;">
+                    <p style="margin:0 0 8px 0;font-size:14px;font-weight:700;color:#047857;">
+                      Empowering Seamless Operations
+                    </p>
+                    <p style="margin:0;font-size:14px;line-height:1.7;color:#334155;">
+                      We are committed to empowering our operations team to deliver exceptional service and support across all platform initiatives.
+                    </p>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Sign-off -->
+              <p style="margin:0;font-size:13px;line-height:1.7;color:#1f2937;">
+                Regards,<br />
+                <strong style="color:#0f2d52;">Team RojgarMela.AI</strong><br />
+                <span style="font-size:13px;color:#64748b;">Connecting Talent with Opportunity</span>
+              </p>
+
+            </td>
+          </tr>
+
+          <!-- Footer with Logo & Support Contact -->
+          <tr>
+            <td style="background:#eef5fb;padding:24px 32px 10px;border-top:1px solid #dbeafe;">
+              <table width="100%" cellpadding="0" cellspacing="0" role="presentation">
+                <tr>
+                  <td align="center">
+                    <img src="cid:rojgar_logo"
+                      alt="RojgarMela.AI"
+                      style="height:40px;width:auto;max-width:220px;display:block;margin:0 auto;" />
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <tr>
+            <td align="center" style="background:#eef5fb;padding:10px 32px 32px;">
+              <p style="margin:0 0 8px 0;font-size:14px;color:#475569;line-height:1.6;">
+                Need help getting started?
+              </p>
+              <p style="margin:0 0 6px 0;font-size:14px;color:#475569;line-height:1.6;">
+                Email:
+                <a href="mailto:{{ support_email }}" style="color:#2563eb;text-decoration:none;font-weight:600;">{{ support_email }}</a>
+              </p>
+              <p style="margin:0 0 16px 0;font-size:14px;color:#475569;line-height:1.6;">
+                Phone: <strong>{{ support_phones }}</strong>
+              </p>
+              <p style="margin:0;font-size:12px;color:#94a3b8;line-height:1.6;">
+                You received this email because an administrative account was created for you on RojgarMela.AI.<br />
+                © {{ year }} RojgarMela.AI. All rights reserved.
+              </p>
+            </td>
+          </tr>
+
+        </table>
+
+      </td>
+    </tr>
+  </table>
+
+</body>
+
+</html>
