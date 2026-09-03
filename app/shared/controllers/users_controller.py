@@ -4,7 +4,7 @@ import asyncio
 from fastapi import BackgroundTasks, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from typing import Optional
 from app.core.config import settings, get_upload_dir
 from app.modules.jobs_portal.models.portfolio import Portfolio
 from app.shared.models.user import User, UserRole, JobType, CompanyType
@@ -13,8 +13,20 @@ from app.shared.services.email_service import send_welcome_email
 from app.shared.services.totp_service import totp_service
 
 
-async def get_me(user: User) -> UserOut:
-    return UserOut.model_validate(user)
+async def get_me(user: User, db: Optional[AsyncSession] = None) -> UserOut:
+    out = UserOut.model_validate(user)
+    role_str = user.role.value if hasattr(user.role, "value") else str(user.role or "")
+    if role_str == "supervisor":
+        cached_profile = getattr(user, "_supervisor_profile", None)
+        if cached_profile:
+            out.permissions = cached_profile.permissions or []
+        elif db:
+            from app.shared.models.supervisor_profile import SupervisorProfile
+            res = await db.execute(select(SupervisorProfile).where(SupervisorProfile.user_id == user.id))
+            profile = res.scalar_one_or_none()
+            if profile:
+                out.permissions = profile.permissions or []
+    return out
 
 
 async def complete_onboarding(

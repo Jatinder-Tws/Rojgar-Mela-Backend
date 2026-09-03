@@ -15,7 +15,7 @@ from app.modules.training_portal.schemas.training_portal_internship import (
     TrainingPortalInternshipUpdate,
     TrainingPortalInternshipOut,
 )
-from app.core.dependencies import require_super_admin, require_training_portal_user
+from app.core.dependencies import require_super_admin, require_training_portal_user, require_super_admin_or_permission
 
 logger = logging.getLogger(__name__)
 
@@ -70,10 +70,10 @@ async def list_portal_internships(
 @router.post("/", response_model=TrainingPortalInternshipOut, status_code=status.HTTP_201_CREATED)
 async def create_portal_internship(
     internship_in: TrainingPortalInternshipCreate,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_super_admin_or_permission("training")),
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a new training portal internship (super admin only)."""
+    """Create a new training portal internship (super admin or supervisor with training permission)."""
     now = datetime.utcnow()
     internship = TrainingPortalInternship(
         id=str(uuid.uuid4()),
@@ -118,7 +118,7 @@ async def get_portal_internship(
 async def update_portal_internship(
     internship_id: str,
     internship_update: TrainingPortalInternshipUpdate,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_super_admin_or_permission("training")),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
@@ -141,7 +141,7 @@ async def update_portal_internship(
 @router.delete("/{internship_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_portal_internship(
     internship_id: str,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_super_admin_or_permission("training")),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(

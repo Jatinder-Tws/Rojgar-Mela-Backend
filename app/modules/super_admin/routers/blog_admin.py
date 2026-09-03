@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_upload_dir, settings
 from app.core.database import get_db
-from app.core.dependencies import require_super_admin
+from app.core.dependencies import require_super_admin_or_permission
 from app.shared.models.user import User
 from app.modules.super_admin.schemas.ai_blog import (
     AIBlogEditRequest,
@@ -32,7 +32,7 @@ router = APIRouter(prefix="/api/super-admin/blogs", tags=["Super Admin Blogs"])
 @router.post("/generate-ai", response_model=AIBlogGenerateResponse)
 async def generate_ai_blog(
     data: AIBlogGenerateRequest,
-    admin: User = Depends(require_super_admin),
+    admin: User = Depends(require_super_admin_or_permission("blogs")),
 ):
     """Generate a complete structured blog post from a prompt using AI."""
     return await ai_blog_generator.generate_blog_with_ai(data)
@@ -41,7 +41,7 @@ async def generate_ai_blog(
 @router.post("/edit-ai", response_model=AIBlogGenerateResponse)
 async def edit_ai_blog(
     data: AIBlogEditRequest,
-    admin: User = Depends(require_super_admin),
+    admin: User = Depends(require_super_admin_or_permission("blogs")),
 ):
     """Edit, modify, or expand an existing blog post according to editorial instructions."""
     return await ai_blog_generator.edit_blog_with_ai(data)
@@ -50,7 +50,7 @@ async def edit_ai_blog(
 @router.post("/generate-image-ai")
 async def generate_ai_blog_image(
     data: AIBlogImageGenerateRequest,
-    admin: User = Depends(require_super_admin),
+    admin: User = Depends(require_super_admin_or_permission("blogs")),
 ):
     """Generate an editorial banner image for a blog using AI and store in media uploads."""
     image_url = await ai_blog_generator.generate_blog_image_with_ai(
@@ -77,7 +77,7 @@ async def list_admin_blogs(
     sort_by: Optional[str] = Query("created_at"),
     sort_order: Optional[str] = Query("desc"),
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_super_admin),
+    admin: User = Depends(require_super_admin_or_permission("blogs")),
 ):
     """List all blog posts with administrative filters, sorting, and pagination."""
     items, total = await blog_service.list_blog_posts(
@@ -99,7 +99,7 @@ async def list_admin_blogs(
 @router.get("/categories", response_model=BlogCategoryListResponse)
 async def get_admin_categories(
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_super_admin),
+    admin: User = Depends(require_super_admin_or_permission("blogs")),
 ):
     """List all distinct blog categories and their post counts."""
     categories = await blog_service.get_blog_categories(db, public_only=False)
@@ -110,7 +110,7 @@ async def get_admin_categories(
 async def get_admin_blog_by_id(
     blog_id: str,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_super_admin),
+    admin: User = Depends(require_super_admin_or_permission("blogs")),
 ):
     """Retrieve a single blog post by ID for editing or previewing."""
     post = await blog_service.get_blog_post_by_id(db, blog_id)
@@ -123,7 +123,7 @@ async def get_admin_blog_by_id(
 async def create_admin_blog(
     data: BlogPostCreate,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_super_admin),
+    admin: User = Depends(require_super_admin_or_permission("blogs")),
 ):
     """Create a new blog post."""
     post = await blog_service.create_blog_post(db, data, created_by_id=admin.id)
@@ -135,7 +135,7 @@ async def update_admin_blog(
     blog_id: str,
     data: BlogPostUpdate,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_super_admin),
+    admin: User = Depends(require_super_admin_or_permission("blogs")),
 ):
     """Update an existing blog post."""
     post = await blog_service.update_blog_post(db, blog_id, data)
@@ -148,7 +148,7 @@ async def update_admin_blog(
 async def delete_admin_blog(
     blog_id: str,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_super_admin),
+    admin: User = Depends(require_super_admin_or_permission("blogs")),
 ):
     """Delete a blog post."""
     success = await blog_service.delete_blog_post(db, blog_id)
@@ -160,7 +160,7 @@ async def delete_admin_blog(
 @router.post("/upload-image")
 async def upload_blog_image(
     file: UploadFile = File(...),
-    admin: User = Depends(require_super_admin),
+    admin: User = Depends(require_super_admin_or_permission("blogs")),
 ):
     """Upload a cover image or author avatar for a blog post."""
     allowed_types = ["image/jpeg", "image/png", "image/webp", "image/gif", "image/svg+xml"]

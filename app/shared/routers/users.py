@@ -19,8 +19,8 @@ router = APIRouter(prefix="/users", tags=["users"])
 
 
 @router.get("/me", response_model=UserOut)
-async def get_me(user: User = Depends(get_current_user)):
-    return await ctrl_get_me(user)
+async def get_me(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    return await ctrl_get_me(user, db)
 
 
 @router.patch("/me/onboarding", response_model=UserOut)

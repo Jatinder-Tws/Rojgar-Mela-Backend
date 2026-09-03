@@ -313,6 +313,7 @@ class UserOut(BaseModel):
     experience: Optional[str] = None
     company_size: Optional[str] = None
     is_first_login: bool = True
+    permissions: Optional[List[str]] = None
     created_at: datetime
 
     @field_validator("is_first_login", mode="before")

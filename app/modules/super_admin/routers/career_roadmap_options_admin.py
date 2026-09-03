@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.dependencies import require_super_admin
+from app.core.dependencies import require_super_admin_or_permission
 from app.modules.jobs_portal.schemas.career_roadmap_option import (
     RoadmapOptionCreate,
     RoadmapOptionListResponse,
@@ -19,7 +19,7 @@ router = APIRouter(prefix="/super-admin/career-roadmap-options", tags=["super-ad
 async def list_roadmap_options(
     kind: str,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("roadmaps")),
 ):
     items = await opt_svc.list_options(db, kind)
     return RoadmapOptionListResponse(items=items)
@@ -30,7 +30,7 @@ async def create_roadmap_option(
     kind: str,
     body: RoadmapOptionCreate,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("roadmaps")),
 ):
     return await opt_svc.create_option(db, kind, body)
 
@@ -41,7 +41,7 @@ async def update_roadmap_option(
     option_id: str,
     body: RoadmapOptionUpdate,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("roadmaps")),
 ):
     return await opt_svc.update_option(db, kind, option_id, body)
 
@@ -51,7 +51,7 @@ async def delete_roadmap_option(
     kind: str,
     option_id: str,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("roadmaps")),
 ):
     await opt_svc.delete_option(db, kind, option_id)
     return None

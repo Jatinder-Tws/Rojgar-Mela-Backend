@@ -62,7 +62,7 @@ from app.modules.jobs_portal.routers import (
     ai_coach, ai_coach_live_ws, ai_interview, analytics, applications, assessment, blog_public, career_enquiry,
     career_roadmap, company_internships, dashboard, external_candidate, interviews, interview_scheduling,
     jobs, job_fair, master, matches, onboarding, portfolio, resumes, resume_builder,
-    roadmap, saved_jobs
+    roadmap, saved_jobs, scholarships
 )
 from app.modules.training_portal.routers import (
     google_calendar, training_courses, training_portal_categories,
@@ -72,9 +72,10 @@ from app.modules.training_portal.routers import (
 # Registers ORM event listeners for real-time notification streams
 from app.modules.training_portal.services import training_portal_notification_stream  # noqa: F401
 from app.modules.super_admin.routers import (
-    attendance, career_roadmap_options_admin,  help_desk_bot, import_users, superadmin, blog_admin, career_roadmap_admin, email_admin,
-    super_admin, super_admin_support, support
+    attendance, audit_logs, career_roadmap_options_admin, help_desk_bot, import_users, superadmin, blog_admin, career_roadmap_admin, email_admin,
+    super_admin, super_admin_support, supervisor_admin, support
 )
+from app.modules.supervisor.routers import supervisor_portal
 
 API_PREFIX = ""
 
@@ -104,6 +105,8 @@ routers = [
     interview_scheduling.router,
     import_users.router,
     super_admin.router,
+    supervisor_admin.router,
+    supervisor_portal.router,
     super_admin_support.router,
     support.router,
     help_desk_bot.router,
@@ -122,6 +125,8 @@ routers = [
     training_portal_internships.router,
     training_portal_runtime.router,
     google_calendar.router,
+    audit_logs.router,
+    scholarships.router,
 ]
 
 app.include_router(auth.router)

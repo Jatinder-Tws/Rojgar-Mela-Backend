@@ -15,14 +15,9 @@ from markupsafe import Markup, escape
 
 from app.core.config import settings
 
-# Template engine
-_base_dir = Path(__file__).resolve().parent.parent.parent.parent
-_template_dirs = [
-    Path(__file__).parent.parent / "templates",
-    Path(__file__).parent.parent.parent / "templates",
-    _base_dir / "templates",
-]
-_env = Environment(loader=FileSystemLoader([str(d) for d in _template_dirs if d.exists()]), autoescape=True)
+# Template engine (single canonical path: app/shared/templates)
+_templates_dir = Path(__file__).resolve().parent.parent / "templates"
+_env = Environment(loader=FileSystemLoader(str(_templates_dir)), autoescape=True)
 
 _UPLOADS_DIR = Path(__file__).parent.parent / "uploads"
 
@@ -807,3 +802,28 @@ async def send_seat_cancellation_email(
     <p>If you'd still like to join this course, please book a fresh seat from the Training Portal, subject to availability.</p>
     """
     await send_notification_email(to_email, candidate_name, "Seat Booking Cancelled – Non-Appearance", html)
+
+
+async def send_supervisor_welcome_email(
+    to_email: str,
+    first_name: str,
+    password: str,
+    department: Optional[str] = None,
+) -> None:
+    """Send welcome email with credentials and portal link to a newly created supervisor."""
+    template = _env.get_template("supervisor_welcome_email.html")
+    portal_url = f"{settings.FRONTEND_URL.rstrip('/')}/supervisor/login"
+    subject = "Welcome to RojgarMela.AI - Supervisor Portal Access"
+
+    html = template.render(
+        first_name=first_name or "Supervisor",
+        email=to_email,
+        password=password,
+        department=department,
+        portal_url=portal_url,
+        year=datetime.utcnow().year,
+        **_support_context(),
+    )
+
+    await _send_branded_email(to_email, subject, html, raise_on_error=True)
+

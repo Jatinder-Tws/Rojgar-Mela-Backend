@@ -228,8 +228,8 @@ def super_admin_me(admin: User) -> SuperAdminProfileOut:
         last_name=admin.last_name,
         phone=admin.phone,
         profile_pic_url=admin.profile_pic_url,
-        role="super_admin",
-        is_super_admin=True,
+        role=admin.role.value if hasattr(admin.role, "value") else str(admin.role or "super_admin"),
+        is_super_admin=getattr(admin, "is_super_admin", False),
     )
 
 

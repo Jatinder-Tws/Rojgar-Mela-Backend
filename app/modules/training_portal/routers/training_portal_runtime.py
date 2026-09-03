@@ -22,6 +22,7 @@ from app.shared.services.email_service import (
     send_enrollment_receipt_email,
     send_training_enrollment_receipt_email,
 )
+from app.shared.services.audit_service import log_audit_event
 from app.modules.training_portal.schemas.training_admin_student import (
     StudentLookupOut,
     AdminRegisterAndEnrollStudentCreate,
@@ -79,7 +80,12 @@ from app.modules.training_portal.schemas.training_portal_runtime import (
     PortalDashboardSummaryOut,
     time_within_working_hours,
 )
-from app.core.dependencies import require_super_admin, require_training_portal_user, require_teacher_or_super_admin
+from app.core.dependencies import (
+    require_super_admin,
+    require_training_portal_user,
+    require_teacher_or_super_admin,
+    require_super_admin_or_permission,
+)
 from app.modules.training_portal.services.training_portal_dashboard import build_dashboard_summary
 from app.modules.training_portal.services.training_portal_mapper import (
     enrollment_to_out,
@@ -727,7 +733,7 @@ async def get_payment_settings(
 @router.put("/payment-settings", response_model=PortalPaymentSettingsOut)
 async def update_payment_settings(
     body: PortalPaymentSettingsUpdate,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_super_admin_or_permission("training_fees")),
     db: AsyncSession = Depends(get_db),
 ):
     row = await _get_or_create_payment_settings(db)
@@ -744,7 +750,7 @@ async def update_payment_settings(
 async def get_dashboard_summary(
     date_from: Optional[str] = Query(None, description="YYYY-MM-DD enrollment/payment range start"),
     date_to: Optional[str] = Query(None, description="YYYY-MM-DD enrollment/payment range end"),
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_super_admin_or_permission("training", "training_analytics", "training_courses", "training_batches", "training_students", "training_teachers", "training_fees")),
     db: AsyncSession = Depends(get_db),
 ):
     """Aggregated admin KPIs, fee charts, and teacher workload from live DB data."""
@@ -763,16 +769,19 @@ async def list_enrollments(
     batch_id: Optional[str] = Query(None),
     unassigned_only: bool = Query(False),
     page: Optional[int] = Query(None, ge=1),
-    limit: Optional[int] = Query(None, ge=1, le=100),
     page_size: Optional[int] = Query(None, ge=1, le=100),
+    limit: Optional[int] = Query(None, ge=1, le=100),
     current_user: User = Depends(require_training_portal_user),
     db: AsyncSession = Depends(get_db),
 ):
     query = select(TrainingPortalEnrollment).order_by(TrainingPortalEnrollment.created_at.desc())
     is_admin = getattr(current_user, "is_super_admin", False)
     user_role = getattr(current_user, "role", None)
+    if hasattr(user_role, "value"):
+        user_role = user_role.value
+    is_supervisor = user_role == "supervisor"
 
-    if is_admin:
+    if is_admin or is_supervisor:
         if candidate_email:
             query = query.where(TrainingPortalEnrollment.candidate_email == candidate_email.strip().lower())
     elif user_role == "teacher":
@@ -849,7 +858,7 @@ async def list_enrollments(
 @router.post("/enrollments/export-csv")
 async def export_students_csv(
     body: dict = {},
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_super_admin_or_permission("training")),
     db: AsyncSession = Depends(get_db),
 ):
     emails = body.get("emails")
@@ -969,7 +978,7 @@ async def export_students_csv(
 async def send_reminder_to_students(
     body: dict,
     background_tasks: BackgroundTasks,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_super_admin_or_permission("training")),
     db: AsyncSession = Depends(get_db),
 ):
     emails = body.get("emails")
@@ -1011,7 +1020,7 @@ async def send_reminder_to_students(
 @router.post("/enrollments/bulk-delete")
 async def bulk_delete_students(
     body: dict,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_super_admin_or_permission("training")),
     db: AsyncSession = Depends(get_db),
 ):
     emails = body.get("emails")
@@ -1481,13 +1490,32 @@ async def create_enrollment(
             enrollment.id,
         )
 
+    await log_audit_event(
+        db,
+        current_user,
+        action="ENROLL",
+        entity_type="student",
+        entity_id=str(enrollment.id),
+        entity_name=f"{name} - {body.title}",
+        description=f"Enrolled in {body.enrollment_type}: {body.title} ({body.payment_type}, paid ₹{body.paid_amount})",
+        changes={
+            "enrollment_type": body.enrollment_type,
+            "title": body.title,
+            "payment_type": body.payment_type,
+            "paid_amount": body.paid_amount,
+            "balance_due": body.balance_due,
+            "batch_name": batch_name,
+        },
+    )
+    await db.commit()
+
     return enrollment_to_out(enrollment)
 
 
 @router.post("/enrollments/{enrollment_id}/confirm-visit", response_model=PortalEnrollmentOut)
 async def confirm_venue_visit(
     enrollment_id: str,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_super_admin_or_permission("training")),
     db: AsyncSession = Depends(get_db),
 ):
     """SuperAdmin confirms the candidate visited the venue within the 5-day window,
@@ -1526,7 +1554,7 @@ async def confirm_venue_visit(
 async def update_enrollment(
     enrollment_id: str,
     body: PortalEnrollmentUpdate,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_super_admin_or_permission("training")),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
@@ -1571,7 +1599,7 @@ async def update_enrollment(
 @router.post("/enrollments/record-offline-payment", response_model=PortalEnrollmentOut)
 async def record_offline_payment(
     body: PortalOfflinePaymentRecord,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_super_admin_or_permission("training")),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
@@ -1680,7 +1708,7 @@ async def record_offline_payment(
 @router.post("/enrollments/record-refund", response_model=PortalEnrollmentOut)
 async def record_refund(
     body: PortalRefundRecord,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_super_admin_or_permission("training")),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
@@ -1798,7 +1826,7 @@ async def list_batches(
 async def create_batch(
     body: PortalBatchCreate,
     background_tasks: BackgroundTasks,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_super_admin_or_permission("training")),
     db: AsyncSession = Depends(get_db),
 ):
     if len(body.enrollment_ids) > MAX_BATCH_STUDENTS:
@@ -1848,6 +1876,17 @@ async def create_batch(
     if body.enrollment_ids:
         await _assign_enrollments_to_batch(db, batch, body.enrollment_ids, background_tasks)
 
+    await log_audit_event(
+        db,
+        current_user,
+        action="CREATE",
+        entity_type="batch",
+        entity_id=str(batch.id),
+        entity_name=batch.batch_name,
+        description=f"Created batch '{batch.batch_name}' (Instructor: {batch.instructor_name or 'Unassigned'}, Seats: {batch.max_seats})",
+        changes={"batch_name": batch.batch_name, "instructor_name": batch.instructor_name, "start_date": batch.start_date, "max_seats": batch.max_seats},
+    )
+
     await db.commit()
     return await batch_to_out(db, batch)
 
@@ -1857,7 +1896,7 @@ async def assign_students_to_batch(
     batch_id: str,
     body: PortalBatchAssignStudents,
     background_tasks: BackgroundTasks,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_super_admin_or_permission("training")),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(select(TrainingPortalBatch).where(TrainingPortalBatch.id == batch_id))
@@ -1879,7 +1918,7 @@ async def update_batch(
     batch_id: str,
     body: PortalBatchUpdate,
     background_tasks: BackgroundTasks,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_super_admin_or_permission("training")),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(select(TrainingPortalBatch).where(TrainingPortalBatch.id == batch_id))
@@ -1946,6 +1985,17 @@ async def update_batch(
                 )
             )
 
+    await log_audit_event(
+        db,
+        current_user,
+        action="UPDATE",
+        entity_type="batch",
+        entity_id=str(batch.id),
+        entity_name=batch.batch_name,
+        description=f"Updated batch '{batch.batch_name}'",
+        changes={"batch_name": batch.batch_name, "instructor_name": batch.instructor_name, "status": batch.status},
+    )
+
     await db.commit()
     return await batch_to_out(db, batch)
 
@@ -1953,7 +2003,7 @@ async def update_batch(
 @router.delete("/batches/{batch_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_batch(
     batch_id: str,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_super_admin_or_permission("training")),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(select(TrainingPortalBatch).where(TrainingPortalBatch.id == batch_id))
@@ -1961,10 +2011,20 @@ async def delete_batch(
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
 
+    batch_name_snapshot = batch.batch_name
     await db.execute(
         update(TrainingPortalEnrollment)
         .where(TrainingPortalEnrollment.batch_id == batch_id)
         .values(batch_id=None, batch_name=None, updated_at=datetime.utcnow())
+    )
+    await log_audit_event(
+        db,
+        current_user,
+        action="DELETE",
+        entity_type="batch",
+        entity_id=str(batch_id),
+        entity_name=batch_name_snapshot,
+        description=f"Deleted batch '{batch_name_snapshot}'",
     )
     await db.delete(batch)
     await db.commit()
@@ -2241,7 +2301,7 @@ async def _validate_instructor_schedule(
 async def create_class_session(
     body: PortalClassSessionCreate,
     background_tasks: BackgroundTasks,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_super_admin_or_permission("training")),
     db: AsyncSession = Depends(get_db),
 ):
     if not time_within_working_hours(body.start_time) or not time_within_working_hours(body.end_time):
@@ -2344,7 +2404,7 @@ async def update_class_session(
     session_id: str,
     body: PortalClassSessionUpdate,
     background_tasks: BackgroundTasks,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_super_admin_or_permission("training")),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
@@ -2801,6 +2861,25 @@ async def complete_class_session(
     elif batch:
         await _recalculate_batch_progress(db, batch)
 
+    await log_audit_event(
+        db,
+        current_user,
+        action="ATTENDANCE_MARK",
+        entity_type="attendance",
+        entity_id=session.batch_id or session.id,
+        entity_name=batch.batch_name if batch else session.title,
+        description=f"Marked attendance for {len(body.attendance)} students in \"{session.title}\" on {occurrence_date}",
+        changes={
+            "session_id": session.id,
+            "occurrence_date": occurrence_date,
+            "total_marked": len(body.attendance),
+            "present": sum(1 for e in body.attendance if e.status == "present"),
+            "absent": sum(1 for e in body.attendance if e.status == "absent"),
+            "late": sum(1 for e in body.attendance if e.status == "late"),
+            "on_leave": sum(1 for e in body.attendance if e.status == "on_leave"),
+        },
+    )
+
     await db.commit()
     return session_to_out_for_date(session, today, now)
 
@@ -3033,6 +3112,16 @@ async def create_student_leave_request(
         status="pending",
     )
     db.add(leave)
+    await log_audit_event(
+        db,
+        current_user,
+        action="LEAVE_APPLY",
+        entity_type="leave",
+        entity_id=str(leave.id),
+        entity_name=f"Student Leave ({leave.date})",
+        description=f"Student applied for leave on {leave.date}. Reason: {reason[:100]}",
+        changes={"date": leave.date, "reason": reason, "batch_name": leave.batch_name},
+    )
     await db.commit()
 
     # Notify batch teacher
@@ -3108,6 +3197,16 @@ async def create_teacher_leave_request(
         status="pending",
     )
     db.add(leave)
+    await log_audit_event(
+        db,
+        current_user,
+        action="LEAVE_APPLY",
+        entity_type="leave",
+        entity_id=str(leave.id),
+        entity_name=f"Teacher Leave ({leave.date})",
+        description=f"Teacher {teacher_name} applied for leave on {leave.date}. Reason: {reason[:100]}",
+        changes={"date": leave.date, "reason": reason, "batch_name": leave.batch_name},
+    )
     await db.commit()
 
     # Notify admins
@@ -3184,6 +3283,16 @@ async def review_leave_request(
     leave.review_note = (body.review_note or "").strip() or None
     leave.updated_at = datetime.utcnow()
     await _notify_leave_status(db, leave, new_status)
+    await log_audit_event(
+        db,
+        current_user,
+        action="LEAVE_RESOLVE",
+        entity_type="leave",
+        entity_id=str(leave.id),
+        entity_name=f"Leave Review ({leave.date})",
+        description=f"{reviewer_role.title()} {new_status} leave request for {leave.candidate_name or leave.teacher_name} on {leave.date}",
+        changes={"status": new_status, "note": body.review_note},
+    )
     await db.commit()
     return leave_to_out(leave)
 
@@ -3302,6 +3411,22 @@ async def create_behavior_report(
         flagged_for_review=flagged,
     )
     db.add(report)
+    await log_audit_event(
+        db,
+        current_user,
+        action="BEHAVIOR_REPORT",
+        entity_type="student",
+        entity_id=str(enrollment.id),
+        entity_name=enrollment.candidate_name,
+        description=f"Instructor {instructor_name} logged behavior rating ({discipline}/5, {participation}/5, {performance}/5) for {enrollment.candidate_name}",
+        changes={
+            "discipline": discipline,
+            "participation": participation,
+            "performance": performance,
+            "flagged": flagged,
+            "comments": comments,
+        },
+    )
     await db.commit()
 
     # Notify candidate
@@ -3326,7 +3451,7 @@ async def create_behavior_report(
 @router.patch("/behavior-reports/{report_id}/resolve", response_model=PortalBehaviorReportOut)
 async def resolve_behavior_report(
     report_id: str,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_super_admin_or_permission("training")),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
@@ -3633,7 +3758,7 @@ async def create_refund_request(
 async def resolve_refund_request(
     request_id: str,
     body: PortalRefundRequestResolve,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_super_admin_or_permission("training")),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(

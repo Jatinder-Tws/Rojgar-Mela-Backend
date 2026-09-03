@@ -96,6 +96,7 @@ class CareerRoadmapBase(BaseModel):
     career_insights: CareerInsightsIn = Field(default_factory=CareerInsightsIn)
     faqs: list[RoadmapFaqIn] = Field(default_factory=list)
     hero_image_url: Optional[str] = None
+    video_link: Optional[str] = Field(None, max_length=500)
     is_published: bool = False
     is_featured: bool = False
     is_trending: bool = False
@@ -129,6 +130,7 @@ class CareerRoadmapUpdate(BaseModel):
     career_insights: Optional[CareerInsightsIn] = None
     faqs: Optional[list[RoadmapFaqIn]] = None
     hero_image_url: Optional[str] = None
+    video_link: Optional[str] = Field(None, max_length=500)
     is_published: Optional[bool] = None
     is_featured: Optional[bool] = None
     is_trending: Optional[bool] = None
@@ -207,6 +209,7 @@ class CareerRoadmapOut(BaseModel):
     career_insights: CareerInsightsOut = Field(default_factory=CareerInsightsOut)
     faqs: list[RoadmapFaqOut] = Field(default_factory=list)
     hero_image_url: Optional[str] = None
+    video_link: Optional[str] = None
     is_published: bool
     is_featured: bool
     is_trending: bool
@@ -263,3 +266,17 @@ class CareerRoadmapPublicListResponse(BaseModel):
 
 class CareerRoadmapImageUploadResponse(BaseModel):
     url: str
+
+
+class RoadmapImportItemResult(BaseModel):
+    title: str
+    slug: str
+    action: str
+    message: Optional[str] = None
+
+
+class RoadmapImportResponse(BaseModel):
+    created: int = 0
+    updated: int = 0
+    failed: int = 0
+    items: list[RoadmapImportItemResult] = Field(default_factory=list)

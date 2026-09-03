@@ -15,6 +15,7 @@ high_priority_exchange = Exchange("high_priority", type="direct")
 emails_exchange = Exchange("emails", type="direct")
 broadcast_exchange = Exchange("broadcast", type="direct")
 ai_and_heavy_exchange = Exchange("ai_and_heavy", type="direct")
+dead_letter_exchange = Exchange("dead_letter", type="direct")
 
 celery_app.conf.update(
     task_serializer="json",
@@ -35,11 +36,14 @@ celery_app.conf.update(
         Queue("emails", emails_exchange, routing_key="emails"),
         Queue("broadcast", broadcast_exchange, routing_key="broadcast"),
         Queue("ai_and_heavy", ai_and_heavy_exchange, routing_key="ai_and_heavy"),
+        Queue("dead_letter", dead_letter_exchange, routing_key="dead_letter"),
     ),
     task_routes={
         "send_otp_email_task": {"queue": "high_priority"},
         "send_password_reset_email_task": {"queue": "high_priority"},
         "send_welcome_email_task": {"queue": "emails"},
+        "send_supervisor_welcome_email_task": {"queue": "emails"},
+        "dead_letter_queue_task": {"queue": "dead_letter"},
         "send_notification_email_task": {"queue": "emails"},
         "send_calendar_invite_email_task": {"queue": "emails"},
         "broadcast_bulk_email_task": {"queue": "broadcast"},
@@ -50,6 +54,7 @@ celery_app.conf.update(
         "improve_resume_task": {"queue": "ai_and_heavy"},
         "process_training_class_lifecycles": {"queue": "default"},
         "process_expired_token_bookings": {"queue": "default"},
+        "sync_scholarships_task": {"queue": "default"},
     },
     beat_schedule={
         "process-training-class-lifecycles": {
@@ -60,6 +65,11 @@ celery_app.conf.update(
         "process-expired-token-bookings": {
             "task": "process_expired_token_bookings",
             "schedule": crontab(hour=1, minute=0),
+            "options": {"queue": "default"},
+        },
+        "sync-scholarships-every-5-hours": {
+            "task": "sync_scholarships_task",
+            "schedule": crontab(minute=0, hour="*/5"),
             "options": {"queue": "default"},
         },
     },

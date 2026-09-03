@@ -56,7 +56,59 @@ def send_password_reset_email_task(email: str, reset_token: str):
     run_async(_send())
 
 
+# ── DEAD LETTER QUEUE (DLQ) HANDLER ───────────────────────────────────────────
+
+@celery_app.task(name="dead_letter_queue_task")
+def dead_letter_queue_task(task_name: str, payload: dict, error_message: str, retries: int = 0):
+    """Dead Letter Queue (DLQ) task capturing failed jobs after maximum retry exhaustion."""
+    logger.error(
+        f"[DLQ - DEAD LETTER QUEUE] Task '{task_name}' failed permanently after {retries} retries. "
+        f"Error: {error_message}. Payload: {payload}"
+    )
+
+
 # ── EMAILS QUEUE TASKS ─────────────────────────────────────────────────────────
+
+@celery_app.task(
+    name="send_supervisor_welcome_email_task",
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_kwargs={"max_retries": 3, "countdown": 5},
+    retry_backoff=True,
+)
+def send_supervisor_welcome_email_task(
+    self,
+    email: str,
+    first_name: str,
+    password: str,
+    department: Optional[str] = None,
+):
+    """Task for sending supervisor welcome email with credentials via emails queue.
+    Automatically moves to DLQ upon retry exhaustion.
+    """
+    async def _send():
+        from app.shared.services.email_service import send_supervisor_welcome_email
+        await send_supervisor_welcome_email(
+            to_email=email,
+            first_name=first_name,
+            password=password,
+            department=department,
+        )
+
+    try:
+        logger.info(f"[Task: send_supervisor_welcome_email_task] Enqueued supervisor credentials email for {email}")
+        run_async(_send())
+    except Exception as exc:
+        if self.request.retries >= (self.max_retries or 3):
+            logger.error(f"[Task: send_supervisor_welcome_email_task] Max retries reached for {email}. Routing to DLQ.")
+            dead_letter_queue_task.delay(
+                task_name="send_supervisor_welcome_email_task",
+                payload={"email": email, "first_name": first_name, "department": department},
+                error_message=str(exc),
+                retries=self.request.retries,
+            )
+        raise exc
+
 
 @celery_app.task(
     name="send_welcome_email_task",
@@ -315,3 +367,20 @@ def process_expired_token_bookings():
                 logger.error(f"Error in process_expired_token_bookings task: {e}", exc_info=True)
 
     run_async(_run())
+
+
+@celery_app.task(name="sync_scholarships_task")
+def sync_scholarships_task():
+    """Periodic 5-hour task to fetch open scholarships from Unstop and Buddy4Study,
+    upsert them into database, and refresh Redis cache."""
+    async def _run():
+        try:
+            from app.shared.services.scholarship_sync_service import ScholarshipSyncService
+            result = await ScholarshipSyncService.sync_all_scholarships()
+            logger.info(f"[Task: sync_scholarships_task] Sync completed: {result}")
+            return result
+        except Exception as e:
+            logger.error(f"[Task: sync_scholarships_task] Error syncing scholarships: {e}", exc_info=True)
+            return {"status": "error", "error": str(e)}
+
+    return run_async(_run())

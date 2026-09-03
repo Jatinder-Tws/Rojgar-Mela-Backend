@@ -33,6 +33,7 @@ from app.core.dependencies import (
     get_current_user,
     hash_password,
     require_super_admin,
+    require_super_admin_or_permission,
     generate_secure_password,
 )
 from app.shared.services.totp_service import totp_service
@@ -137,7 +138,7 @@ async def create_job_fair(
     industries: str = Form(None),
     banner_image: UploadFile = File(None),
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_super_admin),
+    admin: User = Depends(require_super_admin_or_permission("job_fairs")),
 ):
     """Super Admin: Create a new Job Fair (multipart/form-data, optional banner image)."""
     import json as _json
@@ -184,7 +185,7 @@ async def update_job_fair(
     id: str,
     body: JobFairUpdate,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_super_admin),
+    admin: User = Depends(require_super_admin_or_permission("job_fairs")),
 ):
     """Super Admin: Update an existing Job Fair."""
     existing = await get_job_fair_db(db, id)
@@ -226,7 +227,7 @@ async def update_job_fair(
 async def delete_job_fair(
     id: str,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_super_admin),
+    admin: User = Depends(require_super_admin_or_permission("job_fairs")),
 ):
     """Super Admin: Delete a Job Fair."""
     if not await delete_job_fair_db(db, id):
@@ -239,7 +240,7 @@ async def upload_job_fair_banner(
     id: str,
     banner_image: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_super_admin),
+    admin: User = Depends(require_super_admin_or_permission("job_fairs")),
 ):
     """Super Admin: Upload or replace the banner/poster image for a Job Fair."""
     existing = await get_job_fair_db(db, id)
@@ -813,9 +814,8 @@ async def get_job_fair_seekers(
     if not jf:
         raise HTTPException(status_code=404, detail="Job Fair not found")
 
-    is_admin = current_user.is_super_admin or current_user.role == UserRole.superadmin or (
-        hasattr(current_user.role, "value") and current_user.role.value == "superadmin"
-    )
+    role_val = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role or "")
+    is_admin = current_user.is_super_admin or role_val in ("superadmin", "supervisor")
     if not is_admin:
         if current_user.role == UserRole.provider:
             # Check if provider is registered

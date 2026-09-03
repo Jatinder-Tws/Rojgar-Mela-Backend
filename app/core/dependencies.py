@@ -86,8 +86,11 @@ async def require_verified(user: User = Depends(get_current_user)) -> User:
 
 
 async def require_authenticated(user: User = Depends(get_current_user)) -> User:
-    """Verified seeker/provider or super admin (super admins skip email verification)."""
+    """Verified seeker/provider, supervisor, or super admin."""
     if getattr(user, "is_super_admin", False):
+        return user
+    role_str = user.role.value if hasattr(user.role, "value") else str(user.role or "")
+    if role_str == "supervisor":
         return user
     if not user.is_verified:
         raise HTTPException(status_code=403, detail="Email not verified")
@@ -110,12 +113,26 @@ async def require_provider(user: User = Depends(require_verified)) -> User:
     return user
 
 
-async def require_provider_or_super_admin(user: User = Depends(get_current_user)) -> User:
+async def require_provider_or_super_admin(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> User:
     if getattr(user, "is_super_admin", False):
         return user
+    role_str = user.role.value if hasattr(user.role, "value") else str(user.role or "")
+    if role_str == "supervisor":
+        from app.shared.models.supervisor_profile import SupervisorProfile
+        res = await db.execute(select(SupervisorProfile).where(SupervisorProfile.user_id == user.id))
+        profile = res.scalar_one_or_none()
+        if not profile or not profile.is_active:
+            raise HTTPException(status_code=403, detail="Supervisor account is inactive or disabled")
+        perms = profile.permissions if isinstance(profile.permissions, list) else []
+        if any(p in perms for p in ("job_providers", "internships", "*")):
+            setattr(user, "_supervisor_profile", profile)
+            return user
+        raise HTTPException(status_code=403, detail="Missing required supervisor permission: 'job_providers' or 'internships'")
     if not user.is_verified:
         raise HTTPException(status_code=403, detail="Email not verified")
-    role_str = user.role.value if hasattr(user.role, "value") else str(user.role)
     if role_str != "provider":
         raise HTTPException(status_code=403, detail="Only job providers can perform this action")
     return user
@@ -145,25 +162,118 @@ async def require_teacher(user: User = Depends(require_verified)) -> User:
     return user
 
 
-async def require_teacher_or_super_admin(user: User = Depends(get_current_user)) -> User:
+async def require_teacher_or_super_admin(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> User:
     if getattr(user, "is_super_admin", False):
         return user
+    role_str = user.role.value if hasattr(user.role, "value") else str(user.role or "")
+    if role_str == "supervisor":
+        from app.shared.models.supervisor_profile import SupervisorProfile
+        res = await db.execute(select(SupervisorProfile).where(SupervisorProfile.user_id == user.id))
+        profile = res.scalar_one_or_none()
+        if not profile or not profile.is_active:
+            raise HTTPException(status_code=403, detail="Supervisor account is inactive or disabled")
+        perms = profile.permissions if isinstance(profile.permissions, list) else []
+        if "training" in perms or "*" in perms:
+            setattr(user, "_supervisor_profile", profile)
+            return user
+        raise HTTPException(status_code=403, detail="Missing required supervisor permission: 'training'")
     if not user.is_verified:
         raise HTTPException(status_code=403, detail="Email not verified")
-    role_str = user.role.value if hasattr(user.role, "value") else str(user.role)
     if role_str not in ("teacher",):
         raise HTTPException(status_code=403, detail="Only teachers or admins can perform this action")
     return user
 
 
-async def require_training_portal_user(user: User = Depends(get_current_user)) -> User:
-    """Super admin, teacher, or seeker (candidate) using the training portal."""
+async def require_training_portal_user(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    """Super admin, supervisor, teacher, or seeker (candidate) using the training portal."""
     if getattr(user, "is_super_admin", False):
         return user
     role_str = user.role.value if hasattr(user.role, "value") else str(user.role or "")
+    if role_str == "supervisor":
+        from app.shared.models.supervisor_profile import SupervisorProfile
+        res = await db.execute(select(SupervisorProfile).where(SupervisorProfile.user_id == user.id))
+        profile = res.scalar_one_or_none()
+        if not profile or not profile.is_active:
+            raise HTTPException(status_code=403, detail="Supervisor account is inactive or disabled")
+        perms = profile.permissions if isinstance(profile.permissions, list) else []
+        if "training" in perms or "*" in perms:
+            setattr(user, "_supervisor_profile", profile)
+            return user
+        raise HTTPException(status_code=403, detail="Missing required supervisor permission: 'training'")
     if role_str in ("teacher", "seeker"):
         return user
     raise HTTPException(status_code=403, detail="Training portal access required")
+
+
+async def require_supervisor(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    role_str = user.role.value if hasattr(user.role, "value") else str(user.role or "")
+    if role_str != "supervisor":
+        raise HTTPException(status_code=403, detail="Supervisor access required")
+
+    from app.shared.models.supervisor_profile import SupervisorProfile
+    res = await db.execute(select(SupervisorProfile).where(SupervisorProfile.user_id == user.id))
+    profile = res.scalar_one_or_none()
+    if not profile or not profile.is_active:
+        raise HTTPException(status_code=403, detail="Supervisor account is inactive or disabled")
+    setattr(user, "_supervisor_profile", profile)
+    return user
+
+
+async def require_super_admin_or_supervisor(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    if getattr(user, "is_super_admin", False):
+        return user
+    role_str = user.role.value if hasattr(user.role, "value") else str(user.role or "")
+    if role_str == "supervisor":
+        from app.shared.models.supervisor_profile import SupervisorProfile
+        res = await db.execute(select(SupervisorProfile).where(SupervisorProfile.user_id == user.id))
+        profile = res.scalar_one_or_none()
+        if not profile or not profile.is_active:
+            raise HTTPException(status_code=403, detail="Supervisor account is inactive or disabled")
+        setattr(user, "_supervisor_profile", profile)
+        return user
+    raise HTTPException(status_code=403, detail="Super admin or supervisor access required")
+
+
+def require_super_admin_or_permission(*permission_keys: str):
+    async def _checker(
+        user: User = Depends(get_current_user),
+        db: AsyncSession = Depends(get_db),
+    ) -> User:
+        if getattr(user, "is_super_admin", False):
+            return user
+
+        role_str = user.role.value if hasattr(user.role, "value") else str(user.role or "")
+        if role_str == "supervisor":
+            from app.shared.models.supervisor_profile import SupervisorProfile
+            res = await db.execute(select(SupervisorProfile).where(SupervisorProfile.user_id == user.id))
+            profile = res.scalar_one_or_none()
+            if not profile or not profile.is_active:
+                raise HTTPException(status_code=403, detail="Supervisor account is inactive or disabled")
+
+            perms = profile.permissions if isinstance(profile.permissions, list) else []
+            if "*" in perms or any(k in perms for k in permission_keys):
+                setattr(user, "_supervisor_profile", profile)
+                return user
+            keys_str = ", ".join(permission_keys)
+            raise HTTPException(
+                status_code=403,
+                detail=f"Missing required permission: '{keys_str}'",
+            )
+
+        raise HTTPException(status_code=403, detail="Super admin or supervisor permission required")
+    return _checker
 
 
 async def get_current_session_id(

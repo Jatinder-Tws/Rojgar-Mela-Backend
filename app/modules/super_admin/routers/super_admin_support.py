@@ -25,7 +25,7 @@ from app.modules.super_admin.schemas.support import (
     InquiryListResponse,
     InquiryReplyCreate,
 )
-from app.core.dependencies import require_super_admin
+from app.core.dependencies import require_super_admin, require_super_admin_or_permission
 
 router = APIRouter(prefix="/super-admin/support", tags=["super-admin-support"])
 
@@ -36,7 +36,7 @@ async def list_tickets(
     page_size: int = Query(20, ge=1, le=100),
     search: Optional[str] = None,
     status: Optional[str] = None,
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("help_desk")),
     db: AsyncSession = Depends(get_db),
 ):
     return await ctrl_list_tickets(db, page=page, page_size=page_size, search=search, status=status)
@@ -45,7 +45,7 @@ async def list_tickets(
 @router.get("/tickets/{ticket_id}", response_model=TicketDetailOut)
 async def get_ticket(
     ticket_id: str,
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("help_desk")),
     db: AsyncSession = Depends(get_db),
 ):
     return await ctrl_get_ticket(ticket_id, db)
@@ -55,7 +55,7 @@ async def get_ticket(
 async def reply_to_ticket(
     ticket_id: str,
     body: TicketMessageCreate,
-    admin: User = Depends(require_super_admin),
+    admin: User = Depends(require_super_admin_or_permission("help_desk")),
     db: AsyncSession = Depends(get_db),
 ):
     return await ctrl_reply(ticket_id, body, admin, db)
@@ -65,7 +65,7 @@ async def reply_to_ticket(
 async def update_ticket_status(
     ticket_id: str,
     body: TicketStatusUpdate,
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("help_desk")),
     db: AsyncSession = Depends(get_db),
 ):
     return await ctrl_update_status(ticket_id, body, db)
@@ -77,7 +77,7 @@ async def list_feedback(
     page_size: int = Query(20, ge=1, le=100),
     search: Optional[str] = None,
     rating: Optional[int] = Query(None, ge=1, le=5),
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("help_desk")),
     db: AsyncSession = Depends(get_db),
 ):
     return await ctrl_list_feedback(db, page=page, page_size=page_size, search=search, rating=rating)
@@ -88,7 +88,7 @@ async def list_inquiries(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     search: Optional[str] = None,
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("enquiries")),
     db: AsyncSession = Depends(get_db),
 ):
     return await ctrl_list_inquiries(db, page=page, page_size=page_size, search=search)
@@ -98,7 +98,7 @@ async def list_inquiries(
 async def reply_to_inquiry(
     inquiry_id: str,
     body: InquiryReplyCreate,
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("enquiries")),
     db: AsyncSession = Depends(get_db),
 ):
     return await ctrl_reply_to_inquiry(inquiry_id, body, db)

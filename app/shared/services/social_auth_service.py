@@ -22,6 +22,7 @@ from app.shared.services.auth_session_service import (
 from app.shared.services.oauth_providers import ProviderProfile
 from app.shared.services.return_to import sanitize_return_to
 from app.shared.services.token_crypto import create_pending_token, encrypt_secret
+from app.shared.services.audit_service import log_audit_event
 
 STAFF_ROLES = {UserRole.teacher, UserRole.superadmin}
 PUBLIC_ROLES = {"seeker", "provider"}
@@ -238,10 +239,24 @@ async def _issue_login(
         ip_address=meta.ip_address,
         user_agent=meta.user_agent,
     )
-    if profile.avatar_url and not user.profile_pic_url:
-        user.profile_pic_url = profile.avatar_url
     if not user.is_verified and profile.email_verified:
         user.is_verified = True
+
+    user_role_str = user.role.value if hasattr(user.role, "value") else str(user.role or "user")
+    await log_audit_event(
+        db,
+        user,
+        action="LOGIN",
+        entity_type="session",
+        entity_id=str(getattr(_session, "id", "")),
+        entity_name=f"Social Login ({profile.provider.title()})",
+        description=f"User {user.first_name or ''} {user.last_name or ''} ({user.email}) logged in with {profile.provider.title()}",
+        changes={"provider": profile.provider},
+        ip_address_override=meta.ip_address,
+        user_agent_override=meta.user_agent,
+        request_path_override=f"/auth/{profile.provider}",
+        request_method_override="POST",
+    )
     await db.commit()
     await db.refresh(user)
     if linked:

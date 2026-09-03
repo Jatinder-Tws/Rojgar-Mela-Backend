@@ -36,7 +36,7 @@ from app.modules.super_admin.schemas.email_admin import (
     EmailTemplateTestSendRequest,
     EmailTemplateUpdate,
 )
-from app.core.dependencies import require_super_admin
+from app.core.dependencies import require_super_admin, require_super_admin_or_permission
 from app.modules.super_admin.services.email_campaign_job_store import get_job
 from app.modules.super_admin.services.email_campaign_service import (
     count_audience,
@@ -96,7 +96,7 @@ async def list_email_templates(
     search: Optional[str] = None,
     status: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("email_templates")),
 ):
     q = select(EmailTemplate)
     if search and search.strip():
@@ -129,7 +129,7 @@ async def list_email_templates(
 async def create_email_template(
     body: EmailTemplateCreate,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_super_admin),
+    admin: User = Depends(require_super_admin_or_permission("email_templates")),
 ):
     slug = slugify(body.slug or body.name)
     existing = (await db.execute(select(EmailTemplate).where(EmailTemplate.slug == slug))).scalar_one_or_none()
@@ -153,7 +153,7 @@ async def create_email_template(
 @router.post("/email-templates/preview", response_model=EmailTemplatePreviewResponse)
 async def preview_email_template(
     body: EmailTemplatePreviewRequest,
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("email_templates")),
 ):
     subject, html_body = preview_email(body.subject, body.html_body, body.sample_data)
     return EmailTemplatePreviewResponse(subject=subject, html_body=html_body)
@@ -171,7 +171,7 @@ _ALLOWED_IMAGE_TYPES = {
 @router.post("/email-templates/upload-image", response_model=EmailImageUploadResponse)
 async def upload_email_template_image(
     file: UploadFile = File(...),
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("email_templates")),
 ):
     content_type = (file.content_type or "").lower()
     if content_type not in _ALLOWED_IMAGE_TYPES:
@@ -201,7 +201,7 @@ async def upload_email_template_image(
 async def get_email_template(
     template_id: str,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("email_templates")),
 ):
     template = (await db.execute(select(EmailTemplate).where(EmailTemplate.id == template_id))).scalar_one_or_none()
     if not template:
@@ -214,7 +214,7 @@ async def update_email_template(
     template_id: str,
     body: EmailTemplateUpdate,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("email_templates")),
 ):
     template = (await db.execute(select(EmailTemplate).where(EmailTemplate.id == template_id))).scalar_one_or_none()
     if not template:
@@ -242,7 +242,7 @@ async def update_email_template(
 async def delete_email_template(
     template_id: str,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("email_templates")),
 ):
     template = (await db.execute(select(EmailTemplate).where(EmailTemplate.id == template_id))).scalar_one_or_none()
     if not template:
@@ -262,7 +262,7 @@ async def test_send_email_template(
     template_id: str,
     body: EmailTemplateTestSendRequest,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("email_templates")),
 ):
     template = (await db.execute(select(EmailTemplate).where(EmailTemplate.id == template_id))).scalar_one_or_none()
     if not template:
@@ -282,7 +282,7 @@ async def list_email_campaigns(
     search: Optional[str] = None,
     status: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("email_campaigns")),
 ):
     q = select(EmailCampaign, EmailTemplate.name.label("template_name")).join(
         EmailTemplate, EmailCampaign.template_id == EmailTemplate.id
@@ -304,7 +304,7 @@ async def list_email_campaigns(
 async def create_email_campaign(
     body: EmailCampaignCreate,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_super_admin),
+    admin: User = Depends(require_super_admin_or_permission("email_campaigns")),
 ):
     template = (await db.execute(select(EmailTemplate).where(EmailTemplate.id == body.template_id))).scalar_one_or_none()
     if not template:
@@ -334,7 +334,7 @@ async def create_email_campaign(
 async def estimate_audience(
     body: AudienceEstimateRequest,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("email_campaigns")),
 ):
     audience_filter = body.audience_filter.model_dump(exclude_none=True) if body.audience_filter else None
     count = await count_audience(db, body.audience_type, audience_filter)
@@ -349,7 +349,7 @@ async def list_audience_users(
     search: Optional[str] = None,
     role: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("email_campaigns")),
 ):
     users, total = await list_picker_users(
         db, page=page, page_size=page_size, search=search, role=role
@@ -374,7 +374,7 @@ async def list_audience_user_ids(
     search: Optional[str] = None,
     role: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("email_campaigns")),
 ):
     """Return all user IDs matching picker filters (for select-all across pages)."""
     ids, total = await get_picker_user_ids(db, search=search, role=role)
@@ -384,7 +384,7 @@ async def list_audience_user_ids(
 @router.get("/email-campaigns/jobs/{job_id}", response_model=CampaignJobStatus)
 async def get_campaign_job_status(
     job_id: str,
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("email_campaigns")),
 ):
     job = get_job(job_id)
     if not job:
@@ -396,7 +396,7 @@ async def get_campaign_job_status(
 async def get_email_campaign(
     campaign_id: str,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("email_campaigns")),
 ):
     row = (await db.execute(
         select(EmailCampaign, EmailTemplate.name.label("template_name"))
@@ -414,7 +414,7 @@ async def update_email_campaign(
     campaign_id: str,
     body: EmailCampaignUpdate,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("email_campaigns")),
 ):
     campaign = (await db.execute(select(EmailCampaign).where(EmailCampaign.id == campaign_id))).scalar_one_or_none()
     if not campaign:
@@ -454,7 +454,7 @@ async def update_email_campaign(
 async def delete_email_campaign(
     campaign_id: str,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("email_campaigns")),
 ):
     campaign = (await db.execute(select(EmailCampaign).where(EmailCampaign.id == campaign_id))).scalar_one_or_none()
     if not campaign:
@@ -468,7 +468,7 @@ async def delete_email_campaign(
 async def send_email_campaign(
     campaign_id: str,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("email_campaigns")),
 ):
     campaign = (await db.execute(select(EmailCampaign).where(EmailCampaign.id == campaign_id))).scalar_one_or_none()
     if not campaign:
@@ -500,7 +500,7 @@ async def send_email_campaign(
 async def get_campaign_delivery_stats(
     campaign_id: str,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("email_campaigns")),
 ):
     campaign = (await db.execute(select(EmailCampaign).where(EmailCampaign.id == campaign_id))).scalar_one_or_none()
     if not campaign:
@@ -520,10 +520,6 @@ async def get_campaign_delivery_stats(
     if total == 0:
         total = campaign.total_recipients
 
-    # Reconcile the campaign's denormalized counters with the live recipient
-    # counts. These can drift (e.g. recipient statuses change without the
-    # campaign row being updated), which makes the campaign detail endpoint
-    # disagree with these delivery stats.
     if total > 0 and (campaign.sent_count != sent or campaign.failed_count != failed):
         campaign.sent_count = sent
         campaign.failed_count = failed
@@ -554,7 +550,7 @@ def _recipient_to_out(r: EmailCampaignRecipient) -> CampaignRecipientOut:
 async def resend_failed_campaign_emails(
     campaign_id: str,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("email_campaigns")),
 ):
     campaign = (await db.execute(select(EmailCampaign).where(EmailCampaign.id == campaign_id))).scalar_one_or_none()
     if not campaign:
@@ -591,7 +587,7 @@ async def resend_campaign_recipient_email(
     campaign_id: str,
     recipient_id: str,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("email_campaigns")),
 ):
     campaign = (await db.execute(select(EmailCampaign).where(EmailCampaign.id == campaign_id))).scalar_one_or_none()
     if not campaign:
@@ -619,7 +615,7 @@ async def list_campaign_recipients(
     page_size: int = Query(50, ge=1, le=200),
     status_filter: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_super_admin_or_permission("email_campaigns")),
 ):
     campaign = (await db.execute(select(EmailCampaign).where(EmailCampaign.id == campaign_id))).scalar_one_or_none()
     if not campaign:

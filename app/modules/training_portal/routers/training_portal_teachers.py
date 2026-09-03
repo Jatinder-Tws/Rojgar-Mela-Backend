@@ -19,6 +19,7 @@ from app.modules.training_portal.schemas.training_portal_teacher import (
 from app.core.dependencies import (
     require_super_admin,
     require_training_portal_user,
+    require_super_admin_or_permission,
     hash_password,
 )
 from app.shared.services.email_service import send_welcome_email
@@ -155,10 +156,10 @@ async def list_portal_teachers(
 @router.post("/", response_model=TrainingPortalTeacherOut, status_code=status.HTTP_201_CREATED)
 async def create_portal_teacher(
     teacher_in: TrainingPortalTeacherCreate,background_tasks: BackgroundTasks,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_super_admin_or_permission("training_teachers")),
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a new training portal teacher (super admin only)."""
+    """Create a new training portal teacher (super admin or supervisor with training permission)."""
     # Check for duplicate email
     existing = await db.execute(
         select(TrainingPortalTeacher).where(TrainingPortalTeacher.email == teacher_in.email.strip().lower())
@@ -241,7 +242,7 @@ async def get_portal_teacher(
 async def update_portal_teacher(
     teacher_id: str,
     teacher_update: TrainingPortalTeacherUpdate,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_super_admin_or_permission("training_teachers")),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(select(TrainingPortalTeacher).where(TrainingPortalTeacher.id == teacher_id))
@@ -304,7 +305,7 @@ async def update_portal_teacher(
 @router.delete("/{teacher_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_portal_teacher(
     teacher_id: str,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_super_admin_or_permission("training_teachers")),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(

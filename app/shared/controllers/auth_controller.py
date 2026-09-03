@@ -39,6 +39,7 @@ from app.shared.schemas.auth import (
     RefreshTokenRequest,
     RefreshTokenResponse,
 )
+from app.shared.services.audit_service import log_audit_event
 from app.core.dependencies import (
     hash_password,
     verify_password,
@@ -464,6 +465,21 @@ async def login(
         )
         token, refresh_token, _session = await create_session_and_tokens(
             db, user, method="password", ip_address=ip_address, user_agent=user_agent
+        )
+        user_role_str = user.role.value if hasattr(user.role, "value") else str(user.role or "user")
+        await log_audit_event(
+            db,
+            user,
+            action="LOGIN",
+            entity_type="session",
+            entity_id=str(getattr(_session, "id", "")),
+            entity_name=f"Login ({user_role_str})",
+            description=f"User {user.first_name or ''} {user.last_name or ''} ({user.email}) logged in successfully",
+            changes={"method": "password"},
+            ip_address_override=ip_address,
+            user_agent_override=user_agent,
+            request_path_override="/auth/login",
+            request_method_override="POST",
         )
         await db.commit()
         await db.refresh(user)
