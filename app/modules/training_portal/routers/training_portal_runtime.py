@@ -56,6 +56,7 @@ from app.modules.training_portal.schemas.training_portal_runtime import (
     PortalClassSessionOut,
     PortalClassSessionComplete,
     PortalClassSessionStart,
+    PortalSessionReportUpdate,
     PortalSessionStudentOut,
     PortalAttendanceRecordOut,
     PortalLeaveRequestCreate,
@@ -2280,21 +2281,10 @@ async def _validate_instructor_schedule(
             continue
 
         # Overlap: Start1 < End2 and Start2 < End1
+        # Parallel same-time classes for one teacher are allowed (e.g. two batches).
+        # Keep this soft — no hard block — so both sessions can be started live.
         if t1_start < t2_end and t2_start < t1_end:
-            if existing_type == "one_time":
-                when = f"on {existing.date}"
-            else:
-                days_label = ", ".join(existing_days) or "weekly"
-                when = f"every {days_label}"
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Teacher {instructor_name} already has another class "
-                    f"\"{existing.title}\" {when} "
-                    f"({existing.start_time} – {existing.end_time}). "
-                    f"Choose a different teacher, date, or time slot."
-                ),
-            )
+            continue
 
 
 @router.post("/class-sessions", response_model=PortalClassSessionOut, status_code=status.HTTP_201_CREATED)
@@ -2673,7 +2663,13 @@ async def start_class_session(
     session.ended_at = None
     session.updated_at = now
     await db.commit()
-    return session_to_out_for_date(session, today, now)
+    out = session_to_out_for_date(session, today, now)
+    try:
+        from app.modules.training_portal.services.class_live_realtime import publish_class_live_event
+        await publish_class_live_event(session, "started")
+    except Exception:
+        pass
+    return out
 
 
 @router.get("/class-sessions/{session_id}/roster", response_model=List[PortalSessionStudentOut])
@@ -2881,6 +2877,50 @@ async def complete_class_session(
     )
 
     await db.commit()
+    out = session_to_out_for_date(session, today, now)
+    try:
+        from app.modules.training_portal.services.class_live_realtime import publish_class_live_event
+        await publish_class_live_event(session, "completed")
+    except Exception:
+        pass
+    return out
+
+
+@router.patch("/class-sessions/{session_id}/session-report", response_model=PortalClassSessionOut)
+async def update_class_session_report(
+    session_id: str,
+    body: PortalSessionReportUpdate,
+    current_user: User = Depends(require_teacher_or_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Allow teachers/admins to add or edit class notes/MOM after attendance is marked."""
+    result = await db.execute(
+        select(TrainingPortalClassSession).where(TrainingPortalClassSession.id == session_id)
+    )
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="Class session not found")
+
+    is_admin = getattr(current_user, "is_super_admin", False)
+    role_str = getattr(current_user.role, "value", None) or str(getattr(current_user, "role", "") or "")
+    if not is_admin and role_str == "teacher":
+        teacher_batch_ids = await _teacher_batch_ids_for_user(db, current_user)
+        if not session.batch_id or session.batch_id not in teacher_batch_ids:
+            raise HTTPException(status_code=403, detail="You can only edit notes for your own classes")
+
+    status_val = (session.live_status or "").strip().lower()
+    if status_val != "completed" and not bool(session.attendance_marked):
+        raise HTTPException(
+            status_code=400,
+            detail="Class notes can be edited after the class is completed and attendance is marked",
+        )
+
+    session.session_report = (body.session_report or "").strip() or None
+    session.updated_at = datetime.utcnow()
+    await db.commit()
+
+    today = today_ist()
+    now = now_ist()
     return session_to_out_for_date(session, today, now)
 
 

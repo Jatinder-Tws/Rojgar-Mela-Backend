@@ -296,6 +296,10 @@ class PortalClassSessionComplete(BaseModel):
     early_end_reason: Optional[str] = None
 
 
+class PortalSessionReportUpdate(BaseModel):
+    session_report: str = ""
+
+
 class PortalAttendanceRecordOut(BaseModel):
     id: str
     class_session_id: str

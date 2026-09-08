@@ -751,10 +751,11 @@ async def refresh_token(body: RefreshTokenRequest, db: AsyncSession) -> RefreshT
     if user is None:
         raise credentials_exception
 
-    # Issue a new short-lived access token only.
-    # The refresh token is NOT rotated — it retains its original expiry.
-    # Once it expires, jwt.decode above will raise JWTError → 401 → user must log in again.
-    new_access_token = create_access_token({"sub": str(user.id)})
+    # Issue a new access token (refresh token keeps its original expiry).
+    new_access_token = create_access_token({
+        "sub": str(user.id),
+        "role": getattr(user.role, "value", user.role),
+    })
 
     return RefreshTokenResponse(
         access_token=new_access_token,

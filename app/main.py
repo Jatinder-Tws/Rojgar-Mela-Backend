@@ -60,14 +60,14 @@ from app.shared.routers import (
 )
 from app.modules.jobs_portal.routers import (
     ai_coach, ai_coach_live_ws, ai_interview, analytics, applications, assessment, blog_public, career_enquiry,
-    career_roadmap, company_internships, dashboard, external_candidate, interviews, interview_scheduling,
+    career_roadmap, company_internships, dashboard, external_candidate, industrial_visit, interviews, interview_scheduling,
     jobs, job_fair, master, matches, onboarding, portfolio, resumes, resume_builder,
     roadmap, saved_jobs, scholarships
 )
 from app.modules.training_portal.routers import (
     google_calendar, training_courses, training_portal_categories,
-    training_portal_courses, training_portal_free_courses, training_portal_internships,
-    training_portal_runtime, training_portal_teachers
+    training_portal_class_live_ws, training_portal_courses, training_portal_free_courses,
+    training_portal_internships, training_portal_runtime, training_portal_teachers,
 )
 # Registers ORM event listeners for real-time notification streams
 from app.modules.training_portal.services import training_portal_notification_stream  # noqa: F401
@@ -112,6 +112,8 @@ routers = [
     help_desk_bot.router,
     career_enquiry.public_router,
     career_enquiry.admin_router,
+    industrial_visit.public_router,
+    industrial_visit.admin_router,
     job_fair.router,
     email_admin.router,
     blog_admin.router,
@@ -124,6 +126,7 @@ routers = [
     training_portal_teachers.router,
     training_portal_internships.router,
     training_portal_runtime.router,
+    training_portal_class_live_ws.router,
     google_calendar.router,
     audit_logs.router,
     scholarships.router,

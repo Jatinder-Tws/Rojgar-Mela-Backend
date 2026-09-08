@@ -14,8 +14,8 @@ class Settings(BaseSettings):
     # JWT
     SECRET_KEY: str = "change-this-secret"
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 10  # 10 minute
-    REFRESH_TOKEN_EXPIRE_MINUTES: int = 10080  # 7 days
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30  # 30 minutes
+    REFRESH_TOKEN_EXPIRE_MINUTES: int = 43200  # 30 days
 
     # OpenAI
     OPENAI_API_KEY: str = ""

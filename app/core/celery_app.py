@@ -55,6 +55,8 @@ celery_app.conf.update(
         "process_training_class_lifecycles": {"queue": "default"},
         "process_expired_token_bookings": {"queue": "default"},
         "sync_scholarships_task": {"queue": "default"},
+        "send_industrial_visit_invite_email_task": {"queue": "emails"},
+        "send_industrial_visit_certificates_task": {"queue": "emails"},
     },
     beat_schedule={
         "process-training-class-lifecycles": {
@@ -71,6 +73,11 @@ celery_app.conf.update(
             "task": "sync_scholarships_task",
             "schedule": crontab(minute=0, hour="*/5"),
             "options": {"queue": "default"},
+        },
+        "send-industrial-visit-certificates-5pm-ist": {
+            "task": "send_industrial_visit_certificates_task",
+            "schedule": crontab(hour=17, minute=0),
+            "options": {"queue": "emails"},
         },
     },
 )

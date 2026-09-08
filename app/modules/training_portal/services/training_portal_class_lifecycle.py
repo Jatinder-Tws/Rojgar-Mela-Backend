@@ -1,9 +1,12 @@
 """
-Live class lifecycle: start reminders, 15-min end reminders, and auto-end.
+Live class lifecycle: start reminders and 15-min end reminders.
+
+Does not auto-complete live classes — teachers/admins must end manually
+so attendance and notes/MOM can be submitted.
 
 Runs from:
   - GET /class-sessions/today (immediate UX while a user is online)
-  - Periodic Celery Beat / API background loop (works even when nobody is polling)
+  - Periodic Celery Beat (works even when nobody is polling)
 """
 
 from __future__ import annotations
@@ -357,7 +360,11 @@ async def process_live_session_end_lifecycle(
     session: TrainingPortalClassSession,
     now: Optional[datetime] = None,
 ) -> None:
-    """Send ending-soon reminder or auto-end when past scheduled end_time."""
+    """Send ending-soon reminder when approaching scheduled end_time.
+
+    Does NOT auto-complete the class — the teacher/admin must end it manually
+    so they can mark attendance and add notes/MOM.
+    """
     if (session.live_status or "").strip().lower() != "live":
         return
 
@@ -365,7 +372,7 @@ async def process_live_session_end_lifecycle(
     occurrence_date = _occurrence_date_for_live_session(session)
     end_dt = session_end_datetime(session, occurrence_date)
     if not end_dt:
-        # Fallback: if end time cannot be parsed, end 2h after started_at.
+        # Fallback: if end time cannot be parsed, use 2h after started_at for reminder only.
         started = getattr(session, "started_at", None)
         if not started:
             return
@@ -376,9 +383,7 @@ async def process_live_session_end_lifecycle(
 
     if 0 < minutes_remaining <= END_REMINDER_MINUTES:
         await notify_class_ending_soon(db, session, batch, occurrence_date)
-    elif minutes_remaining <= 0:
-        await auto_end_live_session(db, session, batch, occurrence_date)
-
+    # Past end time: leave session live. UI shows an end-due alert for manual complete.
 
 async def process_session_start_reminders(
     db: AsyncSession,
@@ -426,14 +431,17 @@ async def process_todays_session_lifecycle(
 async def process_all_class_lifecycles(db: AsyncSession) -> dict[str, int]:
     """
     Periodic sweep:
-      1) All DB-live sessions → ending-soon / auto-end (even if nobody is online)
+      1) All DB-live sessions → ending-soon reminders (no auto-end)
       2) Today's scheduled sessions → 30/15 min start reminders
     """
+    from app.modules.training_portal.services.class_live_realtime import build_class_live_event
+
     now = now_ist()
     today = today_ist()
     ended = 0
     end_reminders = 0
     start_reminders = 0
+    live_events: list[dict] = []
 
     live_result = await db.execute(
         select(TrainingPortalClassSession).where(
@@ -443,12 +451,10 @@ async def process_all_class_lifecycles(db: AsyncSession) -> dict[str, int]:
     live_sessions = list(live_result.scalars().all())
     for session in live_sessions:
         before_end_flag = bool(getattr(session, "end_reminder_sent", False))
-        before_status = (session.live_status or "").strip().lower()
         await process_live_session_end_lifecycle(db, session, now)
-        if before_status == "live" and (session.live_status or "").strip().lower() == "completed":
-            ended += 1
-        elif not before_end_flag and bool(getattr(session, "end_reminder_sent", False)):
+        if not before_end_flag and bool(getattr(session, "end_reminder_sent", False)):
             end_reminders += 1
+            live_events.append(build_class_live_event(session, "ending_soon"))
 
     today_result = await db.execute(select(TrainingPortalClassSession))
     for session in today_result.scalars().all():
@@ -466,6 +472,7 @@ async def process_all_class_lifecycles(db: AsyncSession) -> dict[str, int]:
         "auto_ended": ended,
         "end_reminders": end_reminders,
         "start_reminders": start_reminders,
+        "_live_events": live_events,
     }
 
 

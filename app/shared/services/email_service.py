@@ -827,3 +827,81 @@ async def send_supervisor_welcome_email(
 
     await _send_branded_email(to_email, subject, html, raise_on_error=True)
 
+
+async def send_industrial_visit_invite_email(
+    to_email: str,
+    first_name: str,
+    visit_title: str,
+    visit_date_display: str,
+    venue: str = "",
+) -> None:
+    """Invitation after public industrial-visit registration. Must not include the office check-in URL."""
+    template = _env.get_template("industrial_visit_invite_email.html")
+    html = template.render(
+        first_name=first_name or "there",
+        email=to_email,
+        visit_title=visit_title,
+        visit_date_display=visit_date_display or "",
+        venue=venue or "",
+        year=datetime.utcnow().year,
+        **_support_context(),
+    )
+    await _send_branded_email(
+        to_email,
+        f"Invitation: {visit_title} – RojgarMela.AI",
+        html,
+        raise_on_error=True,
+    )
+
+
+async def send_industrial_visit_certificate_email(
+    to_email: str,
+    first_name: str,
+    full_name: str,
+    visit_title: str,
+    visit_date_display: str,
+    venue: str,
+    certificate_id: str,
+    verify_url: str,
+    pdf_bytes: bytes,
+) -> None:
+    """Email a PDF participation certificate to a student who checked in."""
+    from app.modules.super_admin.services.email_template_service import prepare_html_for_delivery
+
+    template = _env.get_template("industrial_visit_certificate_email.html")
+    rendered_html = template.render(
+        first_name=first_name or "there",
+        full_name=full_name,
+        visit_title=visit_title,
+        visit_date_display=visit_date_display or "",
+        venue=venue or "",
+        certificate_id=certificate_id,
+        verify_url=verify_url,
+        year=datetime.utcnow().year,
+        **_support_context(),
+    )
+    html = prepare_html_for_delivery(rendered_html)
+    subject = f"Certificate of Participation: {visit_title} – RojgarMela.AI"
+
+    msg = MIMEMultipart("mixed")
+    _apply_common_headers(msg, to_email, subject)
+
+    related = MIMEMultipart("related")
+    alt = MIMEMultipart("alternative")
+    alt.attach(MIMEText(_html_to_plain_text(html), "plain", "utf-8"))
+    alt.attach(MIMEText(html, "html", "utf-8"))
+    related.attach(alt)
+    _attach_inline_images(related, html)
+    msg.attach(related)
+
+    attachment = MIMEApplication(pdf_bytes, _subtype="pdf")
+    safe_id = re.sub(r"[^A-Za-z0-9_-]+", "_", certificate_id)
+    attachment.add_header(
+        "Content-Disposition",
+        "attachment",
+        filename=f"Industrial_Visit_Certificate_{safe_id}.pdf",
+    )
+    msg.attach(attachment)
+
+    await _deliver_message(msg, to_email, raise_on_error=True)
+

@@ -341,8 +341,12 @@ def process_training_class_lifecycles():
         async with AsyncSessionLocal() as db:
             try:
                 from app.modules.training_portal.services.training_portal_class_lifecycle import process_all_class_lifecycles
+                from app.modules.training_portal.services.class_live_realtime import publish_class_live_payload
                 res = await process_all_class_lifecycles(db)
+                live_events = res.pop("_live_events", []) if isinstance(res, dict) else []
                 await db.commit()
+                for payload in live_events:
+                    await publish_class_live_payload(payload)
                 logger.info(f"[Task: process_training_class_lifecycles] Lifecycle sweep result: {res}")
             except Exception as e:
                 await db.rollback()
