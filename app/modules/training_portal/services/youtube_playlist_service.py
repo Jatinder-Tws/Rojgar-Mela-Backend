@@ -272,6 +272,52 @@ async def _attach_durations(client: httpx.AsyncClient, api_key: str, videos: lis
                 )
 
 
+def _playlist_video_from_ytdlp_entry(entry: dict, sort_order: int) -> Optional[PlaylistVideo]:
+    vid = entry.get("id") or entry.get("url")
+    title = (entry.get("title") or "").strip()
+    if not vid or not _usable_title(title):
+        return None
+    duration = entry.get("duration")
+    try:
+        duration_seconds = int(duration) if duration else None
+    except (TypeError, ValueError):
+        duration_seconds = None
+    thumb = None
+    thumbs = entry.get("thumbnails") or []
+    if thumbs:
+        thumb = thumbs[-1].get("url")
+    vid_str = str(vid)
+    return PlaylistVideo(
+        video_id=vid_str,
+        title=title,
+        description=(entry.get("description") or "").strip(),
+        thumbnail_url=thumb or f"https://i.ytimg.com/vi/{vid_str}/hqdefault.jpg",
+        duration_seconds=duration_seconds,
+        sort_order=sort_order,
+    )
+
+
+def _playlist_video_from_ytdlp_info(info: dict, sort_order: int = 0) -> Optional[PlaylistVideo]:
+    vid = info.get("id")
+    title = (info.get("title") or "").strip()
+    if not vid or not _usable_title(title):
+        return None
+    duration = info.get("duration")
+    try:
+        duration_seconds = int(duration) if duration else None
+    except (TypeError, ValueError):
+        duration_seconds = None
+    vid_str = str(vid)
+    return PlaylistVideo(
+        video_id=vid_str,
+        title=title,
+        description=(info.get("description") or "").strip(),
+        thumbnail_url=(info.get("thumbnail") or f"https://i.ytimg.com/vi/{vid_str}/hqdefault.jpg"),
+        duration_seconds=duration_seconds,
+        sort_order=sort_order,
+    )
+
+
 def _fetch_via_ytdlp(url: str, playlist_id: Optional[str], video_id: Optional[str]) -> PlaylistImport:
     try:
         import yt_dlp  # type: ignore
@@ -281,14 +327,18 @@ def _fetch_via_ytdlp(url: str, playlist_id: Optional[str], video_id: Optional[st
             "or install yt-dlp on the server."
         ) from exc
 
-    ydl_opts = {
-        "extract_flat": "in_playlist",
+    ydl_opts: dict = {
         "skip_download": True,
         "quiet": True,
         "no_warnings": True,
         "ignoreerrors": True,
-        "noplaylist": False,
     }
+    if playlist_id:
+        ydl_opts["extract_flat"] = "in_playlist"
+        ydl_opts["noplaylist"] = False
+    else:
+        ydl_opts["noplaylist"] = True
+
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
 
@@ -301,58 +351,37 @@ def _fetch_via_ytdlp(url: str, playlist_id: Optional[str], video_id: Optional[st
         for entry in entries:
             if not entry:
                 continue
-            vid = entry.get("id") or entry.get("url")
-            title = (entry.get("title") or "").strip()
-            if not vid or not _usable_title(title):
-                continue
-            duration = entry.get("duration")
-            try:
-                duration_seconds = int(duration) if duration else None
-            except (TypeError, ValueError):
-                duration_seconds = None
-            thumb = None
-            thumbs = entry.get("thumbnails") or []
-            if thumbs:
-                thumb = thumbs[-1].get("url")
-            videos.append(
-                PlaylistVideo(
-                    video_id=str(vid),
-                    title=title,
-                    description=(entry.get("description") or "").strip(),
-                    thumbnail_url=thumb or f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
-                    duration_seconds=duration_seconds,
-                    sort_order=len(videos),
-                )
-            )
+            parsed = _playlist_video_from_ytdlp_entry(entry, len(videos))
+            if parsed:
+                videos.append(parsed)
             if len(videos) >= MAX_PLAYLIST_ITEMS:
                 break
-    elif info.get("id") and _usable_title(info.get("title")):
-        vid = str(info.get("id"))
-        duration = info.get("duration")
-        try:
-            duration_seconds = int(duration) if duration else None
-        except (TypeError, ValueError):
-            duration_seconds = None
-        videos.append(
-            PlaylistVideo(
-                video_id=vid,
-                title=(info.get("title") or "Untitled video").strip(),
-                description=(info.get("description") or "").strip(),
-                thumbnail_url=(info.get("thumbnail") or f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"),
-                duration_seconds=duration_seconds,
-                sort_order=0,
-            )
-        )
+
+    if not videos:
+        single = _playlist_video_from_ytdlp_info(info, sort_order=0)
+        if single:
+            videos.append(single)
+
+    if not videos and video_id:
+        single_url = f"https://www.youtube.com/watch?v={video_id}"
+        single_opts = {**ydl_opts, "noplaylist": True}
+        with yt_dlp.YoutubeDL(single_opts) as ydl:
+            single_info = ydl.extract_info(single_url, download=False)
+        if single_info:
+            single = _playlist_video_from_ytdlp_info(single_info, sort_order=0)
+            if single:
+                videos.append(single)
 
     if not videos:
         raise YouTubeImportError("No public videos found on that YouTube link.")
 
-    extracted_playlist_id = info.get("id") if info.get("_type") == "playlist" else playlist_id
+    is_playlist = info.get("_type") == "playlist" or (entries and len(videos) > 1)
+    extracted_playlist_id = info.get("id") if is_playlist and playlist_id else (playlist_id if is_playlist else None)
     title = (info.get("title") or videos[0].title).strip()
     return PlaylistImport(
         title=title,
         description=(info.get("description") or "").strip(),
-        playlist_id=extracted_playlist_id if entries else None,
+        playlist_id=extracted_playlist_id if is_playlist else None,
         thumbnail_url=info.get("thumbnail") or videos[0].thumbnail_url,
         channel_title=info.get("channel") or info.get("uploader"),
         source_url=url,

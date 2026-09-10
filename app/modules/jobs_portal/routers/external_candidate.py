@@ -23,6 +23,7 @@ from app.modules.jobs_portal.services.public_jobs_service import (
     get_similar_jobs,
     get_job_filter_facets,
 )
+from app.modules.jobs_portal.services.platform_stats_service import get_public_platform_stats
 from app.core.config import settings
 from typing import List
 
@@ -253,11 +254,17 @@ async def public_job_suggestions(
 @router.get("/jobs/browse-meta")
 async def public_job_browse_meta(
     title_limit: int = Query(10, ge=1, le=30),
-    city_limit: int = Query(12, ge=1, le=40),
+    city_limit: int = Query(40, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
 ):
     """Popular titles and cities derived from active job postings."""
     return await get_job_browse_meta(db, title_limit=title_limit, city_limit=city_limit)
+
+
+@router.get("/platform-stats")
+async def public_platform_stats(db: AsyncSession = Depends(get_db)):
+    """Live marketing counts for public pages (seekers, jobs, training, placements)."""
+    return await get_public_platform_stats(db)
 
 
 @router.get("/jobs/facets")

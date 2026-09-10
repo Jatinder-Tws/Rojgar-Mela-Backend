@@ -18,6 +18,7 @@ from app.modules.training_portal.schemas.training_portal_course import (
     TrainingPortalCourseCreate,
     TrainingPortalCourseUpdate,
     TrainingPortalCourseOut,
+    PublicPaidCourseListOut,
 )
 from app.core.dependencies import require_super_admin, require_training_portal_user, require_super_admin_or_permission
 
@@ -184,14 +185,25 @@ async def list_portal_courses(
     ]
 
 
-@router.get("/public", response_model=List[TrainingPortalCourseOut])
-async def list_public_paid_portal_courses(
-    search: Optional[str] = Query(None),
-    category: Optional[str] = Query(None),
-    db: AsyncSession = Depends(get_db),
-):
-    """Published paid training courses for the public /courses catalog."""
-    query = select(TrainingPortalCourse).where(
+def _parse_category_keys(category: Optional[str]) -> list[str]:
+    if not category:
+        return []
+    keys: list[str] = []
+    seen: set[str] = set()
+    for part in category.split(","):
+        key = part.strip()
+        if not key or key.lower() == "all":
+            continue
+        marker = key.lower()
+        if marker in seen:
+            continue
+        seen.add(marker)
+        keys.append(key)
+    return keys
+
+
+def _apply_paid_public_filters(query, *, search: Optional[str], category: Optional[str] = None):
+    query = query.where(
         TrainingPortalCourse.status == "published",
         TrainingPortalCourse.fee > 0,
     )
@@ -204,13 +216,48 @@ async def list_public_paid_portal_courses(
                 TrainingPortalCourse.category.ilike(term),
             )
         )
-    if category and category.strip() and category.strip().lower() != "all":
-        query = query.where(TrainingPortalCourse.category == category.strip())
-    query = query.order_by(TrainingPortalCourse.created_at.desc())
-    result = await db.execute(query)
+    categories = _parse_category_keys(category)
+    if categories:
+        query = query.where(TrainingPortalCourse.category.in_(categories))
+    return query
+
+
+async def _paid_query_count(db: AsyncSession, query) -> int:
+    count_stmt = select(func.count()).select_from(query.order_by(None).subquery())
+    result = await db.execute(count_stmt)
+    return int(result.scalar() or 0)
+
+
+@router.get("/public", response_model=PublicPaidCourseListOut)
+async def list_public_paid_portal_courses(
+    search: Optional[str] = Query(None),
+    category: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(12, ge=1, le=100, alias="limit"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Published paid training courses for the public /courses catalog."""
+    base_query = _apply_paid_public_filters(select(TrainingPortalCourse), search=search)
+    filtered_query = _apply_paid_public_filters(
+        select(TrainingPortalCourse), search=search, category=category
+    )
+    total_published = await _paid_query_count(db, base_query)
+    total = await _paid_query_count(db, filtered_query)
+    facet_rows = await db.execute(
+        _apply_paid_public_filters(
+            select(TrainingPortalCourse.category, func.count()),
+            search=search,
+        ).group_by(TrainingPortalCourse.category)
+    )
+    category_counts = {str(row[0]): int(row[1]) for row in facet_rows.all() if row[0]}
+
+    offset = (page - 1) * page_size
+    result = await db.execute(
+        filtered_query.order_by(TrainingPortalCourse.created_at.desc()).offset(offset).limit(page_size)
+    )
     courses = list(result.scalars().all())
     counts = await _course_counts(db, [c.id for c in courses])
-    return [
+    items = [
         _to_out(
             course,
             batches_count=counts.get(course.id, (0, 0))[0],
@@ -218,6 +265,15 @@ async def list_public_paid_portal_courses(
         )
         for course in courses
     ]
+    return PublicPaidCourseListOut(
+        items=items,
+        total=total,
+        page=page,
+        page_size=page_size,
+        has_more=(offset + len(items)) < total,
+        category_counts=category_counts,
+        total_published=total_published,
+    )
 
 
 @router.get("/public/{course_id}", response_model=TrainingPortalCourseOut)

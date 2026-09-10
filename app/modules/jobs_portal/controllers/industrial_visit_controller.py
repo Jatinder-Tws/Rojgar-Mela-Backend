@@ -317,17 +317,18 @@ async def register_student(
     await db.refresh(student)
 
     try:
-        from app.shared.services.celery_tasks import send_industrial_visit_invite_email_task
+        from app.shared.services.email_service import send_industrial_visit_invite_email
 
-        send_industrial_visit_invite_email_task.delay(
-            student.email,
-            student.full_name,
-            visit.title,
-            _format_visit_date_display(visit.visit_date),
-            visit.venue or "",
+        first_name = (student.full_name or "").strip().split()[0] or "there"
+        await send_industrial_visit_invite_email(
+            to_email=student.email,
+            first_name=first_name,
+            visit_title=visit.title,
+            visit_date_display=_format_visit_date_display(visit.visit_date),
+            venue=visit.venue or "",
         )
     except Exception as exc:
-        logger.error("Failed to enqueue industrial visit invitation email: %s", exc)
+        logger.error("Failed to send industrial visit invitation email to %s: %s", student.email, exc)
 
     return IndustrialVisitRegisterOut(
         id=student.id,

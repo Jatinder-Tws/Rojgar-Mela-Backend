@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import List, Literal, Optional
+from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -63,3 +63,13 @@ class TrainingPortalCourseOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class PublicPaidCourseListOut(BaseModel):
+    items: List[TrainingPortalCourseOut]
+    total: int
+    page: int
+    page_size: int
+    has_more: bool
+    category_counts: Dict[str, int] = {}
+    total_published: int = 0

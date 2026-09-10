@@ -753,26 +753,26 @@ async def get_job_browse_meta(
 ) -> dict[str, Any]:
     """Popular job titles, cities, and category chips that have live jobs."""
     title_limit = min(max(1, title_limit), 30)
-    city_limit = min(max(1, city_limit), 40)
+    city_limit = min(max(1, city_limit), 100)
 
     total_q = await db.execute(
         select(func.count()).select_from(JobPosting).filter(JobPosting.is_active == True)
     )
     total_jobs = int(total_q.scalar() or 0)
 
+    # Titles: sample recent active jobs for popular chips
     result = await db.execute(
-        select(JobPosting.title, JobPosting.location)
+        select(JobPosting.title)
         .filter(JobPosting.is_active == True)
+        .order_by(desc(JobPosting.created_at))
         .limit(2000)
     )
-    rows = result.all()
+    title_rows = result.all()
 
     title_counts: dict[str, int] = {}
     title_labels: dict[str, str] = {}
-    city_counts: dict[str, int] = {}
-    city_labels: dict[str, str] = {}
 
-    for title, location in rows:
+    for (title,) in title_rows:
         display = (title or "").strip()
         if display:
             key = _title_dedupe_key(display)
@@ -784,11 +784,36 @@ async def get_job_browse_meta(
                     else display
                 )
 
+    # Distinct locations only — same city extraction as platform stats / Find Jobs
+    city_counts: dict[str, int] = {}
+    city_labels: dict[str, str] = {}
+    loc_rows = (
+        await db.execute(
+            select(JobPosting.location, func.count())
+            .filter(
+                JobPosting.is_active == True,
+                JobPosting.location.isnot(None),
+                func.trim(JobPosting.location) != "",
+            )
+            .group_by(JobPosting.location)
+        )
+    ).all()
+    for location, job_count in loc_rows:
         city = _extract_city_label(location or "")
-        if city:
-            ckey = city.lower()
-            city_counts[ckey] = city_counts.get(ckey, 0) + 1
-            city_labels[ckey] = city_labels.get(ckey) or city
+        if not city:
+            continue
+        ckey = city.lower()
+        city_counts[ckey] = city_counts.get(ckey, 0) + int(job_count or 0)
+        city_labels[ckey] = city_labels.get(ckey) or city
+
+    industries_q = await db.execute(
+        select(func.count(func.distinct(func.lower(func.trim(JobPosting.industry))))).filter(
+            JobPosting.is_active == True,
+            JobPosting.industry.isnot(None),
+            func.trim(JobPosting.industry) != "",
+        )
+    )
+    total_industries = int(industries_q.scalar() or 0)
 
     categories: list[dict[str, Any]] = []
     for cat in _BROWSE_CATEGORIES:
@@ -810,15 +835,18 @@ async def get_job_browse_meta(
             :title_limit
         ]
     ]
+    ranked_city_keys = sorted(
+        city_counts.keys(), key=lambda x: (-city_counts[x], city_labels[x].lower())
+    )
     cities = [
         {"label": city_labels[k], "count": city_counts[k]}
-        for k in sorted(city_counts.keys(), key=lambda x: (-city_counts[x], city_labels[x].lower()))[
-            :city_limit
-        ]
+        for k in ranked_city_keys[:city_limit]
     ]
 
     return {
         "total_jobs": total_jobs,
+        "total_cities": len(city_counts),
+        "total_industries": total_industries,
         "popular_titles": popular_titles,
         "cities": cities,
         "categories": categories,
