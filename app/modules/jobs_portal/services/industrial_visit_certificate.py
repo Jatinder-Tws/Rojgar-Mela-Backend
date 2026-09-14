@@ -1,18 +1,27 @@
 from datetime import datetime
 from io import BytesIO
+from pathlib import Path
 from typing import Optional
 
-from reportlab.lib.colors import HexColor, white
+from PIL import Image, ImageDraw, ImageFont
 from reportlab.lib.pagesizes import A4, landscape
-from reportlab.lib.units import mm
+from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
 
-NAVY = HexColor("#0f2d52")
-GOLD = HexColor("#c9a227")
-SLATE = HexColor("#334155")
-MUTED = HexColor("#64748b")
-LIGHT = HexColor("#eef4f9")
+ASSETS = Path(__file__).resolve().parent.parent / "assets" / "certificates"
+
+TEMPLATE_PATH = ASSETS / "industrial_visit_template.png"
+
+NAVY = (5, 30, 94)
+
+FONT_PATHS = [
+    Path("/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf"),
+    Path("/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf"),
+    Path(r"C:\Windows\Fonts\times.ttf"),
+    Path("/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf"),
+    Path(r"C:\Windows\Fonts\timesbd.ttf"),
+]
 
 
 def _ordinal_day(day: int) -> str:
@@ -20,6 +29,7 @@ def _ordinal_day(day: int) -> str:
         suffix = "th"
     else:
         suffix = {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+
     return f"{day}{suffix}"
 
 
@@ -28,6 +38,28 @@ def format_visit_date(visit_date: datetime) -> str:
         f"{visit_date.strftime('%A')}, {_ordinal_day(visit_date.day)} "
         f"{visit_date.strftime('%B')} {visit_date.year}"
     )
+
+
+def _font(size: int):
+    for path in FONT_PATHS:
+        if path.exists():
+            return ImageFont.truetype(str(path), size)
+
+    return ImageFont.load_default()
+
+
+def _fit_name_font(text: str, max_width: int):
+    size = 48
+
+    while size > 20:
+        font = _font(size)
+
+        if font.getlength(text) <= max_width:
+            return font
+
+        size -= 2
+
+    return _font(size)
 
 
 def generate_participation_certificate_pdf(
@@ -40,82 +72,94 @@ def generate_participation_certificate_pdf(
     venue: Optional[str],
     certificate_id: str,
     verify_url: str,
+    issue_date: Optional[datetime] = None,
 ) -> bytes:
-    """Generate a landscape A4 participation certificate PDF."""
-    buffer = BytesIO()
-    width, height = landscape(A4)
-    c = canvas.Canvas(buffer, pagesize=landscape(A4))
+    """
+    Generate industrial visit participation certificate.
 
-    c.setFillColor(LIGHT)
-    c.rect(0, 0, width, height, fill=1, stroke=0)
+    The original certificate template is kept unchanged.
+    Only the participant name is dynamically added.
+    """
 
-    c.setStrokeColor(NAVY)
-    c.setLineWidth(3.2)
-    c.rect(12 * mm, 12 * mm, width - 24 * mm, height - 24 * mm, fill=0, stroke=1)
-    c.setStrokeColor(GOLD)
-    c.setLineWidth(1.2)
-    c.rect(14.5 * mm, 14.5 * mm, width - 29 * mm, height - 29 * mm, fill=0, stroke=1)
-
-    c.setFillColor(NAVY)
-    c.rect(12 * mm, height - 38 * mm, width - 24 * mm, 26 * mm, fill=1, stroke=0)
-    c.setFillColor(GOLD)
-    c.rect(12 * mm, height - 40 * mm, width - 24 * mm, 2.2 * mm, fill=1, stroke=0)
-
-    c.setFillColor(white)
-    c.setFont("Times-Bold", 14)
-    c.drawCentredString(width / 2, height - 24 * mm, "ROJGARMELA.AI")
-    c.setFont("Times-Bold", 22)
-    c.drawCentredString(width / 2, height - 34 * mm, "Certificate of Participation")
-
-    c.setFillColor(MUTED)
-    c.setFont("Times-Italic", 13)
-    c.drawCentredString(width / 2, height - 54 * mm, "This is to certify that")
-
-    c.setFillColor(NAVY)
-    c.setFont("Times-Bold", 26)
-    c.drawCentredString(width / 2, height - 68 * mm, full_name.strip())
-
-    c.setStrokeColor(GOLD)
-    c.setLineWidth(0.8)
-    name_width = min(c.stringWidth(full_name.strip(), "Times-Bold", 26) + 24, width - 80 * mm)
-    c.line((width - name_width) / 2, height - 71 * mm, (width + name_width) / 2, height - 71 * mm)
-
-    c.setFillColor(SLATE)
-    c.setFont("Times-Roman", 13)
-    date_display = format_visit_date(visit_date)
-    venue_text = (venue or "").strip()
-    body_lines = [
-        f"a student of {college_name.strip()} ({department.strip()})",
-        f"has successfully participated in {visit_title.strip()}",
-        f"held on {date_display}" + (f" at {venue_text}." if venue_text else "."),
-    ]
-    y = height - 86 * mm
-    for line in body_lines:
-        c.drawCentredString(width / 2, y, line)
-        y -= 7.5 * mm
-
-    c.setFillColor(MUTED)
-    c.setFont("Times-Italic", 11)
-    c.drawCentredString(
-        width / 2,
-        38 * mm,
-        "Issued in recognition of attendance and active participation during the industrial visit.",
+    # These values are currently not rendered dynamically.
+    _ = (
+        college_name,
+        department,
+        visit_title,
+        visit_date,
+        venue,
+        certificate_id,
+        verify_url,
+        issue_date,
     )
 
-    c.setFillColor(NAVY)
-    c.setFont("Times-Bold", 10)
-    c.drawString(28 * mm, 26 * mm, f"Certificate ID: {certificate_id}")
-    c.setFont("Times-Roman", 8)
-    c.setFillColor(MUTED)
-    c.drawString(28 * mm, 21 * mm, f"Verify at: {verify_url}")
+    if not TEMPLATE_PATH.exists():
+        raise FileNotFoundError(
+            f"Certificate template missing: {TEMPLATE_PATH}"
+        )
 
-    c.setFillColor(NAVY)
-    c.setFont("Times-Bold", 11)
-    c.drawRightString(width - 28 * mm, 26 * mm, "Rojgar Mela")
-    c.setFont("Times-Italic", 9)
-    c.setFillColor(MUTED)
-    c.drawRightString(width - 28 * mm, 21 * mm, "Authorised Signature")
+    # Load original certificate template.
+    img = Image.open(TEMPLATE_PATH).convert("RGBA")
+
+    draw = ImageDraw.Draw(img)
+
+    w, h = img.size
+
+    # ---------------------------------------------------------
+    # Dynamic Participant Name
+    # ---------------------------------------------------------
+
+    name = (full_name or "").strip().upper()
+
+    font = _fit_name_font(
+        name,
+        int(w * 0.58),
+    )
+
+    # Vertical position of the participant name.
+    name_y = int(h * 0.530)
+
+    # Calculate text width for horizontal centering.
+    text_w = font.getlength(name)
+
+    name_x = int((w - text_w) / 2)
+
+    # Draw participant name.
+    draw.text(
+        (name_x, name_y),
+        name,
+        font=font,
+        fill=NAVY,
+    )
+
+    # ---------------------------------------------------------
+    # Convert image to RGB for PDF
+    # ---------------------------------------------------------
+
+    rgb = img.convert("RGB")
+
+    buf = BytesIO()
+
+    # Landscape A4 PDF.
+    page_w, page_h = landscape(A4)
+
+    c = canvas.Canvas(
+        buf,
+        pagesize=landscape(A4),
+    )
+
+    # Place certificate template on the entire A4 page.
+    c.drawImage(
+        ImageReader(rgb),
+        0,
+        0,
+        width=page_w,
+        height=page_h,
+        preserveAspectRatio=True,
+        anchor="c",
+    )
 
     c.showPage()
     c.save()
-    return buffer.getvalue()
+
+    return buf.getvalue()

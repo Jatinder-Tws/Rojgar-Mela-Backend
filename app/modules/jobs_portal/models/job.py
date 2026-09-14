@@ -11,6 +11,7 @@ from sqlalchemy import (
     JSON,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
@@ -37,6 +38,9 @@ def _uuid():
 
 class JobPosting(Base):
     __tablename__ = "job_postings"
+    __table_args__ = (
+        UniqueConstraint("source_platform", "external_id", name="uq_job_source_external_id"),
+    )
 
     id = Column(UUID(as_uuid=False), primary_key=True, default=_uuid)
     provider_id = Column(
@@ -62,6 +66,11 @@ class JobPosting(Base):
     shift = Column(String(20), nullable=True)
     perks = Column(JSON, nullable=True)
     employment_type = Column(String(20), nullable=True)
+
+    # External scrape identity (PGRKAM government jobs, etc.)
+    source_platform = Column(String(50), nullable=True, index=True)
+    external_id = Column(String(150), nullable=True, index=True)
+    source_metadata = Column(JSON, nullable=True)
 
     # Embedding for similarity search
     if VECTOR_AVAILABLE:

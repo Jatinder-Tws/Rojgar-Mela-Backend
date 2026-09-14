@@ -553,11 +553,13 @@ class PortalPaymentInvoiceOut(BaseModel):
     enrollment_date: str
     notes: Optional[str] = None
     issuer_label: str = "RojgarMela Training Portal"
+    payment_type: Optional[str] = None
     line_items: list[PortalInvoiceLineItem] = Field(default_factory=list)
     base_fee: Optional[float] = None
     emi_interest_amount: Optional[float] = None
     emi_interest_percent: Optional[float] = None
     transactions: list[PortalTransactionOut] = Field(default_factory=list)
+    installments: list[dict[str, Any]] = Field(default_factory=list)
 
 
 # ── Dashboard summary ─────────────────────────────────────────────────────────

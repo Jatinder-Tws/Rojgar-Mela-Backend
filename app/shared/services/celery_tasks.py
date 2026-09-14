@@ -388,3 +388,33 @@ def sync_scholarships_task():
             return {"status": "error", "error": str(e)}
 
     return run_async(_run())
+
+
+@celery_app.task(name="sync_govt_jobs_task")
+def sync_govt_jobs_task():
+    """Daily 5 AM IST scrape of PGRKAM government jobs; upserts into job_postings."""
+    async def _run():
+        try:
+            from app.modules.jobs_portal.services.govt_job_sync_service import GovtJobSyncService
+            result = await GovtJobSyncService.scrape_and_sync()
+            logger.info(
+                "[Task: sync_govt_jobs_task] Sync completed source=%s count=%s created=%s updated=%s deactivated=%s",
+                result.get("source"),
+                result.get("count"),
+                result.get("created"),
+                result.get("updated"),
+                result.get("deactivated"),
+            )
+            return {
+                "status": result.get("status"),
+                "source": result.get("source"),
+                "count": result.get("count"),
+                "created": result.get("created"),
+                "updated": result.get("updated"),
+                "deactivated": result.get("deactivated"),
+            }
+        except Exception as e:
+            logger.error("[Task: sync_govt_jobs_task] Error scraping govt jobs: %s", e, exc_info=True)
+            return {"status": "error", "error": str(e)}
+
+    return run_async(_run())

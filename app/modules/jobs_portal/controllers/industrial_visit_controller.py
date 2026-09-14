@@ -637,6 +637,24 @@ async def admin_update_attendance(
     return _student_to_out(student)
 
 
+async def admin_delete_student(
+    visit_id: str,
+    student_id: str,
+    db: AsyncSession,
+) -> None:
+    result = await db.execute(
+        select(IndustrialVisitStudent).where(
+            IndustrialVisitStudent.id == student_id,
+            IndustrialVisitStudent.visit_id == visit_id,
+        )
+    )
+    student = result.scalar_one_or_none()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    await db.delete(student)
+    await db.commit()
+
+
 async def admin_export_students_csv(visit_id: str, db: AsyncSession) -> StreamingResponse:
     result = await db.execute(select(IndustrialVisit).where(IndustrialVisit.id == visit_id))
     visit = result.scalar_one_or_none()
@@ -707,12 +725,19 @@ def _new_certificate_id() -> str:
     return secrets.token_urlsafe(12).replace("-", "").replace("_", "")[:16].upper()
 
 
-async def _send_one_certificate(db: AsyncSession, student: IndustrialVisitStudent, visit: IndustrialVisit) -> bool:
+async def _send_one_certificate(
+    db: AsyncSession,
+    student: IndustrialVisitStudent,
+    visit: IndustrialVisit,
+    *,
+    force: bool = False,
+) -> bool:
     from app.shared.services.email_service import send_industrial_visit_certificate_email
 
     if student.attendance_status != ATTENDANCE_PRESENT:
         return False
-    if student.certificate_status == CERTIFICATE_SENT:
+    previous_status = student.certificate_status
+    if previous_status == CERTIFICATE_SENT and not force:
         return False
 
     if not student.certificate_id:
@@ -747,7 +772,8 @@ async def _send_one_certificate(db: AsyncSession, student: IndustrialVisitStuden
         return True
     except Exception as exc:
         logger.error("Certificate email failed for %s: %s", student.email, exc)
-        student.certificate_status = CERTIFICATE_FAILED
+        if previous_status != CERTIFICATE_SENT:
+            student.certificate_status = CERTIFICATE_FAILED
         student.updated_at = datetime.utcnow()
         return False
 
@@ -792,6 +818,51 @@ async def admin_send_certificates(
         failed=failed,
         skipped=0,
         message=f"Sent {sent} certificate(s). {failed} failed." if rows else "No present students with pending certificates.",
+    )
+
+
+async def admin_send_student_certificate(
+    visit_id: str,
+    student_id: str,
+    db: AsyncSession,
+) -> IndustrialVisitSendCertificatesOut:
+    result = await db.execute(select(IndustrialVisit).where(IndustrialVisit.id == visit_id))
+    visit = result.scalar_one_or_none()
+    if not visit:
+        raise HTTPException(status_code=404, detail="Industrial visit not found")
+
+    student_result = await db.execute(
+        select(IndustrialVisitStudent).where(
+            IndustrialVisitStudent.id == student_id,
+            IndustrialVisitStudent.visit_id == visit_id,
+        )
+    )
+    student = student_result.scalar_one_or_none()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    if student.attendance_status != ATTENDANCE_PRESENT:
+        raise HTTPException(
+            status_code=400,
+            detail="Mark this student present before sending a certificate.",
+        )
+
+    ok = await _send_one_certificate(db, student, visit, force=True)
+    await db.commit()
+    if ok:
+        visit.certificates_sent_at = datetime.utcnow()
+        visit.updated_at = datetime.utcnow()
+        await db.commit()
+
+    name = student.full_name.strip() or student.email
+    return IndustrialVisitSendCertificatesOut(
+        sent=1 if ok else 0,
+        failed=0 if ok else 1,
+        skipped=0,
+        message=(
+            f"Certificate sent to {name}."
+            if ok
+            else f"Could not send the certificate to {student.email}."
+        ),
     )
 
 

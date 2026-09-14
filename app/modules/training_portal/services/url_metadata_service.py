@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -31,7 +31,15 @@ RESOURCE_CATEGORIES = (
 
 SPECIFIC_CATEGORIES = frozenset({"video", "github_repo", "book", "research_paper", "course", "pdf"})
 
-USER_AGENT = "RojgarMelaBot/1.0 (+https://rojgarmela.ai)"
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+)
+REQUEST_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 
 class UrlMetadataError(Exception):
@@ -80,6 +88,30 @@ def pdf_metadata_from_url(
             "file_type": "pdf",
             "original_filename": original_filename or name,
         },
+    )
+
+
+def _title_from_url(url: str) -> str:
+    parsed = urlparse(url)
+    parts = [p for p in parsed.path.strip("/").split("/") if p]
+    slug = parts[-1] if parts else (parsed.hostname or "Untitled resource")
+    slug = unquote(slug)
+    slug = re.sub(r"\.(html?|php|aspx?)$", "", slug, flags=re.I)
+    slug = slug.replace("-", " ").replace("_", " ").strip()
+    slug = re.sub(r"\s+", " ", slug)
+    if slug.isdigit() and len(parts) >= 2:
+        slug = unquote(parts[-2]).replace("-", " ").replace("_", " ").strip()
+    return (slug or parsed.hostname or "Untitled resource")[:300]
+
+
+def _fallback_page_metadata(url: str, category: str) -> UrlMetadata:
+    return UrlMetadata(
+        url=url,
+        title=_title_from_url(url),
+        description="",
+        thumbnail_url=None,
+        category=category,
+        metadata={"fetch_failed": True, "detected_category": category},
     )
 
 
@@ -268,19 +300,27 @@ async def fetch_url_metadata(url: str, category: Optional[str] = None) -> UrlMet
 
     async with httpx.AsyncClient(
         timeout=25.0,
-        headers={"User-Agent": USER_AGENT},
+        headers=REQUEST_HEADERS,
         follow_redirects=True,
     ) as client:
         if host == "github.com":
-            meta = await _fetch_github_repo(client, normalized)
+            try:
+                meta = await _fetch_github_repo(client, normalized)
+            except (httpx.HTTPError, httpx.RequestError) as exc:
+                logger.warning("GitHub metadata fetch failed for %s: %s", normalized, exc)
+                meta = _fallback_page_metadata(normalized, "github_repo")
         elif host == "arxiv.org":
-            meta = await _fetch_arxiv(client, normalized)
+            try:
+                meta = await _fetch_arxiv(client, normalized)
+            except (httpx.HTTPError, httpx.RequestError) as exc:
+                logger.warning("arXiv metadata fetch failed for %s: %s", normalized, exc)
+                meta = _fallback_page_metadata(normalized, "research_paper")
         else:
             try:
                 meta = await _fetch_og_page(client, normalized, detected)
-            except httpx.HTTPError as exc:
+            except (httpx.HTTPError, httpx.RequestError) as exc:
                 logger.warning("URL metadata fetch failed for %s: %s", normalized, exc)
-                raise UrlMetadataError("Could not fetch metadata from that URL.") from exc
+                meta = _fallback_page_metadata(normalized, detected)
 
     meta.metadata = {**(meta.metadata or {}), "detected_category": detected}
     meta.category = detected

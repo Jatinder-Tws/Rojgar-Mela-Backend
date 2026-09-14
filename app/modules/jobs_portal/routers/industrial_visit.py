@@ -161,6 +161,29 @@ async def update_attendance(
     return await ctrl.admin_update_attendance(visit_id, student_id, body, db)
 
 
+@admin_router.delete("/{visit_id}/students/{student_id}", status_code=204)
+async def delete_student(
+    visit_id: str,
+    student_id: str,
+    _admin: User = Depends(require_super_admin_or_permission("industrial_visits")),
+    db: AsyncSession = Depends(get_db),
+):
+    await ctrl.admin_delete_student(visit_id, student_id, db)
+
+
+@admin_router.post(
+    "/{visit_id}/students/{student_id}/send-certificate",
+    response_model=IndustrialVisitSendCertificatesOut,
+)
+async def send_student_certificate(
+    visit_id: str,
+    student_id: str,
+    _admin: User = Depends(require_super_admin_or_permission("industrial_visits")),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl.admin_send_student_certificate(visit_id, student_id, db)
+
+
 @admin_router.post("/{visit_id}/send-certificates", response_model=IndustrialVisitSendCertificatesOut)
 async def send_certificates(
     visit_id: str,

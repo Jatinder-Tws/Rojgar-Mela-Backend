@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 YOUTUBE_API_BASE = "https://www.googleapis.com/youtube/v3"
 MAX_PLAYLIST_ITEMS = 200
 SKIP_TITLES = {"private video", "deleted video"}
+BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+)
 
 
 class YouTubeImportError(Exception):
@@ -88,6 +92,11 @@ def parse_youtube_ids(url: str) -> tuple[Optional[str], Optional[str]]:
     if video_id and not re.fullmatch(r"[\w-]{6,}", video_id):
         video_id = None
 
+    # Watch/shorts URLs often include a related mix/playlist (`list=RDxxx`).
+    # Import the video the user pasted, unless this is an actual playlist page.
+    if video_id and playlist_id and "/playlist" not in path.lower():
+        playlist_id = None
+
     return playlist_id, video_id
 
 
@@ -136,11 +145,71 @@ async def fetch_playlist(url: str) -> PlaylistImport:
                 return await _fetch_playlist_via_api(api_key, playlist_id, url)
             return await _fetch_video_via_api(api_key, video_id or "", url)
         except YouTubeImportError:
-            raise
+            logger.warning("YouTube Data API rejected %s, trying other methods", url)
         except Exception as exc:
-            logger.warning("YouTube Data API import failed, trying yt-dlp: %s", exc)
+            logger.warning("YouTube Data API import failed, trying other methods: %s", exc)
 
-    return await asyncio.to_thread(_fetch_via_ytdlp, url, playlist_id, video_id)
+    if video_id and not playlist_id:
+        oembed = await _fetch_video_via_oembed(video_id, url)
+        if oembed:
+            return oembed
+
+    try:
+        return await asyncio.to_thread(_fetch_via_ytdlp, url, playlist_id, video_id)
+    except YouTubeImportError:
+        if video_id:
+            oembed = await _fetch_video_via_oembed(video_id, url)
+            if oembed:
+                return oembed
+            return _fallback_video_import(video_id, url)
+        raise
+
+
+def _fallback_video_import(video_id: str, source_url: str, title: Optional[str] = None) -> PlaylistImport:
+    video = PlaylistVideo(
+        video_id=video_id,
+        title=(title or "YouTube video").strip(),
+        thumbnail_url=f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
+        sort_order=0,
+    )
+    return PlaylistImport(
+        title=video.title,
+        playlist_id=None,
+        thumbnail_url=video.thumbnail_url,
+        source_url=source_url,
+        videos=[video],
+    )
+
+
+async def _fetch_video_via_oembed(video_id: str, source_url: str) -> Optional[PlaylistImport]:
+    watch_url = f"https://www.youtube.com/watch?v={video_id}"
+    try:
+        async with httpx.AsyncClient(timeout=15.0, headers={"User-Agent": BROWSER_UA}, follow_redirects=True) as client:
+            res = await client.get(
+                "https://www.youtube.com/oembed",
+                params={"url": watch_url, "format": "json"},
+            )
+            if res.status_code != 200:
+                return None
+            data = res.json()
+    except Exception as exc:
+        logger.warning("YouTube oEmbed failed for %s: %s", video_id, exc)
+        return None
+    title = (data.get("title") or "YouTube video").strip()
+    thumb = data.get("thumbnail_url") or f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+    video = PlaylistVideo(
+        video_id=video_id,
+        title=title,
+        thumbnail_url=thumb,
+        sort_order=0,
+    )
+    return PlaylistImport(
+        title=title,
+        channel_title=data.get("author_name"),
+        thumbnail_url=thumb,
+        source_url=source_url,
+        videos=[video],
+    )
 
 
 async def _fetch_playlist_via_api(api_key: str, playlist_id: str, source_url: str) -> PlaylistImport:
@@ -343,7 +412,10 @@ def _fetch_via_ytdlp(url: str, playlist_id: Optional[str], video_id: Optional[st
         info = ydl.extract_info(url, download=False)
 
     if not info:
-        raise YouTubeImportError("Could not read that YouTube link. Check that the playlist is public.")
+        kind = "playlist" if playlist_id else "video"
+        raise YouTubeImportError(
+            f"Could not read that YouTube {kind}. Check that the link is public, then try again."
+        )
 
     entries = info.get("entries")
     videos: list[PlaylistVideo] = []

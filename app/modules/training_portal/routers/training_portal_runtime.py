@@ -485,6 +485,8 @@ async def _build_invoice(
         emi_interest_amount=interest_amount,
         emi_interest_percent=interest_percent,
         transactions=transaction_history,
+        payment_type=enrollment.payment_type,
+        installments=enrollment.installments or [],
     )
 
 

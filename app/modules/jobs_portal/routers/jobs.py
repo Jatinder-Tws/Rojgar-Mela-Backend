@@ -98,6 +98,13 @@ async def clear_external_cache():
     return await ctrl_clear_external_jobs_cache()
 
 
+@router.post("/govt-sync")
+async def trigger_govt_job_sync():
+    """Immediately scrape PGRKAM government jobs and upsert them into job_postings."""
+    from app.modules.jobs_portal.services.govt_job_sync_service import GovtJobSyncService
+    return await GovtJobSyncService.scrape_and_sync()
+
+
 
 @router.get("/{job_id}", response_model=JobOut)
 async def get_job(job_id: str, user: User = Depends(require_verified), db: AsyncSession = Depends(get_db)):
