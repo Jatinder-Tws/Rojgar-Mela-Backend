@@ -33,7 +33,7 @@ CERTIFICATE_SENT = "sent"
 CERTIFICATE_FAILED = "failed"
 
 DEFAULT_VISIT_SLUG = "office-industrial-visit"
-DEFAULT_VISIT_TITLE = "Tekki Web Solutions Industrial Training Visit 2026"
+DEFAULT_VISIT_TITLE = "Tekki Web Solutions Industrial visit Visit 2026"
 DEFAULT_VISIT_VENUE = (
     "Tekki Web Solutions Pvt. Ltd., Bajwa Colony, 67-68, Dhandra Rd, "
     "near Green City, Dhandra, Ludhiana, Mahmudpura, Punjab 141116"

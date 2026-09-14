@@ -89,7 +89,7 @@ SUPERVISOR_PERMISSIONS: List[PermissionDefinition] = [
     },
     {
         "key": "industrial_visits",
-        "label": "Industrial Training",
+        "label": "Industrial Visit",
         "description": "Manage industrial visit registrations, office check-in QR, and participation certificates",
         "category": "Opportunities & Matches",
         "platform": "job_portal",
