@@ -162,25 +162,38 @@ def session_to_out_for_date(
     now: Optional[datetime] = None,
 ) -> PortalClassSessionOut:
     from app.modules.training_portal.services.training_portal_class_live import now_ist
+    from app.modules.training_portal.services.occurrence_reports import get_occurrence_fields
 
     current = now or now_ist()
     effective = effective_live_status(row, current, target)
     applies = session_live_applies_to_date(row, target)
     base = session_to_out(row)
+    occ_fields = get_occurrence_fields(row, target.isoformat())
+    show_completed_fields = applies and effective == "completed"
+    # Historical occurrence notes (previous dates) when live fields already moved on.
+    show_historical = (not applies) and bool(occ_fields.get("session_report") or occ_fields.get("covered_topic_ids"))
+    use_occ = show_completed_fields or show_historical
     return base.model_copy(
         update={
-            "live_status": effective,
+            "live_status": effective if applies else ("completed" if show_historical else effective),
             "occurrence_date": target.isoformat(),
             "can_start": should_show_start_button(row, current, target),
             "started_at": getattr(row, "started_at", None) if applies and effective in {"live", "completed"} else None,
             "ended_at": getattr(row, "ended_at", None) if applies and effective == "completed" else None,
-            "session_report": getattr(row, "session_report", None) if applies and effective == "completed" else None,
-            "covered_topic_ids": (getattr(row, "covered_topic_ids", None) or []) if applies and effective == "completed" else [],
-            "attachment_url": getattr(row, "attachment_url", None) if applies and effective == "completed" else None,
-            "attachment_filename": getattr(row, "attachment_filename", None) if applies and effective == "completed" else None,
-            "late_start_reason": getattr(row, "late_start_reason", None) if applies and effective in {"live", "completed"} else None,
-            "early_end_reason": getattr(row, "early_end_reason", None) if applies and effective == "completed" else None,
-            "attendance_marked": bool(getattr(row, "attendance_marked", False)) and applies and effective == "completed",
+            "session_report": occ_fields.get("session_report") if use_occ else None,
+            "covered_topic_ids": list(occ_fields.get("covered_topic_ids") or []) if use_occ else [],
+            "attachment_url": occ_fields.get("attachment_url") if use_occ else None,
+            "attachment_filename": occ_fields.get("attachment_filename") if use_occ else None,
+            "late_start_reason": (
+                occ_fields.get("late_start_reason")
+                if (applies and effective in {"live", "completed"}) or show_historical
+                else None
+            ),
+            "early_end_reason": occ_fields.get("early_end_reason") if use_occ else None,
+            "attendance_marked": (
+                (bool(getattr(row, "attendance_marked", False)) and applies and effective == "completed")
+                or show_historical
+            ),
         }
     )
 

@@ -60,9 +60,9 @@ from app.shared.routers import (
 )
 from app.modules.jobs_portal.routers import (
     ai_coach, ai_coach_live_ws, ai_interview, analytics, applications, assessment, blog_public, career_enquiry,
-    career_roadmap, company_internships, dashboard, external_candidate, industrial_visit, interviews, interview_scheduling,
+    career_roadmap, company_internships, company_profile, dashboard, external_candidate, industrial_visit, interviews, interview_scheduling,
     jobs, job_fair, master, matches, onboarding, portfolio, resumes, resume_builder,
-    roadmap, saved_jobs, scholarships
+    roadmap, saved_jobs, scholarships, site_announcement
 )
 from app.modules.training_portal.routers import (
     google_calendar, training_courses, training_portal_categories,
@@ -112,6 +112,8 @@ routers = [
     help_desk_bot.router,
     career_enquiry.public_router,
     career_enquiry.admin_router,
+    site_announcement.public_router,
+    site_announcement.admin_router,
     industrial_visit.public_router,
     industrial_visit.admin_router,
     job_fair.router,
@@ -119,6 +121,7 @@ routers = [
     blog_admin.router,
     blog_public.router,
     company_internships.router,
+    company_profile.router,
     training_courses.router,
     training_portal_courses.router,
     training_portal_free_courses.router,

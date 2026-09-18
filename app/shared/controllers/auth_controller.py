@@ -375,6 +375,18 @@ async def login(
                     },
                 )
 
+        # Block supervisors from using the main login endpoint
+        user_role_str = user.role.value if hasattr(user.role, "value") else str(user.role or "")
+        if user_role_str == "supervisor":
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "general": "Supervisor accounts must sign in at the Supervisor Portal.",
+                    "redirect": "/supervisor/login",
+                    "role": "supervisor",
+                },
+            )
+
         if not user.hashed_password:
             raise HTTPException(
                 status_code=400,

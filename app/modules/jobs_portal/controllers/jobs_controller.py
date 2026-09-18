@@ -2,8 +2,8 @@ from datetime import datetime
 from typing import List, Optional
 from fastapi import BackgroundTasks, HTTPException
 from sqlalchemy import select
-
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
 from app.modules.jobs_portal.models.job import JobPosting, JobType
@@ -210,11 +210,19 @@ async def get_distinct_industries(db: AsyncSession) -> List[str]:
 
 
 async def get_job(job_id: str, user: User, db: AsyncSession) -> JobOut:
-    result = await db.execute(select(JobPosting).where(JobPosting.id == job_id))
+    result = await db.execute(
+        select(JobPosting)
+        .options(selectinload(JobPosting.provider).selectinload(User.company_gallery_images))
+        .where(JobPosting.id == job_id)
+    )
     job = result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    return JobOut.model_validate(job)
+    from app.modules.jobs_portal.services.company_profile_service import public_company_payload
+
+    payload = JobOut.model_validate(job).model_dump()
+    payload.update(public_company_payload(job.provider))
+    return JobOut.model_validate(payload)
 
 
 async def update_job_patch(

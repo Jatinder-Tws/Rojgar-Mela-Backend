@@ -160,6 +160,27 @@ async def update_settings(
             pass
     if body.company_size is not None:
         user.company_size = body.company_size or None
+    if body.company_website is not None:
+        website = (body.company_website or "").strip()
+        if website and not website.lower().startswith(("http://", "https://")):
+            website = f"https://{website}"
+        user.company_website = website or None
+    if body.company_about is not None:
+        user.company_about = (body.company_about or "").strip()[:4000] or None
+    if body.company_rating is not None:
+        user.company_rating = body.company_rating
+        if not user.company_rating_source:
+            user.company_rating_source = "manual"
+    if body.company_review_count is not None:
+        user.company_review_count = body.company_review_count
+    if body.company_reviews is not None:
+        user.company_reviews = body.company_reviews
+    if body.company_rating_source is not None:
+        user.company_rating_source = body.company_rating_source or None
+    if body.google_place_id is not None:
+        user.google_place_id = body.google_place_id or None
+    if body.google_maps_url is not None:
+        user.google_maps_url = body.google_maps_url or None
     if body.preferred_locations is not None:
         user.preferred_locations = body.preferred_locations[:5]
     if body.job_type is not None:

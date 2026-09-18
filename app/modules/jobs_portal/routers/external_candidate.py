@@ -385,7 +385,7 @@ async def get_public_job_detail(job_id: str, db: AsyncSession = Depends(get_db))
     """
     result = await db.execute(
         select(JobPosting)
-        .options(selectinload(JobPosting.provider))
+        .options(selectinload(JobPosting.provider).selectinload(User.company_gallery_images))
         .filter(JobPosting.id == job_id, JobPosting.is_active == True)
     )
     job = result.scalar_one_or_none()

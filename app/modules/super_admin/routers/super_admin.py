@@ -3,7 +3,7 @@ Super admin router – route definitions only.
 Business logic lives in controllers/super_admin_controller.py
 """
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,6 +38,7 @@ from app.modules.super_admin.controllers.super_admin_controller import (
     dashboard_analytics as ctrl_dashboard_analytics,
     get_import_job_status as ctrl_import_job_status,
     list_seekers as ctrl_list_seekers,
+    list_seeker_industries as ctrl_list_seeker_industries,
     create_seeker as ctrl_create_seeker,
     get_seeker as ctrl_get_seeker,
     get_seeker_detail as ctrl_get_seeker_detail,
@@ -211,6 +212,14 @@ async def list_seekers(
     status: Optional[str] = Query(None), job_fair_id: Optional[str] = Query(None),
 ):
     return await ctrl_list_seekers(db, page, page_size, search, industry, status, job_fair_id)
+
+
+@router.get("/seekers/industries", response_model=List[str])
+async def list_seeker_industries(
+    admin: User = Depends(require_super_admin_or_permission("job_seekers")),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_list_seeker_industries(db)
 
 
 @router.post("/seekers", response_model=AdminUserOut, status_code=201)

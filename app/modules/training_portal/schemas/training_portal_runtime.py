@@ -292,12 +292,15 @@ class PortalAttendanceEntry(BaseModel):
 class PortalClassSessionComplete(BaseModel):
     attendance: list[PortalAttendanceEntry]
     session_report: Optional[str] = None
-    covered_topic_ids: list[str] = Field(default_factory=list)
+    # None = do not change batch.covered_topics (e.g. no curriculum UI).
+    # list (including empty) = authoritative covered set after this class.
+    covered_topic_ids: Optional[list[str]] = None
     early_end_reason: Optional[str] = None
 
 
 class PortalSessionReportUpdate(BaseModel):
     session_report: str = ""
+    occurrence_date: Optional[str] = None
 
 
 class PortalAttendanceRecordOut(BaseModel):

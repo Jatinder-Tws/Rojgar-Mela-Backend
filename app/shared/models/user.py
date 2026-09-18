@@ -76,6 +76,14 @@ class User(Base):
     company_location = Column(String(200), nullable=True)
     company_address = Column(String(500), nullable=True)
     company_size = Column(String(50), nullable=True)
+    company_website = Column(String(500), nullable=True)
+    company_about = Column(Text, nullable=True)
+    company_rating = Column(Float, nullable=True)
+    company_review_count = Column(Integer, nullable=True)
+    company_reviews = Column(JSON, nullable=True)
+    company_rating_source = Column(String(20), nullable=True)  # google | manual
+    google_place_id = Column(String(128), nullable=True)
+    google_maps_url = Column(Text, nullable=True)
 
     # Excel Import New Fields
     father_or_mother_name = Column(String(200), nullable=True)
@@ -121,6 +129,11 @@ class User(Base):
     )
     job_postings = relationship(
         "JobPosting", back_populates="provider", cascade="all, delete-orphan"
+    )
+    company_gallery_images = relationship(
+        "CompanyGalleryImage",
+        back_populates="provider",
+        cascade="all, delete-orphan",
     )
     applications = relationship(
         "Application",
@@ -186,4 +199,5 @@ class User(Base):
 # Ensure relationship targets are registered in SQLAlchemy mapper
 import app.shared.models.user_credit  # noqa: F401
 import app.shared.models.supervisor_profile  # noqa: F401
+import app.modules.jobs_portal.models.company_gallery  # noqa: F401
 

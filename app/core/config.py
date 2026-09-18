@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     # Google Gemini
     GOOGLE_API_KEY: str = ""
 
+    # Google Places / Maps (optional company autofill). Do not reuse GOOGLE_API_KEY.
+    GOOGLE_PLACES_API_KEY: str = ""
+    GOOGLE_MAPS_API_KEY: str = ""
+
     # YouTube Data API v3 — free-course playlist import (optional; yt-dlp is fallback)
     YOUTUBE_API_KEY: str = ""
     GEMINI_EMBEDDING_MODEL: str = "gemini-embedding-001"
@@ -126,6 +130,13 @@ class Settings(BaseSettings):
 
     def google_calendar_oauth_configured(self) -> bool:
         return bool(self.GOOGLE_CALENDAR_CLIENT_ID and self.GOOGLE_CALENDAR_CLIENT_SECRET)
+
+    @property
+    def google_places_api_key(self) -> str:
+        return (self.GOOGLE_PLACES_API_KEY or self.GOOGLE_MAPS_API_KEY or "").strip()
+
+    def google_places_configured(self) -> bool:
+        return bool(self.google_places_api_key)
 
 
 @lru_cache()

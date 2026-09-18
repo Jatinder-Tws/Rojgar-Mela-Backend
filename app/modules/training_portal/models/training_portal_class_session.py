@@ -33,6 +33,8 @@ class TrainingPortalClassSession(Base):
     started_at = Column(DateTime, nullable=True)
     ended_at = Column(DateTime, nullable=True)
     session_report = Column(Text, nullable=True)
+    # Per-occurrence notes/topics/attachments: { "YYYY-MM-DD": { session_report, covered_topic_ids, ... } }
+    occurrence_reports = Column(JSON, nullable=False, default=dict)
     covered_topic_ids = Column(JSON, nullable=False, default=list)
     attachment_url = Column(String(500), nullable=True)
     attachment_filename = Column(String(255), nullable=True)

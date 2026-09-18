@@ -2501,6 +2501,16 @@ async def upload_class_session_attachment(
     session.attachment_url = f"/uploads/training_portal_class_session_attachments/{safe_name}"
     session.attachment_filename = file.filename or safe_name
     session.updated_at = datetime.utcnow()
+    occ = (session.live_occurrence_date or "").strip()
+    if occ:
+        from app.modules.training_portal.services.occurrence_reports import upsert_occurrence_fields
+
+        upsert_occurrence_fields(
+            session,
+            occ,
+            attachment_url=session.attachment_url,
+            attachment_filename=session.attachment_filename,
+        )
     await db.commit()
     return session_to_out(session)
 
@@ -2521,6 +2531,16 @@ async def delete_class_session_attachment(
     session.attachment_url = None
     session.attachment_filename = None
     session.updated_at = datetime.utcnow()
+    occ = (session.live_occurrence_date or "").strip()
+    if occ:
+        from app.modules.training_portal.services.occurrence_reports import upsert_occurrence_fields
+
+        upsert_occurrence_fields(
+            session,
+            occ,
+            attachment_url=None,
+            attachment_filename=None,
+        )
     await db.commit()
     return session_to_out(session)
 
@@ -2651,6 +2671,9 @@ async def start_class_session(
         session.late_start_reason = None
 
     if not session_live_applies_to_date(session, today):
+        from app.modules.training_portal.services.occurrence_reports import archive_current_occurrence
+
+        archive_current_occurrence(session, getattr(session, "live_occurrence_date", None))
         session.early_end_reason = None
         session.session_report = None
         session.covered_topic_ids = []
@@ -2843,17 +2866,36 @@ async def complete_class_session(
                 )
             )
 
+    from app.modules.training_portal.services.occurrence_reports import upsert_occurrence_fields
+
     session.live_status = "completed"
     session.live_occurrence_date = occurrence_date
     session.ended_at = now
     session.attendance_marked = True
-    session.session_report = (body.session_report or "").strip() or None
-    session.covered_topic_ids = list(body.covered_topic_ids or [])
+    report_text = (body.session_report or "").strip() or None
+    selected_topics = (
+        list(dict.fromkeys(body.covered_topic_ids))
+        if body.covered_topic_ids is not None
+        else list(session.covered_topic_ids or [])
+    )
+    session.session_report = report_text
+    if body.covered_topic_ids is not None:
+        session.covered_topic_ids = selected_topics
     session.updated_at = now
+    upsert_occurrence_fields(
+        session,
+        occurrence_date,
+        session_report=session.session_report,
+        covered_topic_ids=list(session.covered_topic_ids or []),
+        attachment_url=session.attachment_url,
+        attachment_filename=session.attachment_filename,
+        late_start_reason=session.late_start_reason,
+        early_end_reason=session.early_end_reason,
+    )
 
-    if batch and body.covered_topic_ids:
-        merged = list(dict.fromkeys([*(batch.covered_topics or []), *body.covered_topic_ids]))
-        batch.covered_topics = merged
+    if batch and body.covered_topic_ids is not None:
+        # Authoritative covered set from end-class UI (supports unchecking previously covered topics).
+        batch.covered_topics = selected_topics
         batch.updated_at = datetime.utcnow()
         await _recalculate_batch_progress(db, batch)
     elif batch:
@@ -2896,6 +2938,8 @@ async def update_class_session_report(
     db: AsyncSession = Depends(get_db),
 ):
     """Allow teachers/admins to add or edit class notes/MOM after attendance is marked."""
+    from app.modules.training_portal.services.occurrence_reports import upsert_occurrence_fields
+
     result = await db.execute(
         select(TrainingPortalClassSession).where(TrainingPortalClassSession.id == session_id)
     )
@@ -2910,20 +2954,46 @@ async def update_class_session_report(
         if not session.batch_id or session.batch_id not in teacher_batch_ids:
             raise HTTPException(status_code=403, detail="You can only edit notes for your own classes")
 
-    status_val = (session.live_status or "").strip().lower()
-    if status_val != "completed" and not bool(session.attendance_marked):
+    occurrence_date = (body.occurrence_date or "").strip() or (session.live_occurrence_date or "").strip()
+    if not occurrence_date:
+        raise HTTPException(
+            status_code=400,
+            detail="occurrence_date is required to edit class notes for a specific class date",
+        )
+
+    # Allow edits for any date that has attendance records, or the latest completed occurrence.
+    att_count_result = await db.execute(
+        select(func.count()).select_from(TrainingPortalAttendanceRecord).where(
+            TrainingPortalAttendanceRecord.class_session_id == session.id,
+            TrainingPortalAttendanceRecord.occurrence_date == occurrence_date,
+        )
+    )
+    has_attendance = int(att_count_result.scalar() or 0) > 0
+    is_latest_completed = (
+        (session.live_status or "").strip().lower() == "completed"
+        and (session.live_occurrence_date or "").strip() == occurrence_date
+        and bool(session.attendance_marked)
+    )
+    if not has_attendance and not is_latest_completed:
         raise HTTPException(
             status_code=400,
             detail="Class notes can be edited after the class is completed and attendance is marked",
         )
 
-    session.session_report = (body.session_report or "").strip() or None
+    report_text = (body.session_report or "").strip() or None
+    upsert_occurrence_fields(session, occurrence_date, session_report=report_text)
+    if (session.live_occurrence_date or "").strip() == occurrence_date:
+        session.session_report = report_text
     session.updated_at = datetime.utcnow()
     await db.commit()
 
     today = today_ist()
     now = now_ist()
-    return session_to_out_for_date(session, today, now)
+    try:
+        target = date.fromisoformat(occurrence_date)
+    except ValueError:
+        target = today
+    return session_to_out_for_date(session, target, now)
 
 
 # ── Attendance records ────────────────────────────────────────────────────────
@@ -2975,33 +3045,39 @@ async def list_attendance_records(
     elif is_student:
         query = query.where(TrainingPortalAttendanceRecord.candidate_email == user_email)
 
+    from app.modules.training_portal.services.occurrence_reports import get_occurrence_fields
+
     result = await db.execute(query)
     rows = result.all()
-    return [
-        PortalAttendanceRecordOut(
-            id=record.id,
-            class_session_id=record.class_session_id,
-            enrollment_id=record.enrollment_id,
-            batch_id=record.batch_id,
-            candidate_email=record.candidate_email,
-            candidate_name=record.candidate_name,
-            status=record.status,
-            marked_at=record.marked_at,
-            session_title=session.title,
-            session_date=(record.occurrence_date or None) or session.date,
-            session_start_time=session.start_time,
-            session_end_time=session.end_time,
-            session_report=session.session_report,
-            covered_topic_ids=session.covered_topic_ids or [],
-            attachment_url=session.attachment_url,
-            attachment_filename=session.attachment_filename,
-            late_start_reason=session.late_start_reason,
-            early_end_reason=session.early_end_reason,
-            instructor_name=session.instructor_name,
-            occurrence_date=record.occurrence_date or None,
+    out_rows: list[PortalAttendanceRecordOut] = []
+    for record, session in rows:
+        occ = (record.occurrence_date or None) or None
+        occ_fields = get_occurrence_fields(session, occ)
+        out_rows.append(
+            PortalAttendanceRecordOut(
+                id=record.id,
+                class_session_id=record.class_session_id,
+                enrollment_id=record.enrollment_id,
+                batch_id=record.batch_id,
+                candidate_email=record.candidate_email,
+                candidate_name=record.candidate_name,
+                status=record.status,
+                marked_at=record.marked_at,
+                session_title=session.title,
+                session_date=occ or session.date,
+                session_start_time=session.start_time,
+                session_end_time=session.end_time,
+                session_report=occ_fields.get("session_report"),
+                covered_topic_ids=list(occ_fields.get("covered_topic_ids") or []),
+                attachment_url=occ_fields.get("attachment_url"),
+                attachment_filename=occ_fields.get("attachment_filename"),
+                late_start_reason=occ_fields.get("late_start_reason"),
+                early_end_reason=occ_fields.get("early_end_reason"),
+                instructor_name=session.instructor_name,
+                occurrence_date=occ,
+            )
         )
-        for record, session in rows
-    ]
+    return out_rows
 
 
 # ── Leave requests ────────────────────────────────────────────────────────────

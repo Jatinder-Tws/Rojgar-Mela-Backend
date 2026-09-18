@@ -287,8 +287,21 @@ async def auto_end_live_session(
         session.session_report = "Class ended automatically after scheduled duration."
     session.updated_at = datetime.utcnow()
 
+    from app.modules.training_portal.services.occurrence_reports import upsert_occurrence_fields
+
+    occurrence = occurrence_date.isoformat()
+    upsert_occurrence_fields(
+        session,
+        occurrence,
+        session_report=session.session_report,
+        covered_topic_ids=list(session.covered_topic_ids or []),
+        attachment_url=session.attachment_url,
+        attachment_filename=session.attachment_filename,
+        late_start_reason=session.late_start_reason,
+        early_end_reason=session.early_end_reason,
+    )
+
     if batch:
-        occurrence = occurrence_date.isoformat()
         enrollments_result = await db.execute(
             select(TrainingPortalEnrollment).where(
                 TrainingPortalEnrollment.batch_id == batch.id,

@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.modules.jobs_portal.models.job import JobPosting, JobType
+from app.modules.jobs_portal.services.company_profile_service import public_company_payload
 
 
 def serialize_public_job(job: JobPosting) -> dict[str, Any]:
@@ -18,8 +19,8 @@ def serialize_public_job(job: JobPosting) -> dict[str, Any]:
     return {
         "id": job.id,
         "title": job.title,
-        "company": job.posted_by_name
-        or (provider.company_name if provider else None)
+        "company": (provider.company_name if provider else None)
+        or job.posted_by_name
         or "Hiring Company",
         "location": job.location,
         "salary_range": job.salary_range,
@@ -30,6 +31,10 @@ def serialize_public_job(job: JobPosting) -> dict[str, Any]:
         "shift": job.shift,
         "post_count": job.post_count or 0,
         "posted_at": job.created_at,
+        "company_logo_url": provider.profile_pic_url if provider else None,
+        "company_rating": provider.company_rating if provider else None,
+        "company_review_count": provider.company_review_count if provider else None,
+        "company_website": provider.company_website if provider else None,
     }
 
 
@@ -43,7 +48,7 @@ def serialize_public_job_detail(job: JobPosting) -> dict[str, Any]:
             "perks": job.perks or [],
             "company_address": provider.company_address if provider else None,
             "company_location": provider.company_location if provider else None,
-            "posted_by_name": job.posted_by_name,
+            **public_company_payload(provider),
         }
     )
     return base

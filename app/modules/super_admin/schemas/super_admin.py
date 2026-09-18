@@ -97,6 +97,7 @@ class AdminUserOut(BaseModel):
     is_verified: bool
     onboarding_complete: bool
     industry: Optional[str] = None
+    industries: List[str] = Field(default_factory=list)
     job_role: Optional[str] = None
     job_type: Optional[str] = None
     salary_range: Optional[str] = None

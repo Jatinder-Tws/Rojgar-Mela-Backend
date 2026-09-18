@@ -4,6 +4,7 @@ Super Admin controller – business logic from routers/super_admin.py
 import asyncio
 import csv
 import io
+import re
 from datetime import datetime, timedelta
 from typing import Optional, List, Tuple
 
@@ -55,6 +56,73 @@ from app.modules.jobs_portal.services.portfolio_service import (
 from app.modules.super_admin.services.super_admin_utils import normalize_phone as _normalize_phone, temp_password as _temp_password
 
 
+_INDUSTRY_SPLIT = re.compile(r"[,;/|]+")
+_INDUSTRY_ALIAS_GROUPS = (
+    ("information technology", "it", "it & software", "it/software", "it and software"),
+    ("automotive", "automobile"),
+    ("e-commerce", "ecommerce", "e commerce"),
+)
+
+
+def _parse_industries(*values: Optional[str]) -> List[str]:
+    seen: set[str] = set()
+    out: List[str] = []
+    for value in values:
+        if not value or not str(value).strip():
+            continue
+        for part in _INDUSTRY_SPLIT.split(str(value)):
+            name = part.strip()
+            if not name:
+                continue
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(name)
+    return out
+
+
+def _expand_industry_terms(industry: str) -> List[str]:
+    raw = industry.strip()
+    if not raw:
+        return []
+    lower = raw.lower()
+    terms = [raw]
+    for group in _INDUSTRY_ALIAS_GROUPS:
+        if lower in group:
+            terms.extend(group)
+            break
+    unique: List[str] = []
+    seen: set[str] = set()
+    for term in terms:
+        key = term.strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique.append(term.strip())
+    return unique
+
+
+def _column_matches_industry_term(column, term: str):
+    escaped = re.escape(term.strip())
+    if not escaped:
+        return None
+    pattern = rf"(^|[,;/|]\s*){escaped}(\s*[,;/]|$)"
+    return column.op("~*")(pattern)
+
+
+def _seeker_industry_clause(industry: Optional[str]):
+    if not industry or not industry.strip() or industry.strip().lower() == "all":
+        return None
+    clauses = []
+    for term in _expand_industry_terms(industry):
+        for column in (User.industry, User.preferred_job_sector):
+            match = _column_matches_industry_term(column, term)
+            if match is not None:
+                clauses.append(match)
+    return or_(*clauses) if clauses else None
+
+
 def _build_user_search_filter(search: str, include_company: bool = False):
     term = f"%{search.strip()}%"
     full_name_expr = func.concat(func.coalesce(User.first_name, ""), " ", func.coalesce(User.last_name, ""))
@@ -78,11 +146,15 @@ def _user_to_admin_out(
     job_type = user.job_type.value if user.job_type and hasattr(user.job_type, "value") else user.job_type
     company_type = user.company_type.value if user.company_type and hasattr(user.company_type, "value") else user.company_type
     resolved_last_active = last_active_at if last_active_at is not None else getattr(user, "last_login_at", None)
+    industries = _parse_industries(user.industry, getattr(user, "preferred_job_sector", None))
     return AdminUserOut(
         id=user.id, first_name=user.first_name, last_name=user.last_name, email=user.email,
         profile_pic_url=user.profile_pic_url, phone=user.phone, role=role_label,
         has_password=bool(user.hashed_password), is_verified=user.is_verified,
-        onboarding_complete=user.onboarding_complete, industry=user.industry, job_role=user.job_role,
+        onboarding_complete=user.onboarding_complete,
+        industry=user.industry or (industries[0] if industries else None),
+        industries=industries,
+        job_role=user.job_role,
         job_type=job_type, salary_range=user.salary_range, experience=user.experience,
         company_name=user.company_name, company_type=company_type, company_location=user.company_location,
         company_size=user.company_size, profile_completion_percentage=profile_completion_percentage,
@@ -609,8 +681,9 @@ async def list_seekers(
 ) -> AdminUserListResponse:
     from app.modules.jobs_portal.models.job_fair import JobFairSeeker
     seeker_filters = [User.role == UserRole.seeker, User.is_super_admin.is_(False)]
-    if industry:
-        seeker_filters.append(User.industry.ilike(f"%{industry.strip()}%"))
+    industry_clause = _seeker_industry_clause(industry)
+    if industry_clause is not None:
+        seeker_filters.append(industry_clause)
     if search:
         seeker_filters.append(_build_user_search_filter(search.strip()))
 
@@ -658,6 +731,34 @@ async def list_seekers(
             )
         )
     return AdminUserListResponse(items=items, total=total or 0, page=page, page_size=page_size)
+
+
+async def list_seeker_industries(db: AsyncSession) -> List[str]:
+    """Distinct industries for the seekers filter dropdown, including master options."""
+    from app.shared.models.master import MasterIndustry
+
+    seen: dict[str, str] = {}
+
+    master_rows = await db.execute(select(MasterIndustry.name).order_by(MasterIndustry.name))
+    for name in master_rows.scalars().all():
+        for parsed in _parse_industries(name):
+            seen.setdefault(parsed.lower(), parsed)
+
+    seeker_rows = await db.execute(
+        select(User.industry, User.preferred_job_sector).where(
+            User.role == UserRole.seeker,
+            User.is_super_admin.is_(False),
+            or_(
+                and_(User.industry.isnot(None), func.trim(User.industry) != ""),
+                and_(User.preferred_job_sector.isnot(None), func.trim(User.preferred_job_sector) != ""),
+            ),
+        )
+    )
+    for industry, sector in seeker_rows.all():
+        for parsed in _parse_industries(industry, sector):
+            seen.setdefault(parsed.lower(), parsed)
+
+    return sorted(seen.values(), key=str.lower)
 
 
 async def create_seeker(body: AdminSeekerCreate, db: AsyncSession) -> AdminUserOut:
@@ -1113,6 +1214,10 @@ def _format_export_value(key: str, user: AdminUserOut) -> str:
     data = user.model_dump()
     if key == "status":
         return "Active" if user.is_verified else "Inactive"
+    if key == "industry":
+        if user.industries:
+            return ", ".join(user.industries)
+        return user.industry or ""
     if key == "profile_completion_percentage":
         pct = data.get("profile_completion_percentage")
         if pct is None:
@@ -1193,8 +1298,9 @@ async def export_seekers(body: AdminUserExportRequest, db: AsyncSession) -> Stre
 
     from app.modules.jobs_portal.models.job_fair import JobFairSeeker
     seeker_filters = [User.role == UserRole.seeker, User.is_super_admin.is_(False)]
-    if body.industry:
-        seeker_filters.append(User.industry.ilike(f"%{body.industry.strip()}%"))
+    industry_clause = _seeker_industry_clause(body.industry)
+    if industry_clause is not None:
+        seeker_filters.append(industry_clause)
     if body.search:
         seeker_filters.append(_build_user_search_filter(body.search.strip()))
 

@@ -312,6 +312,14 @@ class UserOut(BaseModel):
     profile_pic_url: Optional[str] = None
     experience: Optional[str] = None
     company_size: Optional[str] = None
+    company_website: Optional[str] = None
+    company_about: Optional[str] = None
+    company_rating: Optional[float] = None
+    company_review_count: Optional[int] = None
+    company_reviews: Optional[list] = None
+    company_rating_source: Optional[str] = None
+    google_place_id: Optional[str] = None
+    google_maps_url: Optional[str] = None
     is_first_login: bool = True
     permissions: Optional[List[str]] = None
     created_at: datetime
@@ -360,6 +368,14 @@ class UpdateSettingsRequest(BaseModel):
     company_location: Optional[str] = None
     company_address: Optional[str] = None
     company_size: Optional[str] = None
+    company_website: Optional[str] = None
+    company_about: Optional[str] = None
+    company_rating: Optional[float] = None
+    company_review_count: Optional[int] = None
+    company_reviews: Optional[list] = None
+    company_rating_source: Optional[str] = None
+    google_place_id: Optional[str] = None
+    google_maps_url: Optional[str] = None
     preferred_locations: Optional[List[str]] = None
 
     @field_validator("phone")

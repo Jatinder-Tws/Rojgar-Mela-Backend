@@ -166,6 +166,19 @@ class JobOut(BaseModel):
     shift: Optional[str] = None
     employment_type: Optional[str] = None
     perks: Optional[List[str]] = []
+    company_name: Optional[str] = None
+    company_website: Optional[str] = None
+    company_about: Optional[str] = None
+    company_size: Optional[str] = None
+    company_address: Optional[str] = None
+    company_location: Optional[str] = None
+    company_rating: Optional[float] = None
+    company_review_count: Optional[int] = None
+    company_reviews: Optional[List[dict]] = None
+    company_rating_source: Optional[str] = None
+    google_maps_url: Optional[str] = None
+    company_logo_url: Optional[str] = None
+    company_gallery: Optional[List[dict]] = None
 
     @field_validator("perks", "required_skills", mode="before")
     @classmethod
