@@ -5,3 +5,7 @@ from app.modules.super_admin.models.email_template import EmailTemplate  # noqa:
 from app.modules.super_admin.models.platform_feedback import PlatformFeedback  # noqa: F401
 from app.modules.super_admin.models.support_ticket import SupportTicket, TicketMessage  # noqa: F401
 from app.modules.super_admin.models.blog_post import BlogPost  # noqa: F401
+from app.modules.super_admin.models.college_models import (  # noqa: F401
+    College, CollegeCourse, CollegeSpecialization, CollegeApproval,
+    CollegeEmiLoan, CollegeAdmissionExam, CollegePlacementPartner, CollegeFaculty
+)
