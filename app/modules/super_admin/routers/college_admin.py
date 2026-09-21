@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, File, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.dependencies import require_super_admin, require_super_admin_or_supervisor
+from app.core.dependencies import require_super_admin_or_permission
 from app.modules.super_admin.controllers.college_controller import (
     create_college_ctrl, delete_college_ctrl, get_college_detail_ctrl,
     import_colleges_file_ctrl, list_colleges_ctrl, update_college_ctrl
@@ -27,7 +27,7 @@ async def list_colleges(
     type: Optional[str] = Query(None),
     is_active: Optional[bool] = Query(None),
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_super_admin_or_supervisor),
+    admin: User = Depends(require_super_admin_or_permission("colleges_view", "colleges_manage", "colleges_courses", "colleges_accreditation")),
 ):
     """List colleges with filtering, search and pagination."""
     return await list_colleges_ctrl(
@@ -46,7 +46,7 @@ async def list_colleges(
 async def get_college_detail(
     id_or_slug: str,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_super_admin_or_supervisor),
+    admin: User = Depends(require_super_admin_or_permission("colleges_view", "colleges_manage", "colleges_courses", "colleges_accreditation")),
 ):
     """Retrieve full details of a college/university."""
     return await get_college_detail_ctrl(db, id_or_slug)
@@ -56,7 +56,7 @@ async def get_college_detail(
 async def create_college(
     payload: CollegeCreate,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_super_admin),
+    admin: User = Depends(require_super_admin_or_permission("colleges_manage")),
 ):
     """Create a new college/university record with sub-sections."""
     return await create_college_ctrl(db, payload)
@@ -67,7 +67,7 @@ async def update_college(
     college_id: str,
     payload: CollegeUpdate,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_super_admin),
+    admin: User = Depends(require_super_admin_or_permission("colleges_manage", "colleges_courses", "colleges_accreditation")),
 ):
     """Update college details, courses, approvals, or EMI plans."""
     return await update_college_ctrl(db, college_id, payload)
@@ -77,7 +77,7 @@ async def update_college(
 async def delete_college(
     college_id: str,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_super_admin),
+    admin: User = Depends(require_super_admin_or_permission("colleges_manage")),
 ):
     """Delete a college and all cascade-related data."""
     return await delete_college_ctrl(db, college_id)
@@ -87,7 +87,7 @@ async def delete_college(
 async def import_colleges_file(
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_super_admin),
+    admin: User = Depends(require_super_admin_or_permission("colleges_manage")),
 ):
     """Bulk import / update colleges from multi-sheet Excel or CSV file without duplicates."""
     return await import_colleges_file_ctrl(db, file)

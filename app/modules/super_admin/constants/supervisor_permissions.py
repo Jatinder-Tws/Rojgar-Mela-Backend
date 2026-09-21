@@ -148,6 +148,36 @@ SUPERVISOR_PERMISSIONS: List[PermissionDefinition] = [
         "platform": "job_portal",
     },
 
+    # Colleges & Universities
+    {
+        "key": "colleges_view",
+        "label": "View Colleges",
+        "description": "Search, browse, and view all university and college profiles, courses, and fee structures",
+        "category": "Colleges & Universities",
+        "platform": "job_portal",
+    },
+    {
+        "key": "colleges_manage",
+        "label": "Manage Colleges",
+        "description": "Add, edit, publish, archive, and delete college and university listings on the platform",
+        "category": "Colleges & Universities",
+        "platform": "job_portal",
+    },
+    {
+        "key": "colleges_courses",
+        "label": "Courses & Fee Management",
+        "description": "Create and update course offerings, fee structures, EMI plans, and semester breakdowns",
+        "category": "Colleges & Universities",
+        "platform": "job_portal",
+    },
+    {
+        "key": "colleges_accreditation",
+        "label": "Rankings & Accreditation",
+        "description": "Manage NAAC grades, NIRF rankings, UGC-DEB status, AICTE, QS, and WES recognition data",
+        "category": "Colleges & Universities",
+        "platform": "job_portal",
+    },
+
     # Training Platform (Rojgar Mela Training)
     {
         "key": "training",
