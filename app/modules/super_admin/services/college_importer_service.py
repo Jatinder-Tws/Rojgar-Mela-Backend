@@ -4,6 +4,7 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 from sqlalchemy import select, func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.super_admin.models.college_models import (
@@ -13,6 +14,17 @@ from app.modules.super_admin.models.college_models import (
 from app.modules.super_admin.schemas.college_schemas import ExcelImportSummary
 
 logger = logging.getLogger(__name__)
+
+# Scraper/placeholder rows that are not real courses
+_SKIP_COURSE_NAMES = {
+    "only for course page creation",
+    "n/a",
+    "na",
+    "-",
+    "--",
+    "none",
+    "null",
+}
 
 
 def slugify(text: str) -> str:
@@ -125,14 +137,55 @@ async def import_colleges_excel(file_bytes: bytes, filename: str, db: AsyncSessi
             errors=[str(e)]
         )
 
-    # In-memory cache of colleges by lowercase name to avoid repeated DB lookups
+    # In-memory caches so same-batch duplicates never violate unique constraints
     colleges_cache: Dict[str, College] = {}
-    
-    # Pre-fetch existing colleges
+    # (college_id, course_name.lower()) -> CollegeCourse
+    courses_cache: Dict[Tuple[str, str], CollegeCourse] = {}
+    # (college_id, course_name.lower(), specialization_name.lower()) -> CollegeSpecialization
+    specs_cache: Dict[Tuple[str, str, str], CollegeSpecialization] = {}
+    # one-row-per-college side tables
+    approvals_cache: Dict[str, CollegeApproval] = {}
+    loans_cache: Dict[str, CollegeEmiLoan] = {}
+    admissions_cache: Dict[str, CollegeAdmissionExam] = {}
+    placements_cache: Dict[str, CollegePlacementPartner] = {}
+
+    # Pre-fetch existing colleges and related rows
     stmt = select(College)
     result = await db.execute(stmt)
     for col in result.scalars().all():
         colleges_cache[col.name.strip().lower()] = col
+
+    existing_courses = (await db.execute(select(CollegeCourse))).scalars().all()
+    for course in existing_courses:
+        courses_cache[(course.college_id, course.course_name.strip().lower())] = course
+
+    existing_specs = (await db.execute(select(CollegeSpecialization))).scalars().all()
+    for spec in existing_specs:
+        specs_cache[(
+            spec.college_id,
+            (spec.course_name or "").strip().lower(),
+            spec.specialization_name.strip().lower(),
+        )] = spec
+
+    for rec in (await db.execute(select(CollegeApproval))).scalars().all():
+        approvals_cache[rec.college_id] = rec
+    for rec in (await db.execute(select(CollegeEmiLoan))).scalars().all():
+        loans_cache[rec.college_id] = rec
+    for rec in (await db.execute(select(CollegeAdmissionExam))).scalars().all():
+        admissions_cache[rec.college_id] = rec
+    for rec in (await db.execute(select(CollegePlacementPartner))).scalars().all():
+        placements_cache[rec.college_id] = rec
+
+    def _is_valid_course_name(name: str) -> bool:
+        cleaned = name.strip().lower()
+        return bool(cleaned) and cleaned not in _SKIP_COURSE_NAMES
+
+    def _apply_fields(obj: Any, fields: Dict[str, Any], *, overwrite: bool = True) -> None:
+        for k, v in fields.items():
+            if v is None:
+                continue
+            if overwrite or not getattr(obj, k, None):
+                setattr(obj, k, v)
 
     async def get_or_create_college(name: str, **kwargs) -> Tuple[College, bool]:
         name_clean = name.strip()
@@ -140,11 +193,9 @@ async def import_colleges_excel(file_bytes: bytes, filename: str, db: AsyncSessi
         if name_key in colleges_cache:
             college = colleges_cache[name_key]
             # Update fields if provided
-            updated = False
             for k, v in kwargs.items():
                 if v is not None and not getattr(college, k, None):
                     setattr(college, k, v)
-                    updated = True
             return college, False
 
         # Create new
@@ -167,6 +218,167 @@ async def import_colleges_excel(file_bytes: bytes, filename: str, db: AsyncSessi
         colleges_cache[name_key] = college
         summary.colleges_created += 1
         return college, True
+
+    def _apply_course_fields(course: CollegeCourse, fields: Dict[str, Any], *, overwrite: bool = False) -> None:
+        _apply_fields(course, fields, overwrite=overwrite)
+
+    async def get_or_create_course(
+        college: College,
+        course_name: str,
+        *,
+        fields: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[Optional[CollegeCourse], bool]:
+        """Upsert a course using cache so duplicate rows in one import are safe."""
+        name_clean = course_name.strip()
+        if not _is_valid_course_name(name_clean):
+            return None, False
+
+        # Enforce DB column length early to avoid silent truncation collisions
+        name_clean = name_clean[:150]
+        key = (college.id, name_clean.lower())
+        fields = fields or {}
+
+        if key in courses_cache:
+            course = courses_cache[key]
+            _apply_course_fields(course, fields, overwrite=True)
+            return course, False
+
+        course = CollegeCourse(
+            college_id=college.id,
+            course_name=name_clean,
+            display_name=fields.get("display_name") or name_clean,
+            course_slug=fields.get("course_slug") or slugify(name_clean),
+            duration=fields.get("duration"),
+            duration_months=fields.get("duration_months"),
+            base_total_fee=fields.get("base_total_fee"),
+            base_per_semester_fee=fields.get("base_per_semester_fee"),
+            base_annual_fee=fields.get("base_annual_fee"),
+            one_time_fee=fields.get("one_time_fee"),
+            other_fees_breakdown=fields.get("other_fees_breakdown"),
+            est_monthly_emi=fields.get("est_monthly_emi"),
+            specializations_count=fields.get("specializations_count") or 0,
+            course_url=fields.get("course_url"),
+        )
+        db.add(course)
+        await db.flush()
+        courses_cache[key] = course
+        return course, True
+
+    async def get_or_create_specialization(
+        college: College,
+        course_name: str,
+        spec_name: str,
+        *,
+        course: Optional[CollegeCourse] = None,
+        fields: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[Optional[CollegeSpecialization], bool]:
+        course_clean = (course_name or "General").strip()[:150]
+        spec_clean = spec_name.strip()[:255]
+        if not course_clean or not spec_clean:
+            return None, False
+        if not _is_valid_course_name(course_clean) and course_clean.lower() != "general":
+            return None, False
+
+        key = (college.id, course_clean.lower(), spec_clean.lower())
+        fields = fields or {}
+
+        if key in specs_cache:
+            spec = specs_cache[key]
+            _apply_fields(spec, fields, overwrite=True)
+            if course and not spec.college_course_id:
+                spec.college_course_id = course.id
+            return spec, False
+
+        spec = CollegeSpecialization(
+            college_id=college.id,
+            college_course_id=course.id if course else None,
+            course_name=course_clean,
+            specialization_name=spec_clean,
+            specialization_slug=fields.get("specialization_slug") or slugify(spec_clean),
+            duration=fields.get("duration"),
+            duration_months=fields.get("duration_months"),
+            total_fee=fields.get("total_fee"),
+            per_semester_fee=fields.get("per_semester_fee"),
+            annual_fee=fields.get("annual_fee"),
+            one_time_fee=fields.get("one_time_fee"),
+            other_fees_breakdown=fields.get("other_fees_breakdown"),
+            est_monthly_emi=fields.get("est_monthly_emi"),
+            specialization_url=fields.get("specialization_url"),
+            admission_url=fields.get("admission_url"),
+        )
+        db.add(spec)
+        await db.flush()
+        specs_cache[key] = spec
+        return spec, True
+
+    async def upsert_approval(college: College, fields: Dict[str, Any]) -> CollegeApproval:
+        rec = approvals_cache.get(college.id)
+        if rec:
+            # Merge approvals lists when both exist
+            incoming = fields.get("approvals_list")
+            if incoming:
+                merged = list(dict.fromkeys([*(rec.approvals_list or []), *incoming]))
+                fields = {**fields, "approvals_list": merged, "total_approvals": fields.get("total_approvals") or len(merged)}
+            _apply_fields(rec, fields, overwrite=True)
+            return rec
+
+        rec = CollegeApproval(college_id=college.id, **{k: v for k, v in fields.items() if v is not None})
+        if rec.total_approvals is None and rec.approvals_list:
+            rec.total_approvals = len(rec.approvals_list)
+        db.add(rec)
+        await db.flush()
+        approvals_cache[college.id] = rec
+        return rec
+
+    async def upsert_loan(college: College, fields: Dict[str, Any]) -> CollegeEmiLoan:
+        rec = loans_cache.get(college.id)
+        if rec:
+            incoming_partners = fields.get("lending_partners")
+            if incoming_partners:
+                merged = list(dict.fromkeys([*(rec.lending_partners or []), *incoming_partners]))
+                fields = {**fields, "lending_partners": merged}
+            _apply_fields(rec, fields, overwrite=True)
+            return rec
+
+        rec = CollegeEmiLoan(college_id=college.id, **{k: v for k, v in fields.items() if v is not None})
+        db.add(rec)
+        await db.flush()
+        loans_cache[college.id] = rec
+        return rec
+
+    async def upsert_admission(college: College, fields: Dict[str, Any]) -> CollegeAdmissionExam:
+        rec = admissions_cache.get(college.id)
+        if rec:
+            _apply_fields(rec, fields, overwrite=True)
+            return rec
+
+        rec = CollegeAdmissionExam(college_id=college.id, **{k: v for k, v in fields.items() if v is not None})
+        db.add(rec)
+        await db.flush()
+        admissions_cache[college.id] = rec
+        return rec
+
+    async def upsert_placement(college: College, fields: Dict[str, Any]) -> CollegePlacementPartner:
+        rec = placements_cache.get(college.id)
+        if rec:
+            incoming = fields.get("hiring_companies")
+            if incoming:
+                merged = list(dict.fromkeys([*(rec.hiring_companies or []), *incoming]))
+                fields = {
+                    **fields,
+                    "hiring_companies": merged,
+                    "total_partners_listed": fields.get("total_partners_listed") or len(merged),
+                }
+            _apply_fields(rec, fields, overwrite=True)
+            return rec
+
+        rec = CollegePlacementPartner(college_id=college.id, **{k: v for k, v in fields.items() if v is not None})
+        if rec.total_partners_listed is None and rec.hiring_companies:
+            rec.total_partners_listed = len(rec.hiring_companies)
+        db.add(rec)
+        await db.flush()
+        placements_cache[college.id] = rec
+        return rec
 
     # -------------------------------------------------------------
     # 1. Process Colleges Overview sheet if present
@@ -266,46 +478,29 @@ async def import_colleges_excel(file_bytes: bytes, filename: str, db: AsyncSessi
                 specs_c = parse_numeric(row.get(cols_map.get("specializationscount")))
                 course_url = row.get(cols_map.get("courseurl"))
 
-                # Check if course exists for this college
-                stmt = select(CollegeCourse).where(
-                    CollegeCourse.college_id == college.id,
-                    func.lower(CollegeCourse.course_name) == course_name.lower()
+                course, created = await get_or_create_course(
+                    college,
+                    course_name,
+                    fields={
+                        "display_name": str(display_name).strip() if pd.notna(display_name) else course_name,
+                        "duration": str(dur).strip() if pd.notna(dur) else None,
+                        "duration_months": dur_m,
+                        "base_total_fee": total_fee,
+                        "base_per_semester_fee": sem_fee,
+                        "base_annual_fee": ann_fee,
+                        "one_time_fee": one_time,
+                        "other_fees_breakdown": str(other_fees).strip() if pd.notna(other_fees) else None,
+                        "est_monthly_emi": emi,
+                        "specializations_count": int(specs_c) if specs_c else None,
+                        "course_url": str(course_url).strip() if pd.notna(course_url) else None,
+                    },
                 )
-                res = await db.execute(stmt)
-                course = res.scalar_one_or_none()
-
-                if course:
-                    course.display_name = str(display_name).strip() if pd.notna(display_name) else course.display_name
-                    course.duration = str(dur).strip() if pd.notna(dur) else course.duration
-                    course.duration_months = dur_m or course.duration_months
-                    course.base_total_fee = total_fee or course.base_total_fee
-                    course.base_per_semester_fee = sem_fee or course.base_per_semester_fee
-                    course.base_annual_fee = ann_fee or course.base_annual_fee
-                    course.one_time_fee = one_time or course.one_time_fee
-                    course.other_fees_breakdown = str(other_fees).strip() if pd.notna(other_fees) else course.other_fees_breakdown
-                    course.est_monthly_emi = emi or course.est_monthly_emi
-                    course.specializations_count = int(specs_c) if specs_c else course.specializations_count
-                    course.course_url = str(course_url).strip() if pd.notna(course_url) else course.course_url
-                    summary.courses_updated += 1
-                else:
-                    course = CollegeCourse(
-                        college_id=college.id,
-                        course_name=course_name,
-                        display_name=str(display_name).strip() if pd.notna(display_name) else course_name,
-                        course_slug=slugify(course_name),
-                        duration=str(dur).strip() if pd.notna(dur) else None,
-                        duration_months=dur_m,
-                        base_total_fee=total_fee,
-                        base_per_semester_fee=sem_fee,
-                        base_annual_fee=ann_fee,
-                        one_time_fee=one_time,
-                        other_fees_breakdown=str(other_fees).strip() if pd.notna(other_fees) else None,
-                        est_monthly_emi=emi,
-                        specializations_count=int(specs_c) if specs_c else 0,
-                        course_url=str(course_url).strip() if pd.notna(course_url) else None
-                    )
-                    db.add(course)
+                if not course:
+                    continue
+                if created:
                     summary.courses_created += 1
+                else:
+                    summary.courses_updated += 1
 
     # -------------------------------------------------------------
     # 3. Process Specializations & Fees sheet
@@ -333,13 +528,12 @@ async def import_colleges_excel(file_bytes: bytes, filename: str, db: AsyncSessi
 
                 college, _ = await get_or_create_college(name=college_name)
 
-                # Find associated course
-                c_stmt = select(CollegeCourse).where(
-                    CollegeCourse.college_id == college.id,
-                    func.lower(CollegeCourse.course_name) == course_name.lower()
-                )
-                c_res = await db.execute(c_stmt)
-                course = c_res.scalar_one_or_none()
+                # Ensure parent course exists when a real course name is present
+                course = None
+                if _is_valid_course_name(course_name):
+                    course, course_created = await get_or_create_course(college, course_name)
+                    if course_created:
+                        summary.courses_created += 1
 
                 dur = row.get(cols_map.get("duration"))
                 dur_m = parse_months(row.get(cols_map.get("durationmonths")) or dur)
@@ -352,46 +546,30 @@ async def import_colleges_excel(file_bytes: bytes, filename: str, db: AsyncSessi
                 spec_url = row.get(cols_map.get("specializationurl"))
                 adm_url = row.get(cols_map.get("admissionurl"))
 
-                stmt = select(CollegeSpecialization).where(
-                    CollegeSpecialization.college_id == college.id,
-                    func.lower(CollegeSpecialization.course_name) == course_name.lower(),
-                    func.lower(CollegeSpecialization.specialization_name) == spec_name.lower()
+                spec, created = await get_or_create_specialization(
+                    college,
+                    course_name,
+                    spec_name,
+                    course=course,
+                    fields={
+                        "duration": str(dur).strip() if pd.notna(dur) else None,
+                        "duration_months": dur_m,
+                        "total_fee": total_fee,
+                        "per_semester_fee": sem_fee,
+                        "annual_fee": ann_fee,
+                        "one_time_fee": one_time,
+                        "other_fees_breakdown": str(other_fees).strip() if pd.notna(other_fees) else None,
+                        "est_monthly_emi": emi,
+                        "specialization_url": str(spec_url).strip() if pd.notna(spec_url) else None,
+                        "admission_url": str(adm_url).strip() if pd.notna(adm_url) else None,
+                    },
                 )
-                res = await db.execute(stmt)
-                spec = res.scalar_one_or_none()
-
-                if spec:
-                    spec.duration = str(dur).strip() if pd.notna(dur) else spec.duration
-                    spec.duration_months = dur_m or spec.duration_months
-                    spec.total_fee = total_fee or spec.total_fee
-                    spec.per_semester_fee = sem_fee or spec.per_semester_fee
-                    spec.annual_fee = ann_fee or spec.annual_fee
-                    spec.one_time_fee = one_time or spec.one_time_fee
-                    spec.other_fees_breakdown = str(other_fees).strip() if pd.notna(other_fees) else spec.other_fees_breakdown
-                    spec.est_monthly_emi = emi or spec.est_monthly_emi
-                    spec.specialization_url = str(spec_url).strip() if pd.notna(spec_url) else spec.specialization_url
-                    spec.admission_url = str(adm_url).strip() if pd.notna(adm_url) else spec.admission_url
-                    summary.specializations_updated += 1
-                else:
-                    spec = CollegeSpecialization(
-                        college_id=college.id,
-                        college_course_id=course.id if course else None,
-                        course_name=course_name,
-                        specialization_name=spec_name,
-                        specialization_slug=slugify(spec_name),
-                        duration=str(dur).strip() if pd.notna(dur) else None,
-                        duration_months=dur_m,
-                        total_fee=total_fee,
-                        per_semester_fee=sem_fee,
-                        annual_fee=ann_fee,
-                        one_time_fee=one_time,
-                        other_fees_breakdown=str(other_fees).strip() if pd.notna(other_fees) else None,
-                        est_monthly_emi=emi,
-                        specialization_url=str(spec_url).strip() if pd.notna(spec_url) else None,
-                        admission_url=str(adm_url).strip() if pd.notna(adm_url) else None,
-                    )
-                    db.add(spec)
+                if not spec:
+                    continue
+                if created:
                     summary.specializations_created += 1
+                else:
+                    summary.specializations_updated += 1
 
     # -------------------------------------------------------------
     # 4. Process "All Data page" (if uploaded as single flat sheet)
@@ -443,94 +621,75 @@ async def import_colleges_excel(file_bytes: bytes, filename: str, db: AsyncSessi
                 other_fees = row.get(cols_map.get("otherfees") or cols_map.get("otherfeesbreakdown"))
                 emi = parse_numeric(row.get(cols_map.get("estmonthlyemiinr") or cols_map.get("estmonthlyemi")))
 
-                stmt = select(CollegeCourse).where(
-                    CollegeCourse.college_id == college.id,
-                    func.lower(CollegeCourse.course_name) == course_name.lower()
+                course, course_created = await get_or_create_course(
+                    college,
+                    course_name,
+                    fields={
+                        "display_name": course_name,
+                        "duration": str(dur).strip() if pd.notna(dur) else None,
+                        "duration_months": dur_m,
+                        "base_total_fee": total_fee,
+                        "base_per_semester_fee": sem_fee,
+                        "base_annual_fee": ann_fee,
+                        "one_time_fee": one_time,
+                        "other_fees_breakdown": str(other_fees).strip() if pd.notna(other_fees) else None,
+                        "est_monthly_emi": emi,
+                    },
                 )
-                res = await db.execute(stmt)
-                course = res.scalar_one_or_none()
-
                 if not course:
-                    course = CollegeCourse(
-                        college_id=college.id,
-                        course_name=course_name,
-                        display_name=course_name,
-                        course_slug=slugify(course_name),
-                        duration=str(dur).strip() if pd.notna(dur) else None,
-                        duration_months=dur_m,
-                        base_total_fee=total_fee,
-                        base_per_semester_fee=sem_fee,
-                        base_annual_fee=ann_fee,
-                        one_time_fee=one_time,
-                        other_fees_breakdown=str(other_fees).strip() if pd.notna(other_fees) else None,
-                        est_monthly_emi=emi,
-                    )
-                    db.add(course)
-                    await db.flush()
+                    continue
+                if course_created:
                     summary.courses_created += 1
+                else:
+                    summary.courses_updated += 1
 
                 # Process Specialization if given
                 spec_name_col = cols_map.get("specializationname")
                 raw_spec = row.get(spec_name_col) if spec_name_col else None
                 if pd.notna(raw_spec) and str(raw_spec).strip():
                     spec_name = str(raw_spec).strip()
-                    spec_stmt = select(CollegeSpecialization).where(
-                        CollegeSpecialization.college_id == college.id,
-                        func.lower(CollegeSpecialization.course_name) == course_name.lower(),
-                        func.lower(CollegeSpecialization.specialization_name) == spec_name.lower()
+                    spec, spec_created = await get_or_create_specialization(
+                        college,
+                        course_name,
+                        spec_name,
+                        course=course,
+                        fields={
+                            "duration": str(dur).strip() if pd.notna(dur) else None,
+                            "duration_months": dur_m,
+                            "total_fee": total_fee,
+                            "per_semester_fee": sem_fee,
+                            "annual_fee": ann_fee,
+                            "one_time_fee": one_time,
+                            "other_fees_breakdown": str(other_fees).strip() if pd.notna(other_fees) else None,
+                            "est_monthly_emi": emi,
+                            "admission_url": str(adm_url).strip() if pd.notna(adm_url) else None,
+                        },
                     )
-                    s_res = await db.execute(spec_stmt)
-                    if not s_res.scalar_one_or_none():
-                        new_spec = CollegeSpecialization(
-                            college_id=college.id,
-                            college_course_id=course.id,
-                            course_name=course_name,
-                            specialization_name=spec_name,
-                            specialization_slug=slugify(spec_name),
-                            duration=str(dur).strip() if pd.notna(dur) else None,
-                            duration_months=dur_m,
-                            total_fee=total_fee,
-                            per_semester_fee=sem_fee,
-                            annual_fee=ann_fee,
-                            one_time_fee=one_time,
-                            other_fees_breakdown=str(other_fees).strip() if pd.notna(other_fees) else None,
-                            est_monthly_emi=emi,
-                            admission_url=str(adm_url).strip() if pd.notna(adm_url) else None,
-                        )
-                        db.add(new_spec)
-                        summary.specializations_created += 1
+                    if spec:
+                        if spec_created:
+                            summary.specializations_created += 1
+                        else:
+                            summary.specializations_updated += 1
 
                 # Process Approvals if given
                 if pd.notna(approvals_raw) and str(approvals_raw).strip():
                     apps = parse_list(approvals_raw)
-                    app_stmt = select(CollegeApproval).where(CollegeApproval.college_id == college.id)
-                    app_res = await db.execute(app_stmt)
-                    app_rec = app_res.scalar_one_or_none()
-                    if not app_rec:
-                        app_rec = CollegeApproval(
-                            college_id=college.id,
-                            approvals_list=apps,
-                            total_approvals=len(apps),
-                            ugc_deb="Yes" if any("ugc" in a.lower() for a in apps) else None,
-                            aicte="Yes" if any("aicte" in a.lower() for a in apps) else None,
-                            naac=next((a for a in apps if "naac" in a.lower()), None),
-                        )
-                        db.add(app_rec)
-                        summary.approvals_synced += 1
+                    await upsert_approval(college, {
+                        "approvals_list": apps,
+                        "total_approvals": len(apps),
+                        "ugc_deb": "Yes" if any("ugc" in a.lower() for a in apps) else None,
+                        "aicte": "Yes" if any("aicte" in a.lower() for a in apps) else None,
+                        "naac": next((a for a in apps if "naac" in a.lower()), None),
+                    })
+                    summary.approvals_synced += 1
 
                 # Process Loan / EMI if given
                 if pd.notna(emi_avail) or lending_part:
-                    emi_stmt = select(CollegeEmiLoan).where(CollegeEmiLoan.college_id == college.id)
-                    emi_res = await db.execute(emi_stmt)
-                    emi_rec = emi_res.scalar_one_or_none()
-                    if not emi_rec:
-                        emi_rec = CollegeEmiLoan(
-                            college_id=college.id,
-                            no_cost_emi_available=str(emi_avail).strip() if pd.notna(emi_avail) else "Yes",
-                            lending_partners=lending_part,
-                        )
-                        db.add(emi_rec)
-                        summary.loans_synced += 1
+                    await upsert_loan(college, {
+                        "no_cost_emi_available": str(emi_avail).strip() if pd.notna(emi_avail) else "Yes",
+                        "lending_partners": lending_part or None,
+                    })
+                    summary.loans_synced += 1
 
     # -------------------------------------------------------------
     # 5. Process Approvals & Accreditations sheet
@@ -558,31 +717,16 @@ async def import_colleges_excel(file_bytes: bytes, filename: str, db: AsyncSessi
                 wes = row.get(cols_map.get("wes"))
                 qs = row.get(cols_map.get("qsranking") or cols_map.get("qs"))
 
-                stmt = select(CollegeApproval).where(CollegeApproval.college_id == college.id)
-                res = await db.execute(stmt)
-                rec = res.scalar_one_or_none()
-                if rec:
-                    rec.approvals_list = apps_list or rec.approvals_list
-                    rec.total_approvals = int(tot_apps) if tot_apps else (len(apps_list) or rec.total_approvals)
-                    rec.ugc_deb = str(ugc).strip() if pd.notna(ugc) else rec.ugc_deb
-                    rec.aicte = str(aicte).strip() if pd.notna(aicte) else rec.aicte
-                    rec.naac = str(naac).strip() if pd.notna(naac) else rec.naac
-                    rec.nirf = str(nirf).strip() if pd.notna(nirf) else rec.nirf
-                    rec.wes = str(wes).strip() if pd.notna(wes) else rec.wes
-                    rec.qs_ranking = str(qs).strip() if pd.notna(qs) else rec.qs_ranking
-                else:
-                    rec = CollegeApproval(
-                        college_id=college.id,
-                        approvals_list=apps_list,
-                        total_approvals=int(tot_apps) if tot_apps else len(apps_list),
-                        ugc_deb=str(ugc).strip() if pd.notna(ugc) else None,
-                        aicte=str(aicte).strip() if pd.notna(aicte) else None,
-                        naac=str(naac).strip() if pd.notna(naac) else None,
-                        nirf=str(nirf).strip() if pd.notna(nirf) else None,
-                        wes=str(wes).strip() if pd.notna(wes) else None,
-                        qs_ranking=str(qs).strip() if pd.notna(qs) else None,
-                    )
-                    db.add(rec)
+                await upsert_approval(college, {
+                    "approvals_list": apps_list or None,
+                    "total_approvals": int(tot_apps) if tot_apps else (len(apps_list) or None),
+                    "ugc_deb": str(ugc).strip() if pd.notna(ugc) else None,
+                    "aicte": str(aicte).strip() if pd.notna(aicte) else None,
+                    "naac": str(naac).strip() if pd.notna(naac) else None,
+                    "nirf": str(nirf).strip() if pd.notna(nirf) else None,
+                    "wes": str(wes).strip() if pd.notna(wes) else None,
+                    "qs_ranking": str(qs).strip() if pd.notna(qs) else None,
+                })
                 summary.approvals_synced += 1
 
     # -------------------------------------------------------------
@@ -608,25 +752,13 @@ async def import_colleges_excel(file_bytes: bytes, filename: str, db: AsyncSessi
                 bank_visit = row.get(cols_map.get("bankvisitrequired"))
                 policy = row.get(cols_map.get("emiloanpolicydetails") or cols_map.get("policydetails"))
 
-                stmt = select(CollegeEmiLoan).where(CollegeEmiLoan.college_id == college.id)
-                res = await db.execute(stmt)
-                rec = res.scalar_one_or_none()
-                if rec:
-                    rec.no_cost_emi_available = str(no_cost).strip() if pd.notna(no_cost) else rec.no_cost_emi_available
-                    rec.loan_sanction_time = str(sanction).strip() if pd.notna(sanction) else rec.loan_sanction_time
-                    rec.lending_partners = partners or rec.lending_partners
-                    rec.bank_visit_required = str(bank_visit).strip() if pd.notna(bank_visit) else rec.bank_visit_required
-                    rec.policy_details = str(policy).strip() if pd.notna(policy) else rec.policy_details
-                else:
-                    rec = CollegeEmiLoan(
-                        college_id=college.id,
-                        no_cost_emi_available=str(no_cost).strip() if pd.notna(no_cost) else "Yes",
-                        loan_sanction_time=str(sanction).strip() if pd.notna(sanction) else None,
-                        lending_partners=partners,
-                        bank_visit_required=str(bank_visit).strip() if pd.notna(bank_visit) else "No",
-                        policy_details=str(policy).strip() if pd.notna(policy) else None
-                    )
-                    db.add(rec)
+                await upsert_loan(college, {
+                    "no_cost_emi_available": str(no_cost).strip() if pd.notna(no_cost) else "Yes",
+                    "loan_sanction_time": str(sanction).strip() if pd.notna(sanction) else None,
+                    "lending_partners": partners or None,
+                    "bank_visit_required": str(bank_visit).strip() if pd.notna(bank_visit) else "No",
+                    "policy_details": str(policy).strip() if pd.notna(policy) else None,
+                })
                 summary.loans_synced += 1
 
     # -------------------------------------------------------------
@@ -650,21 +782,11 @@ async def import_colleges_excel(file_bytes: bytes, filename: str, db: AsyncSessi
                 procedure = row.get(cols_map.get("admissionprocedure"))
                 dates = row.get(cols_map.get("importantdatescutoffs") or cols_map.get("importantdates"))
 
-                stmt = select(CollegeAdmissionExam).where(CollegeAdmissionExam.college_id == college.id)
-                res = await db.execute(stmt)
-                rec = res.scalar_one_or_none()
-                if rec:
-                    rec.examination_pattern_mode = str(pattern).strip() if pd.notna(pattern) else rec.examination_pattern_mode
-                    rec.admission_procedure = str(procedure).strip() if pd.notna(procedure) else rec.admission_procedure
-                    rec.important_dates_cutoffs = str(dates).strip() if pd.notna(dates) else rec.important_dates_cutoffs
-                else:
-                    rec = CollegeAdmissionExam(
-                        college_id=college.id,
-                        examination_pattern_mode=str(pattern).strip() if pd.notna(pattern) else None,
-                        admission_procedure=str(procedure).strip() if pd.notna(procedure) else None,
-                        important_dates_cutoffs=str(dates).strip() if pd.notna(dates) else None
-                    )
-                    db.add(rec)
+                await upsert_admission(college, {
+                    "examination_pattern_mode": str(pattern).strip() if pd.notna(pattern) else None,
+                    "admission_procedure": str(procedure).strip() if pd.notna(procedure) else None,
+                    "important_dates_cutoffs": str(dates).strip() if pd.notna(dates) else None,
+                })
                 summary.admissions_synced += 1
 
     # -------------------------------------------------------------
@@ -688,24 +810,11 @@ async def import_colleges_excel(file_bytes: bytes, filename: str, db: AsyncSessi
                 tot_p = parse_numeric(row.get(cols_map.get("totalpartnerslisted") or cols_map.get("totalpartners")))
                 overview = row.get(cols_map.get("placementassistanceoverview") or cols_map.get("overview"))
 
-                stmt = select(CollegePlacementPartner).where(CollegePlacementPartner.college_id == college.id)
-                res = await db.execute(stmt)
-                rec = res.scalar_one_or_none()
-                if rec:
-                    existing_companies = set(rec.hiring_companies or [])
-                    for c in companies:
-                        existing_companies.add(c)
-                    rec.hiring_companies = list(existing_companies)
-                    rec.total_partners_listed = int(tot_p) if tot_p else len(rec.hiring_companies)
-                    rec.placement_assistance_overview = str(overview).strip() if pd.notna(overview) else rec.placement_assistance_overview
-                else:
-                    rec = CollegePlacementPartner(
-                        college_id=college.id,
-                        hiring_companies=companies,
-                        total_partners_listed=int(tot_p) if tot_p else len(companies),
-                        placement_assistance_overview=str(overview).strip() if pd.notna(overview) else None
-                    )
-                    db.add(rec)
+                await upsert_placement(college, {
+                    "hiring_companies": companies or None,
+                    "total_partners_listed": int(tot_p) if tot_p else (len(companies) or None),
+                    "placement_assistance_overview": str(overview).strip() if pd.notna(overview) else None,
+                })
                 summary.placements_synced += 1
 
     # -------------------------------------------------------------
@@ -752,20 +861,35 @@ async def import_colleges_excel(file_bytes: bytes, filename: str, db: AsyncSessi
                 summary.faculty_synced += 1
 
     # Recalculate college totals
-    await db.flush()
-    for college in colleges_cache.values():
-        c_count_stmt = select(func.count(CollegeCourse.id)).where(CollegeCourse.college_id == college.id)
-        college.total_courses = (await db.execute(c_count_stmt)).scalar() or 0
+    try:
+        await db.flush()
+        for college in colleges_cache.values():
+            c_count_stmt = select(func.count(CollegeCourse.id)).where(CollegeCourse.college_id == college.id)
+            college.total_courses = (await db.execute(c_count_stmt)).scalar() or 0
 
-        s_count_stmt = select(func.count(CollegeSpecialization.id)).where(CollegeSpecialization.college_id == college.id)
-        college.total_specializations = (await db.execute(s_count_stmt)).scalar() or 0
+            s_count_stmt = select(func.count(CollegeSpecialization.id)).where(CollegeSpecialization.college_id == college.id)
+            college.total_specializations = (await db.execute(s_count_stmt)).scalar() or 0
 
-        min_f_stmt = select(func.min(CollegeCourse.base_total_fee)).where(CollegeCourse.college_id == college.id)
-        college.min_fee = (await db.execute(min_f_stmt)).scalar()
+            min_f_stmt = select(func.min(CollegeCourse.base_total_fee)).where(CollegeCourse.college_id == college.id)
+            college.min_fee = (await db.execute(min_f_stmt)).scalar()
 
-        max_f_stmt = select(func.max(CollegeCourse.base_total_fee)).where(CollegeCourse.college_id == college.id)
-        college.max_fee = (await db.execute(max_f_stmt)).scalar()
+            max_f_stmt = select(func.max(CollegeCourse.base_total_fee)).where(CollegeCourse.college_id == college.id)
+            college.max_fee = (await db.execute(max_f_stmt)).scalar()
 
-    await db.commit()
-    summary.message = f"Successfully processed {summary.colleges_created + summary.colleges_updated} colleges, {summary.courses_created + summary.courses_updated} courses, {summary.specializations_created + summary.specializations_updated} specializations."
+        await db.commit()
+    except IntegrityError as e:
+        await db.rollback()
+        err_msg = str(e.orig) if getattr(e, "orig", None) else str(e)
+        logger.error(f"College Vidya import IntegrityError: {err_msg}")
+        return ExcelImportSummary(
+            success=False,
+            message="Import failed due to duplicate related college data (approvals/courses/EMI). Please retry — upserts should merge duplicates.",
+            errors=[err_msg],
+        )
+
+    summary.message = (
+        f"Successfully processed {summary.colleges_created + summary.colleges_updated} colleges, "
+        f"{summary.courses_created + summary.courses_updated} courses, "
+        f"{summary.specializations_created + summary.specializations_updated} specializations."
+    )
     return summary

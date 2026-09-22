@@ -17,6 +17,7 @@ from app.modules.super_admin.schemas.college_schemas import (
 from app.modules.super_admin.services.college_importer_service import (
     import_colleges_excel, slugify
 )
+from sqlalchemy.exc import IntegrityError
 
 logger = logging.getLogger(__name__)
 
@@ -284,5 +285,12 @@ async def import_colleges_file_ctrl(db: AsyncSession, file: UploadFile) -> Excel
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty.")
     
     filename = file.filename or "colleges.xlsx"
-    summary = await import_colleges_excel(contents, filename, db)
-    return summary
+    try:
+        return await import_colleges_excel(contents, filename, db)
+    except IntegrityError as e:
+        await db.rollback()
+        err_msg = str(e.orig) if getattr(e, "orig", None) else str(e)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Import failed due to duplicate data: {err_msg}",
+        )

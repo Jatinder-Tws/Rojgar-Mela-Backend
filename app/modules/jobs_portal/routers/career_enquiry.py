@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.jobs_portal.controllers.career_enquiry_controller import (
     admin_delete_enquiry as ctrl_delete,
+    admin_enquiry_pipeline_stats as ctrl_stats,
     admin_list_career_enquiries as ctrl_list,
     admin_update_career_enquiry_status as ctrl_update_status,
     create_career_enquiry as ctrl_create,
@@ -16,6 +17,7 @@ from app.modules.jobs_portal.schemas.career_enquiry import (
     CareerEnquiryListResponse,
     CareerEnquiryOut,
     CareerEnquiryStatusUpdate,
+    EnquiryPipelineStats,
     UnifiedEnquiryOut,
 )
 from app.core.dependencies import require_super_admin_or_permission
@@ -33,6 +35,15 @@ async def create_enquiry(
     return await ctrl_create(body, db)
 
 
+@admin_router.get("/stats", response_model=EnquiryPipelineStats)
+async def enquiry_pipeline_stats(
+    source: Optional[str] = Query("all"),
+    _admin: User = Depends(require_super_admin_or_permission("enquiries")),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_stats(db, source=source)
+
+
 @admin_router.get("", response_model=CareerEnquiryListResponse)
 async def list_enquiries(
     page: int = Query(1, ge=1),
@@ -42,6 +53,8 @@ async def list_enquiries(
     domain: Optional[str] = None,
     qualification: Optional[str] = None,
     source: Optional[str] = None,
+    objection: Optional[str] = None,
+    follow_up: Optional[str] = None,
     _admin: User = Depends(require_super_admin_or_permission("enquiries")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -54,6 +67,8 @@ async def list_enquiries(
         domain=domain,
         qualification=qualification,
         source=source,
+        objection=objection,
+        follow_up=follow_up,
     )
 
 
