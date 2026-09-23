@@ -13,6 +13,8 @@ from app.modules.super_admin.schemas.college_schemas import (
     CollegeCompareItem, CollegeCompareResponse, CollegeDetailOut,
     CollegeListItem, CollegeListResponse
 )
+from app.modules.super_admin.services.university_catalog_service import build_public_explore
+from app.modules.super_admin.services.university_course_offers import build_course_offers
 
 router = APIRouter(prefix="/api/v1/public/colleges", tags=["Public - Colleges & Comparison"])
 
@@ -73,6 +75,34 @@ async def list_public_colleges(
         page=page,
         limit=limit,
         total_pages=total_pages
+    )
+
+
+@router.get("/explore")
+async def get_university_explore(db: AsyncSession = Depends(get_db)):
+    """Course categories and the universities section for /universities. Counts are live."""
+    return await build_public_explore(db)
+
+
+@router.get("/course-offers")
+async def get_course_offers(
+    course: str = Query(..., min_length=1),
+    specialization: Optional[str] = Query(None),
+    fee_min: Optional[float] = Query(None),
+    fee_max: Optional[float] = Query(None),
+    wants_emi: Optional[bool] = Query(None),
+    sort: str = Query("reviews"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Universities offering one course, for the shortlist after the counselling questions."""
+    return await build_course_offers(
+        db,
+        course=course,
+        specialization=specialization,
+        fee_min=fee_min,
+        fee_max=fee_max,
+        wants_emi=wants_emi,
+        sort=sort if sort in {"reviews", "roi", "emi", "placements"} else "reviews",
     )
 
 

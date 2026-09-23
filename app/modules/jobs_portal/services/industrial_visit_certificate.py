@@ -117,7 +117,7 @@ def generate_participation_certificate_pdf(
     )
 
     # Vertical position of the participant name.
-    name_y = int(h * 0.530)
+    name_y = int(h * 0.550)
 
     # Calculate text width for horizontal centering.
     text_w = font.getlength(name)

@@ -204,3 +204,72 @@ class CollegeFaculty(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     college = relationship("College", back_populates="faculty")
+
+
+class UniversityCatalogCategory(Base):
+    """Sidebar groups on the public /universities page. Managed in super admin."""
+
+    __tablename__ = "university_catalog_categories"
+
+    id = Column(UUID(as_uuid=False), primary_key=True, default=_uuid)
+    slug = Column(String(120), unique=True, nullable=False, index=True)
+    label = Column(String(120), nullable=False)
+    hint = Column(String(160), nullable=False, default="")
+    sort_order = Column(Integer, nullable=False, default=0, server_default=text("0"))
+    is_active = Column(Boolean, nullable=False, default=True, server_default=text("true"))
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    courses = relationship(
+        "UniversityCatalogCourse",
+        back_populates="category",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        order_by="UniversityCatalogCourse.sort_order",
+    )
+
+
+class UniversityCatalogCourse(Base):
+    """A course card. Compare counts are calculated from college courses, not stored."""
+
+    __tablename__ = "university_catalog_courses"
+
+    id = Column(UUID(as_uuid=False), primary_key=True, default=_uuid)
+    category_id = Column(
+        UUID(as_uuid=False),
+        ForeignKey("university_catalog_categories.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    title = Column(String(200), nullable=False)
+    subtitle = Column(String(200), nullable=True)
+    badge_text = Column(String(80), nullable=True)
+    badge_tone = Column(String(20), nullable=False, default="amber", server_default="amber")
+    badge_mode = Column(String(30), nullable=False, default="custom", server_default="custom")
+    icon_key = Column(String(40), nullable=False, default="graduation", server_default="graduation")
+    match_course_name = Column(String(200), nullable=False)
+    match_mode = Column(String(20), nullable=False, default="exact", server_default="exact")
+    sort_order = Column(Integer, nullable=False, default=0, server_default=text("0"))
+    is_active = Column(Boolean, nullable=False, default=True, server_default=text("true"))
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    category = relationship("UniversityCatalogCategory", back_populates="courses")
+
+
+class UniversityPageSetting(Base):
+    """Editable copy for the universities section. Numbers are filled from live data."""
+
+    __tablename__ = "university_page_settings"
+
+    id = Column(UUID(as_uuid=False), primary_key=True, default=_uuid)
+    eyebrow_template = Column(String(200), nullable=False, default="{total} Online Universities")
+    lead_template = Column(String(200), nullable=False, default="UGC-approved universities,")
+    rest_template = Column(
+        String(300),
+        nullable=False,
+        default="verified by us and reviewed by learners, on {factors} factors",
+    )
+    catalog_seeded = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
