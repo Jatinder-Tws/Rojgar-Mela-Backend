@@ -53,7 +53,7 @@ class JobPosting(Base):
     title = Column(String(200), nullable=False)
     description = Column(Text, nullable=False)
     required_skills = Column(JSON, nullable=True)  # list of skill strings
-    experience_required = Column(String(100), nullable=True)
+    experience_required = Column(Text, nullable=True)
     job_type = Column(Enum(JobType), nullable=True)
     salary_range = Column(String(100), nullable=True)
     industry = Column(String(100), nullable=True)
