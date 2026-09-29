@@ -15,6 +15,7 @@ from app.modules.super_admin.schemas.college_schemas import (
 )
 from app.modules.super_admin.services.university_catalog_service import build_public_explore
 from app.modules.super_admin.services.university_course_offers import build_course_offers
+from app.modules.super_admin.services.college_lookup import college_identity_filter
 
 router = APIRouter(prefix="/api/v1/public/colleges", tags=["Public - Colleges & Comparison"])
 
@@ -231,7 +232,7 @@ async def get_public_college_detail(id_or_slug: str, db: AsyncSession = Depends(
     """Public detail page of a single college/university."""
     stmt = (
         select(College)
-        .where(or_(College.id == id_or_slug, College.slug == id_or_slug))
+        .where(college_identity_filter(id_or_slug))
         .options(
             selectinload(College.courses).selectinload(CollegeCourse.specializations),
             selectinload(College.specializations),

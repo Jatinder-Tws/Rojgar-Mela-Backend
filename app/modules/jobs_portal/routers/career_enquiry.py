@@ -1,22 +1,28 @@
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, File, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.jobs_portal.controllers.career_enquiry_controller import (
+    admin_create_enquiry as ctrl_admin_create,
     admin_delete_enquiry as ctrl_delete,
+    admin_get_enquiry as ctrl_get,
     admin_enquiry_pipeline_stats as ctrl_stats,
+    admin_import_enquiries as ctrl_import,
     admin_list_career_enquiries as ctrl_list,
     admin_update_career_enquiry_status as ctrl_update_status,
     create_career_enquiry as ctrl_create,
+    enquiry_import_template as ctrl_template,
 )
 from app.core.database import get_db
 from app.shared.models.user import User
 from app.modules.jobs_portal.schemas.career_enquiry import (
+    AdminManualEnquiryCreate,
     CareerEnquiryCreate,
     CareerEnquiryListResponse,
     CareerEnquiryOut,
     CareerEnquiryStatusUpdate,
+    EnquiryImportResult,
     EnquiryPipelineStats,
     UnifiedEnquiryOut,
 )
@@ -35,6 +41,31 @@ async def create_enquiry(
     return await ctrl_create(body, db)
 
 
+@admin_router.post("", response_model=UnifiedEnquiryOut, status_code=201)
+async def create_manual_enquiry(
+    body: AdminManualEnquiryCreate,
+    _admin: User = Depends(require_super_admin_or_permission("enquiries")),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_admin_create(body, db)
+
+
+@admin_router.get("/import-template")
+async def download_enquiry_import_template(
+    _admin: User = Depends(require_super_admin_or_permission("enquiries")),
+):
+    return ctrl_template()
+
+
+@admin_router.post("/import", response_model=EnquiryImportResult)
+async def import_enquiries(
+    file: UploadFile = File(...),
+    _admin: User = Depends(require_super_admin_or_permission("enquiries")),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_import(file, db)
+
+
 @admin_router.get("/stats", response_model=EnquiryPipelineStats)
 async def enquiry_pipeline_stats(
     source: Optional[str] = Query("all"),
@@ -42,6 +73,15 @@ async def enquiry_pipeline_stats(
     db: AsyncSession = Depends(get_db),
 ):
     return await ctrl_stats(db, source=source)
+
+
+@admin_router.get("/{enquiry_id}", response_model=UnifiedEnquiryOut)
+async def get_enquiry(
+    enquiry_id: str,
+    _admin: User = Depends(require_super_admin_or_permission("enquiries")),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_get(enquiry_id, db)
 
 
 @admin_router.get("", response_model=CareerEnquiryListResponse)

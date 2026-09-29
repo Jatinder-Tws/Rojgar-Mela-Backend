@@ -17,6 +17,7 @@ from app.modules.super_admin.schemas.college_schemas import (
 from app.modules.super_admin.services.college_importer_service import (
     import_colleges_excel, slugify
 )
+from app.modules.super_admin.services.college_lookup import college_identity_filter
 from sqlalchemy.exc import IntegrityError
 
 logger = logging.getLogger(__name__)
@@ -77,7 +78,7 @@ async def list_colleges_ctrl(
 async def get_college_detail_ctrl(db: AsyncSession, id_or_slug: str) -> CollegeDetailOut:
     stmt = (
         select(College)
-        .where(or_(College.id == id_or_slug, College.slug == id_or_slug))
+        .where(college_identity_filter(id_or_slug))
         .options(
             selectinload(College.courses).selectinload(CollegeCourse.specializations),
             selectinload(College.specializations),

@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, String, Text
+from sqlalchemy import Boolean, Column, DateTime, String, Text, false
 
 from sqlalchemy.dialects.postgresql import UUID
 
@@ -34,5 +34,6 @@ class CareerEnquiry(Base):
     interested_after_fee = Column(String(20), nullable=True)
     main_objection = Column(String(255), nullable=True)
     final_outcome = Column(Text, nullable=True)
+    consent_to_contact = Column(Boolean, nullable=False, default=False, server_default=false())
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)

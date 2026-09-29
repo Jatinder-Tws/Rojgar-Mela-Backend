@@ -1,4 +1,5 @@
 from datetime import datetime
+import re
 from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_serializer, field_validator
@@ -129,6 +130,7 @@ class UnifiedEnquiryOut(BaseModel):
     interested_after_fee: Optional[str] = None
     main_objection: Optional[str] = None
     final_outcome: Optional[str] = None
+    consent_to_contact: Optional[bool] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
 
@@ -144,6 +146,73 @@ class UnifiedEnquiryOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class AdminManualEnquiryCreate(BaseModel):
+    first_name: str = Field(..., min_length=1, max_length=80)
+    last_name: str = Field(..., min_length=1, max_length=80)
+    phone: str = Field(..., min_length=7, max_length=20)
+    email: str = Field(..., min_length=5, max_length=150)
+    city: Optional[str] = Field(None, max_length=80)
+    preferred_contact: Optional[str] = Field(None, max_length=40)
+    programme: str = Field(..., min_length=1, max_length=150)
+    lead_source: Optional[str] = Field(None, max_length=80)
+    enquiry_date: Optional[str] = None
+    campaign_code: Optional[str] = Field(None, max_length=80)
+    message: Optional[str] = Field(None, max_length=2000)
+    status: str = "new"
+    assigned_counsellor: Optional[str] = Field(None, max_length=120)
+    priority: Optional[str] = Field(None, max_length=20)
+    check_duplicates: bool = True
+    next_follow_up_date: Optional[str] = None
+    follow_up_time: Optional[str] = Field(None, max_length=20)
+    follow_up_mode: Optional[str] = Field(None, max_length=40)
+    follow_up_note: Optional[str] = Field(None, max_length=2000)
+    remarks: Optional[str] = Field(None, max_length=2000)
+    consent_to_contact: bool
+
+    @field_validator("first_name", "last_name", "phone", "email", "programme", mode="before")
+    @classmethod
+    def strip_manual_required_fields(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("email")
+    @classmethod
+    def validate_manual_email(cls, value: str) -> str:
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value):
+            raise ValueError("Enter a valid email address")
+        return value.lower()
+
+    @field_validator("phone")
+    @classmethod
+    def validate_manual_phone(cls, value: str) -> str:
+        digits = re.sub(r"\D", "", value)
+        if not 7 <= len(digits) <= 15:
+            raise ValueError("Phone must contain 7 to 15 digits")
+        return value
+
+    @field_validator("follow_up_time")
+    @classmethod
+    def validate_follow_up_time(cls, value: Optional[str]) -> Optional[str]:
+        if value is None or not value.strip():
+            return value
+        if not re.fullmatch(r"(?:[01]?\d|2[0-3]):[0-5]\d", value.strip()):
+            raise ValueError("Follow-up time must use HH:mm format")
+        return value.strip()
+
+    @field_validator("consent_to_contact")
+    @classmethod
+    def require_contact_consent(cls, value: bool) -> bool:
+        if not value:
+            raise ValueError("Consent to contact is required")
+        return value
+
+
+class EnquiryImportResult(BaseModel):
+    created: int = 0
+    skipped: int = 0
+    failed: int = 0
+    errors: List[str] = Field(default_factory=list)
 
 
 class CareerEnquiryListResponse(BaseModel):
