@@ -60,7 +60,7 @@ from app.shared.routers import (
 )
 from app.modules.jobs_portal.routers import (
     ai_coach, ai_coach_live_ws, ai_interview, analytics, applications, assessment, blog_public, career_enquiry,
-    career_roadmap, company_internships, company_profile, dashboard, external_candidate, industrial_visit, interviews, interview_scheduling,
+    career_roadmap, company_internships, company_profile, dashboard, event_registration, external_candidate, industrial_visit, interviews, interview_scheduling,
     jobs, job_fair, master, matches, onboarding, portfolio, resumes, resume_builder,
     roadmap, saved_jobs, scholarships, site_announcement, college_public
 )
@@ -116,6 +116,8 @@ routers = [
     site_announcement.admin_router,
     industrial_visit.public_router,
     industrial_visit.admin_router,
+    event_registration.public_router,
+    event_registration.admin_router,
     job_fair.router,
     email_admin.router,
     blog_admin.router,

@@ -131,6 +131,10 @@ class UnifiedEnquiryOut(BaseModel):
     main_objection: Optional[str] = None
     final_outcome: Optional[str] = None
     consent_to_contact: Optional[bool] = None
+    event_name: Optional[str] = None
+    ticket_number: Optional[str] = None
+    prize_title: Optional[str] = None
+    event_form_id: Optional[str] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
 

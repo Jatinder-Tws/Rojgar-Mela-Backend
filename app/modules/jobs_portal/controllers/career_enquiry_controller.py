@@ -76,6 +76,10 @@ def _career_to_unified(item: CareerEnquiry) -> UnifiedEnquiryOut:
         created_at=item.created_at,
         updated_at=item.updated_at,
         consent_to_contact=item.consent_to_contact,
+        event_name=item.event_name,
+        ticket_number=item.ticket_number,
+        prize_title=item.prize_title,
+        event_form_id=item.event_form_id,
         **_follow_up_fields(item),
     )
 
@@ -243,8 +247,13 @@ def _career_filters(
     qualification: Optional[str] = None,
     objection: Optional[str] = None,
     follow_up: Optional[str] = None,
+    event_only: Optional[bool] = None,
 ) -> list:
     filters = []
+    if event_only is True:
+        filters.append(CareerEnquiry.event_form_id.is_not(None))
+    elif event_only is False:
+        filters.append(CareerEnquiry.event_form_id.is_(None))
     if search and search.strip():
         term = f"%{search.strip()}%"
         filters.append(
@@ -259,6 +268,9 @@ def _career_filters(
                 CareerEnquiry.admin_notes.ilike(term),
                 CareerEnquiry.final_outcome.ilike(term),
                 CareerEnquiry.preferred_call_time.ilike(term),
+                CareerEnquiry.event_name.ilike(term),
+                CareerEnquiry.ticket_number.ilike(term),
+                CareerEnquiry.prize_title.ilike(term),
             )
         )
     if status and status.strip() and status.strip() != "all":
@@ -343,6 +355,7 @@ async def _list_career_page(
     qualification: Optional[str] = None,
     objection: Optional[str] = None,
     follow_up: Optional[str] = None,
+    event_only: Optional[bool] = None,
 ) -> Tuple[List[CareerEnquiry], int]:
     filters = _career_filters(
         search=search,
@@ -351,6 +364,7 @@ async def _list_career_page(
         qualification=qualification,
         objection=objection,
         follow_up=follow_up,
+        event_only=event_only,
     )
     count_query = select(func.count()).select_from(CareerEnquiry)
     query = select(CareerEnquiry)
@@ -406,6 +420,7 @@ async def _list_all_merged(
     objection: Optional[str] = None,
     follow_up: Optional[str] = None,
     include_contact: bool = True,
+    event_only: Optional[bool] = None,
 ) -> CareerEnquiryListResponse:
     """Merge career + contact rows (rare path). Still paginates the merged result."""
     career_filters = _career_filters(
@@ -415,6 +430,7 @@ async def _list_all_merged(
         qualification=qualification,
         objection=objection,
         follow_up=follow_up,
+        event_only=event_only,
     )
     career_query = select(CareerEnquiry)
     if career_filters:
@@ -462,8 +478,8 @@ async def admin_list_career_enquiries(
     follow_up: Optional[str] = None,
 ) -> CareerEnquiryListResponse:
     source_key = (source or "career").strip().lower()
-    if source_key not in {"all", "career", "contact"}:
-        raise HTTPException(status_code=400, detail="Invalid source. Allowed: all, career, contact")
+    if source_key not in {"all", "career", "contact", "event"}:
+        raise HTTPException(status_code=400, detail="Invalid source. Allowed: all, career, contact, event")
 
     # Domain / qualification only apply to Career Program rows.
     career_only_filters = bool(
@@ -483,6 +499,29 @@ async def admin_list_career_enquiries(
             qualification=qualification,
             objection=objection,
             follow_up=follow_up,
+            event_only=False,
+        )
+        return CareerEnquiryListResponse(
+            items=[_career_to_unified(row) for row in rows],
+            total=total,
+            page=page,
+            page_size=page_size,
+        )
+
+    if source_key == "event":
+        if career_only_filters:
+            pass
+        rows, total = await _list_career_page(
+            db,
+            page=page,
+            page_size=page_size,
+            search=search,
+            status=status,
+            domain=domain,
+            qualification=qualification,
+            objection=objection,
+            follow_up=follow_up,
+            event_only=True,
         )
         return CareerEnquiryListResponse(
             items=[_career_to_unified(row) for row in rows],
@@ -536,11 +575,12 @@ async def admin_enquiry_pipeline_stats(
     source: Optional[str] = None,
 ) -> EnquiryPipelineStats:
     source_key = (source or "all").strip().lower()
-    if source_key not in {"all", "career", "contact"}:
-        raise HTTPException(status_code=400, detail="Invalid source. Allowed: all, career, contact")
+    if source_key not in {"all", "career", "contact", "event"}:
+        raise HTTPException(status_code=400, detail="Invalid source. Allowed: all, career, contact, event")
 
-    include_career = source_key in {"all", "career"}
+    include_career = source_key in {"all", "career", "event"}
     include_contact = source_key in {"all", "contact"}
+    event_only = True if source_key == "event" else False if source_key == "career" else None
     start, end = _day_bounds_utc()
 
     by_status = {key: 0 for key in PIPELINE_STATUSES}
@@ -548,17 +588,22 @@ async def admin_enquiry_pipeline_stats(
     follow_up_due_today = 0
 
     if include_career:
-        total += await _count_model(db, CareerEnquiry, [])
+        event_filters = []
+        if event_only is True:
+            event_filters = [CareerEnquiry.event_form_id.is_not(None)]
+        elif event_only is False:
+            event_filters = [CareerEnquiry.event_form_id.is_(None)]
+        total += await _count_model(db, CareerEnquiry, event_filters)
         follow_up_due_today += await _count_model(
             db,
             CareerEnquiry,
-            [CareerEnquiry.next_follow_up_date.between(start, end)],
+            event_filters + [CareerEnquiry.next_follow_up_date.between(start, end)],
         )
         for status in PIPELINE_STATUSES:
             by_status[status] += await _count_model(
                 db,
                 CareerEnquiry,
-                [CareerEnquiry.status.in_(_status_match_values(status))],
+                event_filters + [CareerEnquiry.status.in_(_status_match_values(status))],
             )
 
     if include_contact:

@@ -94,6 +94,13 @@ SUPERVISOR_PERMISSIONS: List[PermissionDefinition] = [
         "category": "Opportunities & Matches",
         "platform": "job_portal",
     },
+    {
+        "key": "event_registrations",
+        "label": "Event Registration",
+        "description": "Build public stall forms, QR codes, lucky-draw tickets, and event leads",
+        "category": "Opportunities & Matches",
+        "platform": "job_portal",
+    },
 
     # Learning & Support
     {
