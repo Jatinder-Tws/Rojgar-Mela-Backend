@@ -1,11 +1,14 @@
 from typing import Optional
+from io import BytesIO
 
 from fastapi import APIRouter, Depends, File, Query, UploadFile
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.jobs_portal.controllers.career_enquiry_controller import (
     admin_create_enquiry as ctrl_admin_create,
     admin_delete_enquiry as ctrl_delete,
+    admin_export_enquiries_xlsx as ctrl_export,
     admin_get_enquiry as ctrl_get,
     admin_enquiry_pipeline_stats as ctrl_stats,
     admin_import_enquiries as ctrl_import,
@@ -75,6 +78,35 @@ async def enquiry_pipeline_stats(
     return await ctrl_stats(db, source=source)
 
 
+@admin_router.get("/export")
+async def export_enquiries(
+    search: Optional[str] = None,
+    status: Optional[str] = None,
+    source: Optional[str] = None,
+    objection: Optional[str] = None,
+    follow_up: Optional[str] = None,
+    announcement_id: Optional[str] = None,
+    draw_date: Optional[str] = None,
+    _admin: User = Depends(require_super_admin_or_permission("enquiries")),
+    db: AsyncSession = Depends(get_db),
+):
+    payload = await ctrl_export(
+        db,
+        search=search,
+        status=status,
+        source=source,
+        objection=objection,
+        follow_up=follow_up,
+        announcement_id=announcement_id,
+        draw_date=draw_date,
+    )
+    return StreamingResponse(
+        BytesIO(payload),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="enquiries.xlsx"'},
+    )
+
+
 @admin_router.get("/{enquiry_id}", response_model=UnifiedEnquiryOut)
 async def get_enquiry(
     enquiry_id: str,
@@ -95,6 +127,8 @@ async def list_enquiries(
     source: Optional[str] = None,
     objection: Optional[str] = None,
     follow_up: Optional[str] = None,
+    announcement_id: Optional[str] = None,
+    draw_date: Optional[str] = None,
     _admin: User = Depends(require_super_admin_or_permission("enquiries")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -109,6 +143,8 @@ async def list_enquiries(
         source=source,
         objection=objection,
         follow_up=follow_up,
+        announcement_id=announcement_id,
+        draw_date=draw_date,
     )
 
 

@@ -32,6 +32,11 @@ class SiteAnnouncementCreate(BaseModel):
     start_date: Optional[datetime] = None
     expires_at: Optional[datetime] = None
     is_active: bool = True
+    show_on_website: bool = True
+    lucky_draw_enabled: bool = False
+    lucky_draw_slug: Optional[str] = Field(None, max_length=80)
+    lucky_draw_days: int = Field(1, ge=1, le=30)
+    lucky_draw_reveal_time: str = Field("18:00", max_length=5)
     sort_order: int = 0
 
     @field_validator("text")
@@ -101,6 +106,11 @@ class SiteAnnouncementUpdate(BaseModel):
     start_date: Optional[datetime] = None
     expires_at: Optional[datetime] = None
     is_active: Optional[bool] = None
+    show_on_website: Optional[bool] = None
+    lucky_draw_enabled: Optional[bool] = None
+    lucky_draw_slug: Optional[str] = Field(None, max_length=80)
+    lucky_draw_days: Optional[int] = Field(None, ge=1, le=30)
+    lucky_draw_reveal_time: Optional[str] = Field(None, max_length=5)
     sort_order: Optional[int] = None
 
     @field_validator("text")
@@ -173,6 +183,11 @@ class SiteAnnouncementOut(BaseModel):
     start_date: Optional[datetime] = None
     expires_at: Optional[datetime] = None
     is_active: bool
+    show_on_website: bool = True
+    lucky_draw_enabled: bool = False
+    lucky_draw_slug: Optional[str] = None
+    lucky_draw_days: int = 1
+    lucky_draw_reveal_time: str = "18:00"
     sort_order: int
     created_at: datetime
     updated_at: datetime
@@ -206,8 +221,13 @@ class SiteAnnouncementPublicOut(BaseModel):
     qr_code_url: Optional[str] = None
     modal_delay_seconds: int = 5
     expires_at: Optional[datetime] = None
+    lucky_draw_enabled: bool = False
+    lucky_draw_slug: Optional[str] = None
+    lucky_draw_days: int = 1
+    lucky_draw_reveal_time: str = "18:00"
+    start_date: Optional[datetime] = None
 
-    @field_serializer("event_date", "expires_at")
+    @field_serializer("event_date", "expires_at", "start_date")
     def serialize_datetimes(self, value: Optional[datetime]) -> Optional[str]:
         return _utc_iso(value)
 

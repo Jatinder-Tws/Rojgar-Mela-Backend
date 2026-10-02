@@ -44,7 +44,10 @@ async def list_public_announcements(
     db: AsyncSession = Depends(get_db),
 ):
     now = datetime.utcnow()
-    query = select(SiteAnnouncement).where(SiteAnnouncement.is_active.is_(True))
+    query = select(SiteAnnouncement).where(
+        SiteAnnouncement.is_active.is_(True),
+        SiteAnnouncement.show_on_website.is_(True),
+    )
 
     # Auto-hide expired
     query = query.where(
@@ -173,8 +176,15 @@ async def create_announcement(
         start_date=_to_naive_utc(body.start_date),
         expires_at=_to_naive_utc(body.expires_at),
         is_active=body.is_active,
+        show_on_website=body.show_on_website,
+        lucky_draw_enabled=body.lucky_draw_enabled,
+        lucky_draw_days=body.lucky_draw_days,
+        lucky_draw_reveal_time=body.lucky_draw_reveal_time or "18:00",
         sort_order=body.sort_order,
     )
+    if body.lucky_draw_enabled:
+        from app.modules.jobs_portal.controllers.event_lucky_controller import unique_lucky_slug
+        row.lucky_draw_slug = await unique_lucky_slug(db, body.title or body.text[:40])
     db.add(row)
     await db.commit()
     await db.refresh(row)
@@ -211,6 +221,9 @@ async def update_announcement(
         if key in ("event_date", "start_date", "expires_at") and isinstance(value, datetime):
             value = _to_naive_utc(value)
         setattr(row, key, value)
+    if row.lucky_draw_enabled and not row.lucky_draw_slug:
+        from app.modules.jobs_portal.controllers.event_lucky_controller import unique_lucky_slug
+        row.lucky_draw_slug = await unique_lucky_slug(db, row.title or row.text[:40], exclude_id=row.id)
     row.updated_at = datetime.utcnow()
     await db.commit()
     await db.refresh(row)

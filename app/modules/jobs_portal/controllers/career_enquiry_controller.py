@@ -76,10 +76,12 @@ def _career_to_unified(item: CareerEnquiry) -> UnifiedEnquiryOut:
         created_at=item.created_at,
         updated_at=item.updated_at,
         consent_to_contact=item.consent_to_contact,
-        event_name=item.event_name,
         ticket_number=item.ticket_number,
-        prize_title=item.prize_title,
-        event_form_id=item.event_form_id,
+        is_event_winner=bool(item.is_event_winner),
+        event_title=item.event_title,
+        draw_date=item.draw_date,
+        announcement_id=item.announcement_id,
+        location=item.location,
         **_follow_up_fields(item),
     )
 
@@ -247,13 +249,10 @@ def _career_filters(
     qualification: Optional[str] = None,
     objection: Optional[str] = None,
     follow_up: Optional[str] = None,
-    event_only: Optional[bool] = None,
+    announcement_id: Optional[str] = None,
+    draw_date: Optional[str] = None,
 ) -> list:
     filters = []
-    if event_only is True:
-        filters.append(CareerEnquiry.event_form_id.is_not(None))
-    elif event_only is False:
-        filters.append(CareerEnquiry.event_form_id.is_(None))
     if search and search.strip():
         term = f"%{search.strip()}%"
         filters.append(
@@ -268,9 +267,9 @@ def _career_filters(
                 CareerEnquiry.admin_notes.ilike(term),
                 CareerEnquiry.final_outcome.ilike(term),
                 CareerEnquiry.preferred_call_time.ilike(term),
-                CareerEnquiry.event_name.ilike(term),
                 CareerEnquiry.ticket_number.ilike(term),
-                CareerEnquiry.prize_title.ilike(term),
+                CareerEnquiry.event_title.ilike(term),
+                CareerEnquiry.location.ilike(term),
             )
         )
     if status and status.strip() and status.strip() != "all":
@@ -297,6 +296,10 @@ def _career_filters(
             filters.append(CareerEnquiry.next_follow_up_date > end)
         elif key == "missing":
             filters.append(CareerEnquiry.next_follow_up_date.is_(None))
+    if announcement_id and announcement_id.strip():
+        filters.append(CareerEnquiry.announcement_id == announcement_id.strip())
+    if draw_date and draw_date.strip():
+        filters.append(CareerEnquiry.draw_date == draw_date.strip())
     return filters
 
 
@@ -355,7 +358,8 @@ async def _list_career_page(
     qualification: Optional[str] = None,
     objection: Optional[str] = None,
     follow_up: Optional[str] = None,
-    event_only: Optional[bool] = None,
+    announcement_id: Optional[str] = None,
+    draw_date: Optional[str] = None,
 ) -> Tuple[List[CareerEnquiry], int]:
     filters = _career_filters(
         search=search,
@@ -364,7 +368,8 @@ async def _list_career_page(
         qualification=qualification,
         objection=objection,
         follow_up=follow_up,
-        event_only=event_only,
+        announcement_id=announcement_id,
+        draw_date=draw_date,
     )
     count_query = select(func.count()).select_from(CareerEnquiry)
     query = select(CareerEnquiry)
@@ -419,8 +424,9 @@ async def _list_all_merged(
     qualification: Optional[str] = None,
     objection: Optional[str] = None,
     follow_up: Optional[str] = None,
+    announcement_id: Optional[str] = None,
+    draw_date: Optional[str] = None,
     include_contact: bool = True,
-    event_only: Optional[bool] = None,
 ) -> CareerEnquiryListResponse:
     """Merge career + contact rows (rare path). Still paginates the merged result."""
     career_filters = _career_filters(
@@ -430,7 +436,8 @@ async def _list_all_merged(
         qualification=qualification,
         objection=objection,
         follow_up=follow_up,
-        event_only=event_only,
+        announcement_id=announcement_id,
+        draw_date=draw_date,
     )
     career_query = select(CareerEnquiry)
     if career_filters:
@@ -476,15 +483,19 @@ async def admin_list_career_enquiries(
     source: Optional[str] = None,
     objection: Optional[str] = None,
     follow_up: Optional[str] = None,
+    announcement_id: Optional[str] = None,
+    draw_date: Optional[str] = None,
 ) -> CareerEnquiryListResponse:
     source_key = (source or "career").strip().lower()
-    if source_key not in {"all", "career", "contact", "event"}:
-        raise HTTPException(status_code=400, detail="Invalid source. Allowed: all, career, contact, event")
+    if source_key not in {"all", "career", "contact"}:
+        raise HTTPException(status_code=400, detail="Invalid source. Allowed: all, career, contact")
 
     # Domain / qualification only apply to Career Program rows.
     career_only_filters = bool(
         (domain and domain.strip() and domain.strip() != "all")
         or (qualification and qualification.strip() and qualification.strip() != "all")
+        or (announcement_id and announcement_id.strip())
+        or (draw_date and draw_date.strip())
     )
 
     # Single-source paths use DB-level OFFSET/LIMIT (frontend always sends career|contact).
@@ -499,29 +510,8 @@ async def admin_list_career_enquiries(
             qualification=qualification,
             objection=objection,
             follow_up=follow_up,
-            event_only=False,
-        )
-        return CareerEnquiryListResponse(
-            items=[_career_to_unified(row) for row in rows],
-            total=total,
-            page=page,
-            page_size=page_size,
-        )
-
-    if source_key == "event":
-        if career_only_filters:
-            pass
-        rows, total = await _list_career_page(
-            db,
-            page=page,
-            page_size=page_size,
-            search=search,
-            status=status,
-            domain=domain,
-            qualification=qualification,
-            objection=objection,
-            follow_up=follow_up,
-            event_only=True,
+            announcement_id=announcement_id,
+            draw_date=draw_date,
         )
         return CareerEnquiryListResponse(
             items=[_career_to_unified(row) for row in rows],
@@ -559,6 +549,8 @@ async def admin_list_career_enquiries(
         qualification=qualification,
         objection=objection,
         follow_up=follow_up,
+        announcement_id=announcement_id,
+        draw_date=draw_date,
         include_contact=not career_only_filters,
     )
 
@@ -575,12 +567,11 @@ async def admin_enquiry_pipeline_stats(
     source: Optional[str] = None,
 ) -> EnquiryPipelineStats:
     source_key = (source or "all").strip().lower()
-    if source_key not in {"all", "career", "contact", "event"}:
-        raise HTTPException(status_code=400, detail="Invalid source. Allowed: all, career, contact, event")
+    if source_key not in {"all", "career", "contact"}:
+        raise HTTPException(status_code=400, detail="Invalid source. Allowed: all, career, contact")
 
-    include_career = source_key in {"all", "career", "event"}
+    include_career = source_key in {"all", "career"}
     include_contact = source_key in {"all", "contact"}
-    event_only = True if source_key == "event" else False if source_key == "career" else None
     start, end = _day_bounds_utc()
 
     by_status = {key: 0 for key in PIPELINE_STATUSES}
@@ -588,22 +579,17 @@ async def admin_enquiry_pipeline_stats(
     follow_up_due_today = 0
 
     if include_career:
-        event_filters = []
-        if event_only is True:
-            event_filters = [CareerEnquiry.event_form_id.is_not(None)]
-        elif event_only is False:
-            event_filters = [CareerEnquiry.event_form_id.is_(None)]
-        total += await _count_model(db, CareerEnquiry, event_filters)
+        total += await _count_model(db, CareerEnquiry, [])
         follow_up_due_today += await _count_model(
             db,
             CareerEnquiry,
-            event_filters + [CareerEnquiry.next_follow_up_date.between(start, end)],
+            [CareerEnquiry.next_follow_up_date.between(start, end)],
         )
         for status in PIPELINE_STATUSES:
             by_status[status] += await _count_model(
                 db,
                 CareerEnquiry,
-                event_filters + [CareerEnquiry.status.in_(_status_match_values(status))],
+                [CareerEnquiry.status.in_(_status_match_values(status))],
             )
 
     if include_contact:
@@ -931,6 +917,7 @@ def _compose_manual_enquiry(data: dict) -> CareerEnquiry:
         preferred_call_time=call_time,
         final_outcome=((data.get("remarks") or "").strip()[:2000] or None),
         consent_to_contact=data.get("consent_to_contact") is True,
+        location=city[:200] or None,
         created_at=enquiry_at,
         updated_at=datetime.utcnow(),
     )
@@ -1246,5 +1233,67 @@ async def admin_import_enquiries(file, db: AsyncSession) -> EnquiryImportResult:
         await db.commit()
 
     return EnquiryImportResult(created=created, skipped=skipped, failed=failed, errors=errors)
+
+
+async def admin_export_enquiries_xlsx(
+    db: AsyncSession,
+    search: Optional[str] = None,
+    status: Optional[str] = None,
+    source: Optional[str] = None,
+    objection: Optional[str] = None,
+    follow_up: Optional[str] = None,
+    announcement_id: Optional[str] = None,
+    draw_date: Optional[str] = None,
+) -> bytes:
+    from io import BytesIO
+
+    from openpyxl import Workbook
+
+    result = await admin_list_career_enquiries(
+        db,
+        page=1,
+        page_size=5000,
+        search=search,
+        status=status,
+        source=source or ("career" if announcement_id else "all"),
+        objection=objection,
+        follow_up=follow_up,
+        announcement_id=announcement_id,
+        draw_date=draw_date,
+    )
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Enquiries"
+    sheet.append([
+        "Name",
+        "Email",
+        "Phone",
+        "Location",
+        "Source",
+        "Event",
+        "Ticket",
+        "Day",
+        "Winner",
+        "Stage",
+        "Registered",
+    ])
+    for item in result.items:
+        sheet.append([
+            item.name,
+            item.email,
+            item.phone or "",
+            item.location or "",
+            item.source,
+            item.event_title or item.domain or "",
+            item.ticket_number or "",
+            item.draw_date or "",
+            "Yes" if item.is_event_winner else "",
+            item.status,
+            item.created_at.isoformat() if item.created_at else "",
+        ])
+    buffer = BytesIO()
+    book.save(buffer)
+    return buffer.getvalue()
+
 
 
