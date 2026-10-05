@@ -6,8 +6,9 @@ Create Date: 2026-09-29 18:30:00.000000
 """
 from typing import Sequence, Union
 
-from alembic import op
 import sqlalchemy as sa
+
+from migrations.helpers import add_column_if_missing, drop_column_if_exists
 
 
 revision: str = "e1f2a3b4c5d6"
@@ -17,12 +18,12 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column("site_announcements", sa.Column("home_layout", sa.String(length=20), nullable=True))
-    op.add_column("site_announcements", sa.Column("badge_label", sa.String(length=80), nullable=True))
-    op.add_column("site_announcements", sa.Column("tagline", sa.String(length=255), nullable=True))
+    add_column_if_missing("site_announcements", sa.Column("home_layout", sa.String(length=20), nullable=True))
+    add_column_if_missing("site_announcements", sa.Column("badge_label", sa.String(length=80), nullable=True))
+    add_column_if_missing("site_announcements", sa.Column("tagline", sa.String(length=255), nullable=True))
 
 
 def downgrade() -> None:
-    op.drop_column("site_announcements", "tagline")
-    op.drop_column("site_announcements", "badge_label")
-    op.drop_column("site_announcements", "home_layout")
+    drop_column_if_exists("site_announcements", "tagline")
+    drop_column_if_exists("site_announcements", "badge_label")
+    drop_column_if_exists("site_announcements", "home_layout")

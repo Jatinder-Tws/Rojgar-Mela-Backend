@@ -17,9 +17,7 @@ class EventLuckyEntry(Base):
     __table_args__ = (UniqueConstraint("ticket_number", name="uq_event_lucky_ticket"),)
 
     id = Column(UUID(as_uuid=False), primary_key=True, default=_uuid)
-    # Physical column on the existing table is event_id.
     announcement_id = Column(
-        "event_id",
         UUID(as_uuid=False),
         ForeignKey("site_announcements.id", ondelete="CASCADE"),
         nullable=False,

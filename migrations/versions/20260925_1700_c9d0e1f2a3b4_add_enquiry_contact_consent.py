@@ -9,6 +9,8 @@ from typing import Sequence, Union
 from alembic import op
 import sqlalchemy as sa
 
+from migrations.helpers import add_column_if_missing, drop_column_if_exists
+
 
 revision: str = "c9d0e1f2a3b4"
 down_revision: Union[str, None] = "b8c9d0e1f2a3"
@@ -17,11 +19,11 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column(
+    add_column_if_missing(
         "career_enquiries",
         sa.Column("consent_to_contact", sa.Boolean(), nullable=False, server_default=sa.false()),
     )
 
 
 def downgrade() -> None:
-    op.drop_column("career_enquiries", "consent_to_contact")
+    drop_column_if_exists("career_enquiries", "consent_to_contact")

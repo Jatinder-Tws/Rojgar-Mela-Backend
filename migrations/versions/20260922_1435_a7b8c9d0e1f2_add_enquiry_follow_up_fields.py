@@ -9,6 +9,8 @@ from typing import Sequence, Union
 from alembic import op
 import sqlalchemy as sa
 
+from migrations.helpers import add_column_if_missing, drop_column_if_exists, table_exists
+
 
 revision: str = "a7b8c9d0e1f2"
 down_revision: Union[str, None] = "3531b13e7900"
@@ -29,8 +31,10 @@ TABLES = ("career_enquiries", "contact_inquiries")
 
 def upgrade() -> None:
     for table in TABLES:
+        if not table_exists(table):
+            continue
         for column_name, column_type in FOLLOW_UP_COLUMNS:
-            op.add_column(table, sa.Column(column_name, column_type, nullable=True))
+            add_column_if_missing(table, sa.Column(column_name, column_type, nullable=True))
 
         op.execute(
             f"UPDATE {table} SET status = 'follow_up_required' WHERE status = 'in_progress'"
@@ -43,6 +47,8 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     for table in TABLES:
+        if not table_exists(table):
+            continue
         op.execute(
             f"UPDATE {table} SET status = 'in_progress' WHERE status = 'follow_up_required'"
         )
@@ -52,4 +58,4 @@ def downgrade() -> None:
             f"WHERE status IN ('lost', 'visit_scheduled', 'counselling_done')"
         )
         for column_name, _ in reversed(FOLLOW_UP_COLUMNS):
-            op.drop_column(table, column_name)
+            drop_column_if_exists(table, column_name)
