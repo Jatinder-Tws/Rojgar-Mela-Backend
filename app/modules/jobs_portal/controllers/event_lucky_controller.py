@@ -11,7 +11,7 @@ from typing import Optional
 import redis.asyncio as aioredis
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_upload_dir, settings
@@ -275,17 +275,29 @@ async def register(slug: str, body, db: AsyncSession) -> dict:
     if body.track not in {"tech", "non_tech"}:
         raise HTTPException(status_code=400, detail="Select Tech or Non-tech")
     photo_url = _save_profile_photo(body.photo)
+    phone_key = phone[-10:] if len(phone) >= 10 else phone
 
-    existing = await db.execute(
+    # One verified registration per email for this event (existing platform users still allowed)
+    existing_email = await db.execute(
         select(EventLuckyEntry).where(
             EventLuckyEntry.announcement_id == event.id,
             EventLuckyEntry.email == email,
-            EventLuckyEntry.draw_date == draw_day,
             EventLuckyEntry.email_verified.is_(True),
         )
     )
-    if existing.scalar_one_or_none():
-        raise HTTPException(status_code=409, detail="This email already has a ticket for today")
+    if existing_email.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="This email is already registered for this event")
+
+    # One verified registration per phone for this event
+    existing_phone = await db.execute(
+        select(EventLuckyEntry).where(
+            EventLuckyEntry.announcement_id == event.id,
+            EventLuckyEntry.email_verified.is_(True),
+            func.right(EventLuckyEntry.phone, 10) == phone_key,
+        )
+    )
+    if existing_phone.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="This phone number is already registered for this event")
 
     pending_result = await db.execute(
         select(EventLuckyEntry).where(
