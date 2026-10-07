@@ -197,11 +197,11 @@ async def get_dashboard_analytics(
         select(func.count(Interview.id)).where(Interview.scheduled_at >= yesterday_start, Interview.scheduled_at < yesterday_end).scalar_subquery().label("interviews_yesterday"),
         select(func.count(Match.id)).where(Match.created_at >= day_start, Match.created_at < day_end).scalar_subquery().label("matches_today"),
         select(func.count(Match.id)).where(Match.created_at >= yesterday_start, Match.created_at < yesterday_end).scalar_subquery().label("matches_yesterday"),
-        select(func.count(Application.id)).where(Application.status == ApplicationStatus.shortlisted, Application.updated_at >= day_start, Application.updated_at < day_end).scalar_subquery().label("selections_today"),
-        select(func.count(Application.id)).where(Application.status == ApplicationStatus.shortlisted, Application.updated_at >= yesterday_start, Application.updated_at < yesterday_end).scalar_subquery().label("selections_yesterday"),
+        select(func.count(Application.id)).where(Application.status == ApplicationStatus.selected, Application.updated_at >= day_start, Application.updated_at < day_end).scalar_subquery().label("selections_today"),
+        select(func.count(Application.id)).where(Application.status == ApplicationStatus.selected, Application.updated_at >= yesterday_start, Application.updated_at < yesterday_end).scalar_subquery().label("selections_yesterday"),
         select(func.count(func.distinct(JobPosting.provider_id))).where(JobPosting.is_active.is_(True)).scalar_subquery().label("companies_active"),
-        select(func.count(func.distinct(JobPosting.provider_id))).where(JobPosting.is_active.is_(True), JobPosting.updated_at < day_end).scalar_subquery().label("companies_active_yesterday"),
-        select(func.count(JobPosting.id)).where(JobPosting.is_active.is_(True), JobPosting.created_at < day_end).scalar_subquery().label("active_jobs_yesterday"),
+        select(func.count(func.distinct(JobPosting.provider_id))).where(JobPosting.is_active.is_(True), JobPosting.created_at < day_start).scalar_subquery().label("companies_active_yesterday"),
+        select(func.count(JobPosting.id)).where(JobPosting.is_active.is_(True), JobPosting.created_at < day_start).scalar_subquery().label("active_jobs_yesterday"),
     )
 
     # Query 2: Summary Columns & Funnel Stage Counts (21 counts in a single query)
@@ -435,49 +435,26 @@ async def get_dashboard_analytics(
     )
 
     # ── 2. Run All Queries in Parallel using asyncio.gather ──────────────────
-    (
-        totals_res,
-        summary_counts_res,
-        score_dist_res,
-        match_stats_res,
-        industry_match_res,
-        gap_res,
-        growth_daily_res,
-        growth_weekly_res,
-        growth_monthly_res,
-        provider_growth_daily_res,
-        provider_growth_weekly_res,
-        provider_growth_monthly_res,
-        exp_res,
-        industry_res,
-        skills_res,
-        recruiter_res,
-        latest_seeker_res,
-        recent_job_res,
-        recent_app_res,
-        profile_res
-    ) = await asyncio.gather(
-        db.execute(totals_query),
-        db.execute(summary_counts_query),
-        db.execute(score_dist_query),
-        db.execute(match_stats_query),
-        db.execute(industry_match_query),
-        db.execute(gap_query),
-        db.execute(growth_daily_query),
-        db.execute(growth_weekly_query),
-        db.execute(growth_monthly_query),
-        db.execute(provider_growth_daily_query),
-        db.execute(provider_growth_weekly_query),
-        db.execute(provider_growth_monthly_query),
-        db.execute(exp_query),
-        db.execute(industry_query),
-        db.execute(skills_query),
-        db.execute(recruiter_query),
-        db.execute(latest_seeker_query),
-        db.execute(recent_job_query),
-        db.execute(recent_app_query),
-        db.execute(profile_query)
-    )
+    totals_res = await db.execute(totals_query)
+    summary_counts_res = await db.execute(summary_counts_query)
+    score_dist_res = await db.execute(score_dist_query)
+    match_stats_res = await db.execute(match_stats_query)
+    industry_match_res = await db.execute(industry_match_query)
+    gap_res = await db.execute(gap_query)
+    growth_daily_res = await db.execute(growth_daily_query)
+    growth_weekly_res = await db.execute(growth_weekly_query)
+    growth_monthly_res = await db.execute(growth_monthly_query)
+    provider_growth_daily_res = await db.execute(provider_growth_daily_query)
+    provider_growth_weekly_res = await db.execute(provider_growth_weekly_query)
+    provider_growth_monthly_res = await db.execute(provider_growth_monthly_query)
+    exp_res = await db.execute(exp_query)
+    industry_res = await db.execute(industry_query)
+    skills_res = await db.execute(skills_query)
+    recruiter_res = await db.execute(recruiter_query)
+    latest_seeker_res = await db.execute(latest_seeker_query)
+    recent_job_res = await db.execute(recent_job_query)
+    recent_app_res = await db.execute(recent_app_query)
+    profile_res = await db.execute(profile_query)
 
     # ── 3. Parse Consolidated Row Results ─────────────────────────────────────
     tot_row = totals_res.one()

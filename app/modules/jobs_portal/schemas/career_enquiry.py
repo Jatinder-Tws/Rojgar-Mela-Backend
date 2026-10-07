@@ -137,6 +137,7 @@ class UnifiedEnquiryOut(BaseModel):
     draw_date: Optional[str] = None
     announcement_id: Optional[str] = None
     location: Optional[str] = None
+    photo_url: Optional[str] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
 

@@ -39,7 +39,11 @@ def ist_today() -> str:
 
 async def _ensure_account(entry: EventLuckyEntry, db: AsyncSession) -> Optional[tuple]:
     result = await db.execute(select(User).where(User.email == entry.email))
-    if result.scalar_one_or_none():
+    existing = result.scalar_one_or_none()
+    if existing:
+        # Sync event photo onto the account when the user has none yet.
+        if entry.photo_url and not existing.profile_pic_url:
+            existing.profile_pic_url = entry.photo_url
         return None
     parts = (entry.full_name or "Guest").split()
     first_name = parts[0][:50]
@@ -57,6 +61,7 @@ async def _ensure_account(entry: EventLuckyEntry, db: AsyncSession) -> Optional[
         onboarding_complete=False,
         is_first_login=True,
         totp_enabled=False,
+        profile_pic_url=entry.photo_url,
     )
     if role == UserRole.provider:
         user.company_name = (entry.organization or "")[:200]
@@ -364,6 +369,7 @@ async def verify(slug: str, pending_id: str, otp: str, db: AsyncSession) -> dict
         announcement_id=event.id,
         draw_date=entry.draw_date,
         location=(entry.location or "")[:200] or None,
+        photo_url=entry.photo_url,
         message=(
             f"Lucky draw registration\nEvent: {event.title}\nTicket: {entry.ticket_number}\n"
             f"Day: {entry.draw_date}\nLocation: {entry.location or '-'}\nOrganisation: {entry.organization}\n"

@@ -41,5 +41,6 @@ class CareerEnquiry(Base):
     draw_date = Column(String(10), nullable=True)
     event_title = Column(String(200), nullable=True)
     location = Column(String(200), nullable=True)
+    photo_url = Column(String(400), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
