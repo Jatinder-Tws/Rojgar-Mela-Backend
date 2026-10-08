@@ -42,13 +42,19 @@ def _ttl_seconds() -> int:
     return max(60, minutes * 60)
 
 
-async def store_otp(email: str, code: str, purpose: str = PURPOSE_EMAIL_VERIFY) -> None:
+async def store_otp(
+    email: str,
+    code: str,
+    purpose: str = PURPOSE_EMAIL_VERIFY,
+    ttl_seconds: Optional[int] = None,
+) -> None:
     """Store (or replace) an OTP for `email`. Previous code for the same purpose is overwritten."""
     if not email or not code:
         raise ValueError("email and code are required")
+    ttl = int(ttl_seconds) if ttl_seconds and int(ttl_seconds) > 0 else _ttl_seconds()
     try:
         r = await _get_redis()
-        await r.setex(_key(purpose, email), _ttl_seconds(), code.strip())
+        await r.setex(_key(purpose, email), ttl, code.strip())
     except Exception as exc:
         logger.exception("Failed to store OTP in Redis for %s", email)
         raise RuntimeError("Unable to store verification code. Please try again.") from exc

@@ -27,6 +27,16 @@ from app.shared.services.otp_redis_service import PURPOSE_EMAIL_VERIFY, store_ot
 logger = logging.getLogger(__name__)
 IST = timezone(timedelta(hours=5, minutes=30))
 OTP_PURPOSE = f"{PURPOSE_EMAIL_VERIFY}:lucky_event"
+LUCKY_OTP_TTL_SECONDS = 15 * 60
+LUCKY_OTP_EXPIRE_MINUTES = 15
+LUCKY_RESEND_SECONDS = 60
+
+
+def _optional_text(value: Optional[str], limit: int) -> Optional[str]:
+    text = (value or "").strip()
+    if not text:
+        return None
+    return text[:limit]
 
 
 def ist_now() -> datetime:
@@ -280,28 +290,29 @@ async def register(slug: str, body, db: AsyncSession) -> dict:
     if body.track not in {"tech", "non_tech"}:
         raise HTTPException(status_code=400, detail="Select Tech or Non-tech")
     photo_url = _save_profile_photo(body.photo)
+    interests = _optional_text(getattr(body, "interests", None), 1000)
+    visitor_query = _optional_text(getattr(body, "visitor_query", None), 2000)
     phone_key = phone[-10:] if len(phone) >= 10 else phone
 
     # One verified registration per email for this event (existing platform users still allowed)
     existing_email = await db.execute(
-        select(EventLuckyEntry).where(
+        select(EventLuckyEntry.id).where(
             EventLuckyEntry.announcement_id == event.id,
             EventLuckyEntry.email == email,
             EventLuckyEntry.email_verified.is_(True),
-        )
+        ).limit(1)
     )
-    if existing_email.scalar_one_or_none():
+    if existing_email.first():
         raise HTTPException(status_code=409, detail="This email is already registered for this event")
 
-    # One verified registration per phone for this event
     existing_phone = await db.execute(
-        select(EventLuckyEntry).where(
+        select(EventLuckyEntry.id).where(
             EventLuckyEntry.announcement_id == event.id,
             EventLuckyEntry.email_verified.is_(True),
             func.right(EventLuckyEntry.phone, 10) == phone_key,
-        )
+        ).limit(1)
     )
-    if existing_phone.scalar_one_or_none():
+    if existing_phone.first():
         raise HTTPException(status_code=409, detail="This phone number is already registered for this event")
 
     pending_result = await db.execute(
@@ -310,9 +321,9 @@ async def register(slug: str, body, db: AsyncSession) -> dict:
             EventLuckyEntry.email == email,
             EventLuckyEntry.draw_date == draw_day,
             EventLuckyEntry.email_verified.is_(False),
-        )
+        ).order_by(EventLuckyEntry.created_at.desc()).limit(1)
     )
-    entry = pending_result.scalar_one_or_none()
+    entry = pending_result.scalars().first()
     if entry is None:
         entry = EventLuckyEntry(
             announcement_id=event.id,
@@ -324,6 +335,8 @@ async def register(slug: str, body, db: AsyncSession) -> dict:
             organization=org,
             track=body.track,
             photo_url=photo_url,
+            interests=interests,
+            visitor_query=visitor_query,
             draw_eligible=eligible,
             draw_date=draw_day,
         )
@@ -336,13 +349,33 @@ async def register(slug: str, body, db: AsyncSession) -> dict:
         entry.organization = org
         entry.track = body.track
         entry.photo_url = photo_url
+        entry.interests = interests
+        entry.visitor_query = visitor_query
         entry.draw_eligible = eligible
         entry.draw_date = draw_day
     await db.commit()
     await db.refresh(entry)
     code = generate_otp()
-    await store_otp(_otp_key(entry.id), code, purpose=OTP_PURPOSE)
-    send_otp_email_task.delay(email, code, entry.full_name.split(" ")[0])
+    try:
+        await store_otp(_otp_key(entry.id), code, purpose=OTP_PURPOSE, ttl_seconds=LUCKY_OTP_TTL_SECONDS)
+    except Exception:
+        logger.exception("Lucky event OTP store failed for %s", entry.id)
+        raise HTTPException(
+            status_code=503,
+            detail="Your details were saved, but we could not send the verification code. Please submit the form again.",
+        )
+    try:
+        await _arm_resend_cooldown(entry.id)
+    except Exception:
+        logger.warning("Lucky event resend timer failed for %s", entry.id, exc_info=True)
+    try:
+        send_otp_email_task.delay(email, code, entry.full_name.split(" ")[0], LUCKY_OTP_EXPIRE_MINUTES)
+    except Exception:
+        logger.exception("Lucky event OTP email queue failed for %s", entry.id)
+        raise HTTPException(
+            status_code=503,
+            detail="Your details were saved, but the verification email could not be sent. Please submit the form again.",
+        )
     return {"pending_id": entry.id, "email_hint": _hint(email), "message": "We sent a verification code to your email."}
 
 
@@ -358,6 +391,19 @@ async def verify(slug: str, pending_id: str, otp: str, db: AsyncSession) -> dict
     entry.verified_at = datetime.utcnow()
     entry.ticket_number = await _unique_ticket(db)
     track_label = "Tech" if entry.track == "tech" else "Non-tech"
+    note_lines = [
+        "Lucky draw registration",
+        f"Event: {event.title}",
+        f"Ticket: {entry.ticket_number}",
+        f"Day: {entry.draw_date}",
+        f"Location: {entry.location or '-'}",
+        f"Organisation: {entry.organization}",
+        f"Track: {track_label}",
+    ]
+    if entry.interests:
+        note_lines.append(f"Interest: {entry.interests}")
+    if entry.visitor_query:
+        note_lines.append(f"Query: {entry.visitor_query}")
     enquiry = CareerEnquiry(
         full_name=entry.full_name,
         email=entry.email,
@@ -370,11 +416,9 @@ async def verify(slug: str, pending_id: str, otp: str, db: AsyncSession) -> dict
         draw_date=entry.draw_date,
         location=(entry.location or "")[:200] or None,
         photo_url=entry.photo_url,
-        message=(
-            f"Lucky draw registration\nEvent: {event.title}\nTicket: {entry.ticket_number}\n"
-            f"Day: {entry.draw_date}\nLocation: {entry.location or '-'}\nOrganisation: {entry.organization}\n"
-            f"Track: {track_label}"
-        ),
+        interests=entry.interests,
+        visitor_query=entry.visitor_query,
+        message="\n".join(note_lines),
         status=DEFAULT_STATUS,
         consent_to_contact=True,
     )
@@ -396,9 +440,22 @@ async def verify(slug: str, pending_id: str, otp: str, db: AsyncSession) -> dict
 async def resend(slug: str, pending_id: str, db: AsyncSession) -> dict:
     event = await _event_by_slug(slug, db)
     entry = await _pending(event.id, pending_id, db)
+    await _require_resend_ready(entry.id)
     code = generate_otp()
-    await store_otp(_otp_key(entry.id), code, purpose=OTP_PURPOSE)
-    send_otp_email_task.delay(entry.email, code, entry.full_name.split(" ")[0])
+    try:
+        await store_otp(_otp_key(entry.id), code, purpose=OTP_PURPOSE, ttl_seconds=LUCKY_OTP_TTL_SECONDS)
+    except Exception:
+        logger.exception("Lucky event OTP resend failed for %s", entry.id)
+        raise HTTPException(status_code=503, detail="We could not send a new code. Please try again in a moment.")
+    try:
+        await _arm_resend_cooldown(entry.id)
+    except Exception:
+        logger.warning("Lucky event resend timer failed for %s", entry.id, exc_info=True)
+    try:
+        send_otp_email_task.delay(entry.email, code, entry.full_name.split(" ")[0], LUCKY_OTP_EXPIRE_MINUTES)
+    except Exception:
+        logger.exception("Lucky event OTP email queue failed for %s", entry.id)
+        raise HTTPException(status_code=503, detail="We could not send a new code. Please try again in a moment.")
     return {"pending_id": entry.id, "email_hint": _hint(entry.email), "message": "A new code was sent."}
 
 
@@ -704,6 +761,25 @@ def _save_profile_photo(raw: str) -> str:
 
 def _otp_key(entry_id: str) -> str:
     return f"lucky-{entry_id}@rojgarmela.local"
+
+
+def _resend_key(entry_id: str) -> str:
+    return f"otp-resend:lucky_event:{entry_id}"
+
+
+async def _arm_resend_cooldown(entry_id: str) -> None:
+    redis = await _stage_redis()
+    await redis.set(_resend_key(entry_id), "1", ex=LUCKY_RESEND_SECONDS)
+
+
+async def _require_resend_ready(entry_id: str) -> None:
+    redis = await _stage_redis()
+    ttl = await redis.ttl(_resend_key(entry_id))
+    if ttl and ttl > 0:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Please wait {ttl} seconds before requesting a new code",
+        )
 
 
 def _hint(email: str) -> str:

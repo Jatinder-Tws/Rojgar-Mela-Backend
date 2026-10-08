@@ -283,14 +283,20 @@ async def _send_branded_email(
     await send_campaign_email(to_email, subject, html, raise_on_error=raise_on_error)
 
 
-async def send_otp_email(to_email: str, otp: str, first_name: str = "there") -> None:
+async def send_otp_email(
+    to_email: str,
+    otp: str,
+    first_name: str = "there",
+    expires_minutes: int | None = None,
+) -> None:
     """Send a styled OTP verification email."""
+    minutes = int(expires_minutes) if expires_minutes else int(getattr(settings, "OTP_EXPIRE_MINUTES", 5) or 5)
     template = _env.get_template("otp_email.html")
     html = template.render(
         first_name=first_name or "there",
         otp=otp,
         year=datetime.utcnow().year,
-        expires_minutes=int(getattr(settings, "OTP_EXPIRE_MINUTES", 5) or 5),
+        expires_minutes=minutes,
         login_url=f"{settings.FRONTEND_URL.rstrip('/')}/login",
         **_support_context(),
     )

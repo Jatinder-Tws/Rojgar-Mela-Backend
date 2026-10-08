@@ -30,11 +30,16 @@ def run_async(coro):
     retry_kwargs={"max_retries": 5, "countdown": 2},
     retry_backoff=True,
 )
-def send_otp_email_task(email: str, otp: str, first_name: str = "there"):
+def send_otp_email_task(email: str, otp: str, first_name: str = "there", expires_minutes: int | None = None):
     """Task for sending OTP emails via high_priority queue with automatic retries."""
     async def _send():
         from app.shared.services.email_service import send_otp_email
-        await send_otp_email(to_email=email, otp=otp, first_name=first_name or "there")
+        await send_otp_email(
+            to_email=email,
+            otp=otp,
+            first_name=first_name or "there",
+            expires_minutes=expires_minutes,
+        )
 
     logger.info(f"[Task: send_otp_email_task] Enqueued OTP for {email}")
     run_async(_send())

@@ -31,6 +31,8 @@ class EventLuckyEntry(Base):
     organization = Column(String(200), nullable=True)
     track = Column(String(20), nullable=True)  # tech | non_tech
     photo_url = Column(String(400), nullable=True)
+    interests = Column(Text, nullable=True)
+    visitor_query = Column(Text, nullable=True)
     draw_eligible = Column(Boolean, nullable=False, default=True)
     ticket_number = Column(String(40), nullable=True)
     draw_date = Column(String(10), nullable=False, index=True)

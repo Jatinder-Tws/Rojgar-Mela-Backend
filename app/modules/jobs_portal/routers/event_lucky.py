@@ -22,6 +22,8 @@ class RegisterIn(BaseModel):
     organization: str = Field(..., min_length=2, max_length=200)
     track: Literal["tech", "non_tech"]
     photo: str = Field(..., min_length=30, max_length=4_000_000)
+    interests: Optional[str] = Field(None, max_length=1000)
+    visitor_query: Optional[str] = Field(None, max_length=2000)
 
 
 class PendingIn(BaseModel):

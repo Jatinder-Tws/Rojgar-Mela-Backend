@@ -83,6 +83,8 @@ def _career_to_unified(item: CareerEnquiry) -> UnifiedEnquiryOut:
         announcement_id=item.announcement_id,
         location=item.location,
         photo_url=item.photo_url,
+        interests=item.interests,
+        visitor_query=item.visitor_query,
         **_follow_up_fields(item),
     )
 
