@@ -59,6 +59,8 @@ class JobCreate(BaseModel):
     shift: Optional[str] = None
     employment_type: Optional[str] = None
     perks: Optional[List[str]] = []
+    posting_details: Optional[dict] = None
+    is_active: Optional[bool] = True
 
     @field_validator("title")
     @classmethod
@@ -111,6 +113,7 @@ class JobUpdate(BaseModel):
     shift: Optional[str] = None
     employment_type: Optional[str] = None
     perks: Optional[List[str]] = None
+    posting_details: Optional[dict] = None
 
     @field_validator("title")
     @classmethod
@@ -166,6 +169,9 @@ class JobOut(BaseModel):
     shift: Optional[str] = None
     employment_type: Optional[str] = None
     perks: Optional[List[str]] = []
+    posting_details: Optional[dict] = None
+    source_platform: Optional[str] = None
+    external_apply_url: Optional[str] = None
     company_name: Optional[str] = None
     company_website: Optional[str] = None
     company_about: Optional[str] = None
@@ -419,6 +425,39 @@ class JobDescriptionOnlyResponse(BaseModel):
 
 class JobSkillsResponse(BaseModel):
     skills: List[str]
+
+
+class VoiceJobParseRequest(BaseModel):
+    transcript: str = ""
+    audio_base64: Optional[str] = None
+    audio_mime: Optional[str] = None
+
+
+class VoiceJobParseResponse(BaseModel):
+    title: Optional[str] = None
+    employment_type: Optional[str] = None
+    engagement: Optional[str] = None
+    exp_min: Optional[str] = None
+    exp_max: Optional[str] = None
+    relevant_exp_min: Optional[str] = None
+    relevant_exp_max: Optional[str] = None
+    post_count: Optional[str] = None
+    sal_min_annual: Optional[str] = None
+    sal_max_annual: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    country: Optional[str] = None
+    job_type: Optional[str] = None
+    summary: Optional[str] = None
+    responsibilities: Optional[str] = None
+    required_skills: List[str] = []
+    preferred_skills: List[str] = []
+    qualifications: Optional[str] = None
+    education: Optional[str] = None
+    application_deadline: Optional[str] = None
+    interview_process: Optional[str] = None
+    benefits: List[str] = []
+    additional_notes: Optional[str] = None
 
 
 class ResumeImproveRequest(BaseModel):

@@ -187,6 +187,10 @@ async def create_career_enquiry(body: CareerEnquiryCreate, db: AsyncSession) -> 
         raise HTTPException(status_code=400, detail="Enter a valid 10–12 digit phone number")
 
     message = (body.message or "").strip() or None
+    location = (body.location or "").strip() or None
+    preferred_call_time = (body.preferred_call_time or "").strip() or None
+    interests = (body.interests or "").strip() or None
+    visitor_query = (body.visitor_query or "").strip() or None
 
     enquiry = CareerEnquiry(
         full_name=body.full_name.strip(),
@@ -195,6 +199,11 @@ async def create_career_enquiry(body: CareerEnquiryCreate, db: AsyncSession) -> 
         qualification=body.qualification.strip(),
         domain=body.domain.strip(),
         message=message,
+        location=location,
+        preferred_call_time=preferred_call_time,
+        interests=interests,
+        visitor_query=visitor_query,
+        consent_to_contact=bool(body.consent_to_contact),
         status=DEFAULT_STATUS,
     )
     db.add(enquiry)
@@ -273,6 +282,8 @@ def _career_filters(
                 CareerEnquiry.ticket_number.ilike(term),
                 CareerEnquiry.event_title.ilike(term),
                 CareerEnquiry.location.ilike(term),
+                CareerEnquiry.interests.ilike(term),
+                CareerEnquiry.visitor_query.ilike(term),
             )
         )
     if status and status.strip() and status.strip() != "all":
@@ -1272,6 +1283,12 @@ async def admin_export_enquiries_xlsx(
         "Email",
         "Phone",
         "Location",
+        "Qualification",
+        "Program",
+        "Preferred contact",
+        "Interests",
+        "Message",
+        "Other query",
         "Source",
         "Event",
         "Ticket",
@@ -1286,6 +1303,12 @@ async def admin_export_enquiries_xlsx(
             item.email,
             item.phone or "",
             item.location or "",
+            item.qualification or "",
+            item.domain or "",
+            item.preferred_call_time or "",
+            item.interests or "",
+            item.message or "",
+            item.visitor_query or "",
             item.source,
             item.event_title or item.domain or "",
             item.ticket_number or "",

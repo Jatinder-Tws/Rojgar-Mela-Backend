@@ -22,6 +22,11 @@ class TicketMessageCreate(BaseModel):
     body: str = Field(..., min_length=1, max_length=5000)
 
 
+class TicketUpdate(BaseModel):
+    subject: Optional[str] = Field(default=None, min_length=3, max_length=200)
+    description: Optional[str] = Field(default=None, min_length=10, max_length=5000)
+
+
 class TicketMessageOut(BaseModel):
     id: str
     author_id: Optional[str] = None

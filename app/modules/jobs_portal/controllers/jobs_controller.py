@@ -16,8 +16,14 @@ from app.modules.jobs_portal.schemas.jobs import (
     JobSkillsResponse,
     JobTitleRequest,
     JobUpdate,
+    VoiceJobParseRequest,
+    VoiceJobParseResponse,
 )
-from app.modules.jobs_portal.services.ai_jobcreation_service import generate_job_descriptions, generate_job_skills
+from app.modules.jobs_portal.services.ai_jobcreation_service import (
+    generate_job_descriptions,
+    generate_job_skills,
+    parse_spoken_job,
+)
 from app.modules.jobs_portal.services.job_scrappers import search_external_jobs_paginated, clear_job_search_cache
 
 from app.modules.jobs_portal.services.jobs_service import (
@@ -27,10 +33,43 @@ from app.modules.jobs_portal.services.jobs_service import (
     update_job_service,
     activate_job_service,
     schedule_activation,
+    apply_posting_details,
 )
 from app.modules.jobs_portal.services.seeker_matching_service import embed_and_store_job
 from app.shared.services.audit_service import log_audit_event
 
+
+
+def _queue_job_processing(background_tasks: BackgroundTasks, job_id: str) -> None:
+    async def _process_job(target_id: str):
+        from app.core.database import AsyncSessionLocal
+        from app.modules.jobs_portal.services.seeker_matching_service import (
+            embed_and_store_job,
+            proactive_match_job_to_candidates,
+        )
+        import logging
+
+        logger = logging.getLogger(__name__)
+
+        async with AsyncSessionLocal() as session:
+            try:
+                job_obj = await session.get(JobPosting, target_id)
+                if not job_obj:
+                    return
+
+                await embed_and_store_job(job_obj, session)
+                logger.info(f"[JOB] Embedding complete for {target_id}")
+
+                await proactive_match_job_to_candidates(target_id)
+                logger.info(f"[JOB] Proactive matching (seekers) complete for {target_id}")
+
+                from app.shared.services.celery_tasks import run_external_matching_for_job
+                run_external_matching_for_job.delay(target_id)
+                logger.info(f"[JOB] External candidate matching queued via Celery for {target_id}")
+            except Exception as exc:
+                logger.exception(f"[JOB] Background processing failed for {target_id}: {exc}")
+
+    background_tasks.add_task(_process_job, job_id)
 
 
 async def create_job(
@@ -74,7 +113,9 @@ async def create_job(
         shift=body.shift,
         employment_type=body.employment_type,
         perks=body.perks or [],
+        is_active=True if body.is_active is None else bool(body.is_active),
     )
+    apply_posting_details(job, body.posting_details)
     db.add(job)
     await log_audit_event(
         db,
@@ -89,36 +130,8 @@ async def create_job(
     await db.commit()
     await db.refresh(job)
 
-    async def _process_job(job_id: str):
-        from app.core.database import AsyncSessionLocal
-        from app.modules.jobs_portal.services.seeker_matching_service import (
-            embed_and_store_job,
-            proactive_match_job_to_candidates,
-        )
-        import logging
-
-        logger = logging.getLogger(__name__)
-
-        async with AsyncSessionLocal() as s:
-            try:
-                job_obj = await s.get(JobPosting, job_id)
-                if not job_obj:
-                    return
-
-                await embed_and_store_job(job_obj, s)
-                logger.info(f"[JOB] Embedding complete for {job_id}")
-
-                await proactive_match_job_to_candidates(job_id)
-                logger.info(f"[JOB] Proactive matching (seekers) complete for {job_id}")
-
-                from app.shared.services.celery_tasks import run_external_matching_for_job
-                run_external_matching_for_job.delay(job_id)
-                logger.info(f"[JOB] External candidate matching queued via Celery for {job_id}")
-
-            except Exception as e:
-                logger.exception(f"[JOB] Background processing failed for {job_id}: {e}")
-
-    background_tasks.add_task(_process_job, job.id)
+    if job.is_active:
+        _queue_job_processing(background_tasks, job.id)
     return JobOut.model_validate(job)
 
 
@@ -175,7 +188,9 @@ async def list_jobs(
         base_query = base_query.where(and_(*filters))
 
     if page is not None and page_size is not None:
-        count_query = select(func.count(JobPosting.id)).select_from(base_query.subquery())
+        # Count job rows only. Counting JobPosting.id against the entity
+        # subquery cross-joins the table and inflates the total (vacancy-sized).
+        count_query = select(func.count()).select_from(base_query.order_by(None).subquery())
         total_result = await db.execute(count_query)
         total = total_result.scalar() or 0
         offset = (page - 1) * page_size
@@ -238,11 +253,14 @@ async def update_job_patch(
     if not job or str(job.provider_id) != str(user.id):
         raise HTTPException(status_code=404, detail="Job not found")
 
+    was_active = bool(job.is_active)
     content_changed = await update_job_service(job, body, background_tasks)
     await db.commit()
     await db.refresh(job)
 
-    if content_changed and job.is_active:
+    if job.is_active and not was_active:
+        _queue_job_processing(background_tasks, str(job.id))
+    elif content_changed and job.is_active:
         from app.modules.jobs_portal.services.seeker_matching_service import invalidate_job_matches
         background_tasks.add_task(invalidate_job_matches, job.id)
 
@@ -265,6 +283,7 @@ async def update_job_put(
     if not job or str(job.provider_id) != str(user.id):
         raise HTTPException(status_code=404, detail="Job not found")
 
+    was_active = bool(job.is_active)
     content_changed = await update_job_service(job, body, background_tasks)
     await log_audit_event(
         db,
@@ -278,7 +297,9 @@ async def update_job_put(
     await db.commit()
     await db.refresh(job)
 
-    if content_changed and job.is_active:
+    if job.is_active and not was_active:
+        _queue_job_processing(background_tasks, str(job.id))
+    elif content_changed and job.is_active:
         from app.modules.jobs_portal.services.seeker_matching_service import invalidate_job_matches
         background_tasks.add_task(invalidate_job_matches, job.id)
 
@@ -376,6 +397,17 @@ async def generate_description(payload: JobDescriptionRequest) -> JobDescription
     except Exception as e:
         print(f"Error generating description: {e}")
         raise HTTPException(status_code=500, detail="Something went wrong")
+
+
+async def parse_voice_job(payload: VoiceJobParseRequest) -> VoiceJobParseResponse:
+    try:
+        result = await parse_spoken_job(payload.transcript, payload.audio_base64, payload.audio_mime)
+        return VoiceJobParseResponse.model_validate(result)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        print(f"Error parsing spoken job: {exc}")
+        raise HTTPException(status_code=500, detail="Could not understand that recording. Please try again.") from exc
 
 
 async def generate_skills(payload: JobTitleRequest) -> JobSkillsResponse:

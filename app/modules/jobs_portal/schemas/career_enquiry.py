@@ -55,6 +55,11 @@ class CareerEnquiryCreate(BaseModel):
     qualification: str = Field(..., min_length=1, max_length=100)
     domain: str = Field(..., min_length=1, max_length=150)
     message: Optional[str] = Field(None, max_length=2000)
+    location: Optional[str] = Field(None, max_length=200)
+    preferred_call_time: Optional[str] = Field(None, max_length=120)
+    interests: Optional[str] = Field(None, max_length=2000)
+    visitor_query: Optional[str] = Field(None, max_length=4000)
+    consent_to_contact: bool = False
 
 
 class CareerEnquiryStatusUpdate(BaseModel):

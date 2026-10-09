@@ -159,6 +159,13 @@ async def apply_for_job(
         # ALSO create a record in the central applications table for the provider dashboard
         # only if a specific job_id is provided. (Global leads only stay in external_candidates)
         if candidate_in.job_id:
+            linked_job = await db.execute(select(JobPosting).where(JobPosting.id == candidate_in.job_id))
+            linked = linked_job.scalar_one_or_none()
+            if linked and linked.is_external_listing:
+                raise HTTPException(
+                    status_code=400,
+                    detail="This job is listed from an official source. Apply on the official website.",
+                )
             app_record = Application(
                 id=str(uuid.uuid4()),
                 job_id=candidate_in.job_id,

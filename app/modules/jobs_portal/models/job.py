@@ -81,6 +81,31 @@ class JobPosting(Base):
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
     )
 
+    @property
+    def posting_details(self):
+        meta = self.source_metadata if isinstance(self.source_metadata, dict) else {}
+        details = meta.get("posting_form")
+        return details if isinstance(details, dict) else None
+
+    @property
+    def is_external_listing(self) -> bool:
+        return bool((self.source_platform or "").strip())
+
+    @property
+    def external_apply_url(self):
+        """Official apply link for scraped jobs (government portals). Provider jobs return None."""
+        if not self.is_external_listing:
+            return None
+        meta = self.source_metadata if isinstance(self.source_metadata, dict) else {}
+        for key in ("apply_url", "apply_link", "notification_url", "source_url"):
+            raw = meta.get(key)
+            if not isinstance(raw, str):
+                continue
+            url = raw.strip()
+            if url.startswith("http://") or url.startswith("https://"):
+                return url
+        return None
+
     provider = relationship("User", back_populates="job_postings")
     applications = relationship(
         "Application", back_populates="job", cascade="all, delete-orphan"

@@ -30,6 +30,7 @@ from app.modules.super_admin.schemas.support import (
     TicketMessageOut,
     TicketOut,
     TicketStatusUpdate,
+    TicketUpdate,
     InquiryCreate,
     InquiryOut,
     InquiryListResponse,
@@ -134,6 +135,21 @@ def _ticket_to_out(
     )
 
 
+async def _recent_same_message(ticket_id: str, author_id: Optional[str], body: str, db: AsyncSession) -> Optional[TicketMessage]:
+    result = await db.execute(
+        select(TicketMessage)
+        .where(TicketMessage.ticket_id == ticket_id, TicketMessage.author_id == author_id)
+        .order_by(TicketMessage.created_at.desc())
+        .limit(1)
+    )
+    last = result.scalar_one_or_none()
+    if not last or (last.body or "").strip() != body.strip() or not last.created_at:
+        return None
+    if (datetime.utcnow() - last.created_at).total_seconds() > 8:
+        return None
+    return last
+
+
 def _message_to_out(msg: TicketMessage, author: Optional[User] = None) -> TicketMessageOut:
     if msg.is_bot_reply:
         author_name = "AI Assistant"
@@ -207,7 +223,7 @@ async def create_ticket(body: TicketCreate, user: User, db: AsyncSession) -> Tic
         status=TicketStatus.open,
     )
     db.add(ticket)
-    await db.commit()
+    await db.flush()
 
     initial_msg = TicketMessage(
         ticket_id=ticket.id,
@@ -248,6 +264,7 @@ async def create_ticket(body: TicketCreate, user: User, db: AsyncSession) -> Tic
 
     await db.commit()
     await db.refresh(ticket)
+    await db.refresh(initial_msg)
 
     await notify_super_admins(
         db,
@@ -324,6 +341,10 @@ async def add_user_message(ticket_id: str, body: TicketMessageCreate, user: User
     if ticket.status in (TicketStatus.resolved, TicketStatus.closed):
         raise HTTPException(status_code=400, detail="This ticket is closed. Please open a new ticket.")
 
+    duplicate = await _recent_same_message(ticket.id, user.id, body.body, db)
+    if duplicate:
+        return _message_to_out(duplicate, user)
+
     msg = TicketMessage(
         ticket_id=ticket.id,
         author_id=user.id,
@@ -365,6 +386,72 @@ async def add_user_message(ticket_id: str, body: TicketMessageCreate, user: User
     msg_out = _message_to_out(msg, user)
     await _safe_broadcast_message(db, ticket, msg_out)
     return msg_out
+
+
+async def _get_message(ticket_id: str, message_id: str, db: AsyncSession) -> TicketMessage:
+    result = await db.execute(
+        select(TicketMessage).where(TicketMessage.id == message_id, TicketMessage.ticket_id == ticket_id)
+    )
+    msg = result.scalar_one_or_none()
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+    return msg
+
+
+async def update_user_message(
+    ticket_id: str,
+    message_id: str,
+    body: TicketMessageCreate,
+    user: User,
+    db: AsyncSession,
+) -> TicketMessageOut:
+    ticket = await _get_user_ticket(ticket_id, user, db)
+    msg = await _get_message(ticket.id, message_id, db)
+    if msg.is_staff_reply or msg.is_bot_reply or msg.author_id != user.id:
+        raise HTTPException(status_code=403, detail="You can only edit your own messages")
+    msg.body = body.body.strip()
+    ticket.updated_at = datetime.utcnow()
+    await db.commit()
+    await db.refresh(msg)
+    return _message_to_out(msg, user)
+
+
+async def delete_user_message(ticket_id: str, message_id: str, user: User, db: AsyncSession) -> None:
+    ticket = await _get_user_ticket(ticket_id, user, db)
+    msg = await _get_message(ticket.id, message_id, db)
+    if msg.is_staff_reply or msg.is_bot_reply or msg.author_id != user.id:
+        raise HTTPException(status_code=403, detail="You can only delete your own messages")
+    await db.delete(msg)
+    ticket.updated_at = datetime.utcnow()
+    await db.commit()
+
+
+async def update_my_ticket(ticket_id: str, body: TicketUpdate, user: User, db: AsyncSession) -> TicketDetailOut:
+    ticket = await _get_user_ticket(ticket_id, user, db)
+    if body.subject is not None:
+        ticket.subject = body.subject.strip()
+    if body.description is not None:
+        old = (ticket.description or "").strip()
+        ticket.description = body.description.strip()
+        result = await db.execute(
+            select(TicketMessage)
+            .where(TicketMessage.ticket_id == ticket.id, TicketMessage.is_staff_reply.is_(False))
+            .order_by(TicketMessage.created_at.asc())
+        )
+        first = result.scalars().first()
+        if first and (first.body or "").strip() == old:
+            first.body = ticket.description
+    if body.subject is None and body.description is None:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    ticket.updated_at = datetime.utcnow()
+    await db.commit()
+    return await get_my_ticket(ticket.id, user, db)
+
+
+async def delete_my_ticket(ticket_id: str, user: User, db: AsyncSession) -> None:
+    ticket = await _get_user_ticket(ticket_id, user, db)
+    await db.delete(ticket)
+    await db.commit()
 
 
 # ── User: Feedback ───────────────────────────────────────────────────────────
@@ -533,6 +620,10 @@ async def admin_reply_ticket(
 ) -> TicketMessageOut:
     ticket = await _get_ticket_admin(ticket_id, db)
 
+    duplicate = await _recent_same_message(ticket.id, admin.id, body.body, db)
+    if duplicate:
+        return _message_to_out(duplicate, admin)
+
     msg = TicketMessage(
         ticket_id=ticket.id,
         author_id=admin.id,
@@ -573,6 +664,60 @@ async def admin_reply_ticket(
     )
     await _safe_broadcast_message(db, ticket, msg_out)
     return msg_out
+
+
+async def admin_update_message(
+    ticket_id: str,
+    message_id: str,
+    body: TicketMessageCreate,
+    db: AsyncSession,
+) -> TicketMessageOut:
+    ticket = await _get_ticket_admin(ticket_id, db)
+    msg = await _get_message(ticket.id, message_id, db)
+    msg.body = body.body.strip()
+    ticket.updated_at = datetime.utcnow()
+    await db.commit()
+    await db.refresh(msg)
+    author = None
+    if msg.author_id:
+        author = (await db.execute(select(User).where(User.id == msg.author_id))).scalar_one_or_none()
+    return _message_to_out(msg, author)
+
+
+async def admin_delete_message(ticket_id: str, message_id: str, db: AsyncSession) -> None:
+    ticket = await _get_ticket_admin(ticket_id, db)
+    msg = await _get_message(ticket.id, message_id, db)
+    await db.delete(msg)
+    ticket.updated_at = datetime.utcnow()
+    await db.commit()
+
+
+async def admin_update_ticket(ticket_id: str, body: TicketUpdate, db: AsyncSession) -> TicketDetailOut:
+    ticket = await _get_ticket_admin(ticket_id, db)
+    if body.subject is not None:
+        ticket.subject = body.subject.strip()
+    if body.description is not None:
+        old = (ticket.description or "").strip()
+        ticket.description = body.description.strip()
+        result = await db.execute(
+            select(TicketMessage)
+            .where(TicketMessage.ticket_id == ticket.id, TicketMessage.is_staff_reply.is_(False))
+            .order_by(TicketMessage.created_at.asc())
+        )
+        first = result.scalars().first()
+        if first and (first.body or "").strip() == old:
+            first.body = ticket.description
+    if body.subject is None and body.description is None:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    ticket.updated_at = datetime.utcnow()
+    await db.commit()
+    return await admin_get_ticket(ticket.id, db)
+
+
+async def admin_delete_ticket(ticket_id: str, db: AsyncSession) -> None:
+    ticket = await _get_ticket_admin(ticket_id, db)
+    await db.delete(ticket)
+    await db.commit()
 
 
 async def admin_update_ticket_status(

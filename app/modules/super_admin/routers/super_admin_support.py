@@ -4,10 +4,14 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.super_admin.controllers.support_controller import (
+    admin_delete_message as ctrl_delete_message,
+    admin_delete_ticket as ctrl_delete_ticket,
     admin_get_ticket as ctrl_get_ticket,
     admin_list_feedback as ctrl_list_feedback,
     admin_list_tickets as ctrl_list_tickets,
     admin_reply_ticket as ctrl_reply,
+    admin_update_message as ctrl_update_message,
+    admin_update_ticket as ctrl_update_ticket,
     admin_update_ticket_status as ctrl_update_status,
     admin_list_inquiries as ctrl_list_inquiries,
     admin_reply_to_inquiry as ctrl_reply_to_inquiry,
@@ -22,6 +26,7 @@ from app.modules.super_admin.schemas.support import (
     TicketMessageOut,
     TicketOut,
     TicketStatusUpdate,
+    TicketUpdate,
     InquiryListResponse,
     InquiryReplyCreate,
 )
@@ -69,6 +74,46 @@ async def update_ticket_status(
     db: AsyncSession = Depends(get_db),
 ):
     return await ctrl_update_status(ticket_id, body, db)
+
+
+@router.patch("/tickets/{ticket_id}", response_model=TicketDetailOut)
+async def update_ticket(
+    ticket_id: str,
+    body: TicketUpdate,
+    _admin: User = Depends(require_super_admin_or_permission("help_desk")),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_update_ticket(ticket_id, body, db)
+
+
+@router.delete("/tickets/{ticket_id}", status_code=204)
+async def delete_ticket(
+    ticket_id: str,
+    _admin: User = Depends(require_super_admin_or_permission("help_desk")),
+    db: AsyncSession = Depends(get_db),
+):
+    await ctrl_delete_ticket(ticket_id, db)
+
+
+@router.patch("/tickets/{ticket_id}/messages/{message_id}", response_model=TicketMessageOut)
+async def edit_ticket_message(
+    ticket_id: str,
+    message_id: str,
+    body: TicketMessageCreate,
+    _admin: User = Depends(require_super_admin_or_permission("help_desk")),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_update_message(ticket_id, message_id, body, db)
+
+
+@router.delete("/tickets/{ticket_id}/messages/{message_id}", status_code=204)
+async def delete_ticket_message(
+    ticket_id: str,
+    message_id: str,
+    _admin: User = Depends(require_super_admin_or_permission("help_desk")),
+    db: AsyncSession = Depends(get_db),
+):
+    await ctrl_delete_message(ticket_id, message_id, db)
 
 
 @router.get("/feedback", response_model=FeedbackListResponse)

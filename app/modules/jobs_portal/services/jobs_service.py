@@ -1,10 +1,49 @@
 # service to handle job update put and patch
-from app.modules.jobs_portal.models.job import JobPosting, JobType
-from app.shared.models.user import User
-from app.modules.jobs_portal.schemas.jobs import JobUpdate
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import BackgroundTasks, HTTPException
 from sqlalchemy import select
-from fastapi import  BackgroundTasks,  HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
+
+from app.modules.jobs_portal.models.job import JobPosting, JobType
+from app.modules.jobs_portal.schemas.jobs import JobUpdate
+from app.shared.models.user import User
+
+POSTING_FORM_KEYS = {
+    "summary",
+    "responsibilities",
+    "preferred_skills",
+    "qualifications",
+    "education",
+    "relevant_experience",
+    "application_deadline",
+    "interview_process",
+    "engagement",
+    "additional_notes",
+    "experience_level",
+}
+
+
+def apply_posting_details(job: JobPosting, details: dict | None) -> None:
+    """Store structured create-job fields without touching scraper metadata."""
+    if not details:
+        return
+    clean: dict = {}
+    for key, value in details.items():
+        if key not in POSTING_FORM_KEYS or value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        if isinstance(value, list) and not value:
+            continue
+        clean[key] = value
+    if not clean:
+        return
+    meta = dict(job.source_metadata or {})
+    current = dict(meta.get("posting_form") or {})
+    current.update(clean)
+    meta["posting_form"] = current
+    job.source_metadata = meta
+    flag_modified(job, "source_metadata")
 
 
 async def update_job_service(
@@ -68,6 +107,10 @@ async def update_job_service(
     
     if body.perks is not None:
         job.perks = body.perks
+
+    if body.posting_details is not None:
+        apply_posting_details(job, body.posting_details)
+        content_changed = True
 
     return content_changed
 

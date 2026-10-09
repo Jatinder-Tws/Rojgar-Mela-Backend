@@ -47,6 +47,8 @@ async def get_matched_jobs(user: User, db: AsyncSession) -> List[JobWithMatch]:
             fit_reason=fit_reason,
             ai_interview_enabled=job.ai_interview_enabled,
             selection_threshold=job.selection_threshold,
+            source_platform=job.source_platform,
+            external_apply_url=job.external_apply_url,
         ))
     return results
 

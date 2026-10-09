@@ -35,6 +35,8 @@ def serialize_public_job(job: JobPosting) -> dict[str, Any]:
         "company_rating": provider.company_rating if provider else None,
         "company_review_count": provider.company_review_count if provider else None,
         "company_website": provider.company_website if provider else None,
+        "source_platform": job.source_platform,
+        "external_apply_url": job.external_apply_url,
     }
 
 

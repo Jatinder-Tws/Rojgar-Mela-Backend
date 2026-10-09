@@ -42,6 +42,12 @@ async def apply_to_job(
     if not job:
         raise HTTPException(status_code=404, detail="Job not found or no longer active")
 
+    if job.is_external_listing:
+        raise HTTPException(
+            status_code=400,
+            detail="This job is listed from an official source. Apply on the official website.",
+        )
+
     dup = await db.execute(
         select(Application).where(and_(Application.seeker_id == user.id, Application.job_id == body.job_id))
     )

@@ -8,9 +8,10 @@ from app.shared.models.user import User
 from app.modules.jobs_portal.schemas.jobs import (
     JobCreate, JobDescriptionOnlyResponse, JobDescriptionRequest,
     JobOut, JobSkillsResponse, JobTitleRequest, JobUpdate,
+    VoiceJobParseRequest, VoiceJobParseResponse,
     JobListResponse,
 )
-from app.core.dependencies import require_provider, require_verified
+from app.core.dependencies import require_provider, require_provider_or_super_admin, require_verified
 from app.modules.jobs_portal.controllers.jobs_controller import (
     list_jobs as ctrl_list_jobs,
     create_job as ctrl_create_job,
@@ -23,6 +24,7 @@ from app.modules.jobs_portal.controllers.jobs_controller import (
     get_job_stats as ctrl_get_job_stats,
     generate_description as ctrl_generate_description,
     generate_skills as ctrl_generate_skills,
+    parse_voice_job as ctrl_parse_voice_job,
     get_distinct_industries as ctrl_get_distinct_industries,
     search_external_jobs as ctrl_search_external_jobs,
     clear_external_jobs_cache as ctrl_clear_external_jobs_cache,
@@ -145,6 +147,11 @@ async def generate_description(payload: JobDescriptionRequest, user: User = Depe
 @router.post("/ai/generate-skills", response_model=JobSkillsResponse)
 async def generate_skills(payload: JobTitleRequest, user: User = Depends(require_provider)):
     return await ctrl_generate_skills(payload)
+
+
+@router.post("/ai/parse-voice", response_model=VoiceJobParseResponse)
+async def parse_voice(payload: VoiceJobParseRequest, user: User = Depends(require_provider_or_super_admin)):
+    return await ctrl_parse_voice_job(payload)
 
 
 
