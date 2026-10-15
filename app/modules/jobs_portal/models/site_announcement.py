@@ -42,5 +42,6 @@ class SiteAnnouncement(Base):
     lucky_draw_days = Column(Integer, nullable=False, default=1)
     lucky_draw_reveal_time = Column(String(5), nullable=False, default="18:00")
     sort_order = Column(Integer, nullable=False, default=0)
+    event_profile = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)

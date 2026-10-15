@@ -65,6 +65,16 @@ class Settings(BaseSettings):
     # Files
     UPLOAD_DIR: str = "uploads"
     MAX_UPLOAD_MB: int = 50
+
+    # Event media only (banner, gallery, video). Other modules stay on local disk.
+    # Leave blank to keep event uploads on local disk. Filebase uses the same fields;
+    # set EVENT_S3_ENDPOINT_URL to https://s3.filebase.com and the Filebase keys.
+    EVENT_S3_ENDPOINT_URL: str = ""
+    EVENT_S3_REGION: str = "us-east-1"
+    EVENT_S3_ACCESS_KEY: str = ""
+    EVENT_S3_SECRET_KEY: str = ""
+    EVENT_S3_BUCKET: str = ""
+    EVENT_S3_PUBLIC_BASE_URL: str = ""
     TESSERACT_CMD: str = ""
 
     # Matching thresholds

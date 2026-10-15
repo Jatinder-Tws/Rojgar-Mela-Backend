@@ -25,9 +25,13 @@ def upgrade() -> None:
             DO $$
             BEGIN
                 IF NOT EXISTS (
-                    SELECT 1 FROM pg_enum
-                    WHERE enumlabel = 'supervisor'
-                    AND enumtypid = (SELECT oid FROM pg_type WHERE typname = 'userrole')
+                    SELECT 1
+                    FROM pg_enum AS e
+                    INNER JOIN pg_type AS t ON t.oid = e.enumtypid
+                    WHERE e.enumlabel = 'supervisor'
+                      AND t.typname = 'userrole'
+                      AND t.typtype = 'e'
+                    LIMIT 1
                 ) THEN
                     ALTER TYPE userrole ADD VALUE 'supervisor';
                 END IF;

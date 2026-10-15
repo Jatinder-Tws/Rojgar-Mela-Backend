@@ -8,9 +8,12 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_upload_dir
+from app.shared.services.event_object_storage import store_event_file
 from app.core.database import get_db
 from app.core.dependencies import require_super_admin_or_permission
+from app.modules.jobs_portal.models.job_fair import EventFormSubmission
 from app.modules.jobs_portal.models.site_announcement import SiteAnnouncement
+from app.modules.jobs_portal.schemas.job_fair import EventFormSubmit
 from app.modules.jobs_portal.schemas.site_announcement import (
     SiteAnnouncementCreate,
     SiteAnnouncementListResponse,
@@ -69,6 +72,7 @@ async def list_public_announcements(
             or_(
                 SiteAnnouncement.display_placement == placement,
                 SiteAnnouncement.display_placement == "all",
+                SiteAnnouncement.display_placement.like(f"%{placement}%"),
             )
         )
 
@@ -88,6 +92,48 @@ async def list_public_announcements(
     return result.scalars().all()
 
 
+@public_router.post("/events/{slug}/register")
+async def register_for_announcement_event(
+    slug: str,
+    body: EventFormSubmit,
+    db: AsyncSession = Depends(get_db),
+):
+    rows = (
+        await db.execute(
+            select(SiteAnnouncement).where(
+                SiteAnnouncement.category == "event",
+                SiteAnnouncement.is_active.is_(True),
+                SiteAnnouncement.show_on_website.is_(True),
+            )
+        )
+    ).scalars().all()
+    event = next(
+        (
+            row
+            for row in rows
+            if (row.lucky_draw_slug == slug)
+            or (isinstance(row.event_profile, dict) and row.event_profile.get("slug") == slug)
+        ),
+        None,
+    )
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    profile = event.event_profile if isinstance(event.event_profile, dict) else {}
+    if (profile.get("modules") or {}).get("registration") is False:
+        raise HTTPException(status_code=400, detail="Registration is closed for this event.")
+    answers = body.answers or {}
+    missing = [
+        field.get("label") or "A required question"
+        for field in (profile.get("registrationFields") or [])
+        if isinstance(field, dict) and field.get("required") and not str(answers.get(field.get("label"), "")).strip()
+    ]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Please answer: {', '.join(missing)}")
+    db.add(EventFormSubmission(announcement_id=event.id, answers={str(k): str(v) for k, v in answers.items()}))
+    await db.commit()
+    return {"ok": True}
+
+
 @admin_router.get("", response_model=SiteAnnouncementListResponse)
 async def list_admin_announcements(
     search: Optional[str] = Query(None),
@@ -102,7 +148,13 @@ async def list_admin_announcements(
     if category and category != "all":
         query = query.where(SiteAnnouncement.category == category)
     if placement and placement != "all":
-        query = query.where(SiteAnnouncement.display_placement == placement)
+        query = query.where(
+            or_(
+                SiteAnnouncement.display_placement == placement,
+                SiteAnnouncement.display_placement == "all",
+                SiteAnnouncement.display_placement.like(f"%{placement}%"),
+            )
+        )
     if search:
         s = f"%{search.strip()}%"
         query = query.where(
@@ -148,6 +200,72 @@ async def upload_announcement_image(
     return {"url": f"/api/uploads/announcements/{filename}"}
 
 
+@admin_router.post("/upload-media")
+async def upload_event_media(
+    file: UploadFile = File(...),
+    _admin: User = Depends(require_super_admin_or_permission("announcements")),
+):
+    """Event banner, gallery, and video only. Other announcement images stay local."""
+    from pathlib import Path
+
+    ext = Path(file.filename or "").suffix.lower().strip()
+    allowed = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg", ".mp4", ".webm"}
+    if ext not in allowed:
+        raise HTTPException(status_code=400, detail="Upload a jpg, png, webp, gif, mp4, or webm file.")
+    content = await file.read()
+    if len(content) > 40 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="File is larger than 40 MB.")
+    url = await store_event_file(content, f"{uuid.uuid4().hex}{ext}", "events")
+    return {"url": url}
+
+
+@admin_router.post("/enhance-banner")
+async def enhance_event_banner(
+    file: UploadFile = File(...),
+    _admin: User = Depends(require_super_admin_or_permission("announcements")),
+):
+    """Improve an event banner with Gemini image generation, then store it with other event media."""
+    from app.core.config import settings
+
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Upload an image to enhance.")
+    content = await file.read()
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Image is larger than 10 MB.")
+    if not (settings.GOOGLE_API_KEY or "").strip():
+        raise HTTPException(status_code=503, detail="Gemini is not configured on this server.")
+
+    try:
+        import google.generativeai as genai
+        from PIL import Image
+        import io
+
+        genai.configure(api_key=settings.GOOGLE_API_KEY)
+        image = Image.open(io.BytesIO(content)).convert("RGB")
+        prompt = (
+            "Enhance this event banner photograph. Improve lighting, colour, and sharpness. "
+            "Keep the same scene and people. Wide 16:9 composition. Do not add text, logos, or watermarks."
+        )
+        last_error = "Gemini could not enhance this image."
+        for model_name in ("gemini-2.5-flash-image", "gemini-3.1-flash-image"):
+            try:
+                model = genai.GenerativeModel(model_name)
+                resp = await model.generate_content_async([prompt, image])
+                parts = resp.candidates[0].content.parts if resp and resp.candidates else []
+                for part in parts:
+                    inline = getattr(part, "inline_data", None)
+                    if inline and getattr(inline, "data", None):
+                        url = await store_event_file(inline.data, f"{uuid.uuid4().hex}.png", "events")
+                        return {"url": url}
+            except Exception as exc:
+                last_error = str(exc)
+        raise HTTPException(status_code=502, detail=last_error[:240])
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Could not enhance the banner. {exc}"[:240]) from exc
+
+
 @admin_router.post("", response_model=SiteAnnouncementOut, status_code=status.HTTP_201_CREATED)
 async def create_announcement(
     body: SiteAnnouncementCreate,
@@ -181,6 +299,7 @@ async def create_announcement(
         lucky_draw_days=body.lucky_draw_days,
         lucky_draw_reveal_time=body.lucky_draw_reveal_time or "18:00",
         sort_order=body.sort_order,
+        event_profile=body.event_profile,
     )
     if body.lucky_draw_enabled:
         from app.modules.jobs_portal.controllers.event_lucky_controller import unique_lucky_slug

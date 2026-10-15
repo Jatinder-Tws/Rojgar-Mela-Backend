@@ -64,7 +64,7 @@ class CareerEnquiryCreate(BaseModel):
 
 class CareerEnquiryStatusUpdate(BaseModel):
     status: Optional[str] = Field(None, min_length=1, max_length=40)
-    admin_notes: Optional[str] = Field(None, max_length=5000)
+    admin_notes: Optional[str] = Field(None, max_length=20000)
     last_contact_date: Optional[datetime] = None
     next_follow_up_date: Optional[datetime] = None
     preferred_call_time: Optional[str] = Field(None, max_length=120)

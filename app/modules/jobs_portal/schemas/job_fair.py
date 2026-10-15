@@ -21,11 +21,16 @@ class JobFairUpdate(BaseModel):
     banner_image_url: Optional[str] = None
     is_active: Optional[bool] = None
     industries: Optional[List[str]] = None
+    event_profile: Optional[dict] = None
+
+class EventFormSubmit(BaseModel):
+    answers: dict
 
 class JobFairOut(JobFairBase):
     id: str
     slug: str
     industries: Optional[List[str]] = None
+    event_profile: Optional[dict] = None
     created_at: datetime
     updated_at: datetime
 
@@ -144,6 +149,7 @@ class JobFairPublicOut(BaseModel):
     company_count: int = 0
     candidate_count: int = 0
     company_logos: List[JobFairCompanyLogoOut] = []
+    event_profile: Optional[dict] = None
 
 
 class JobFairPublicCatalogResponse(BaseModel):

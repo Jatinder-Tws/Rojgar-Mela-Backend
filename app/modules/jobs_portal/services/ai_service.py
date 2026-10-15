@@ -40,7 +40,8 @@ class GeminiAdapter:
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                response = self._client.models.generate_content(
+                response = await asyncio.to_thread(
+                    self._client.models.generate_content,
                     model=settings.GEMINI_CHAT_MODEL,
                     contents=[combined_prompt],
                     config={
@@ -62,7 +63,8 @@ class GeminiAdapter:
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                response = self._client.models.generate_content(
+                response = await asyncio.to_thread(
+                    self._client.models.generate_content,
                     model=settings.GEMINI_CHAT_MODEL,
                     contents=[combined_prompt],
                     config={
@@ -432,3 +434,140 @@ async def generate_assessment_evaluation(
             "recommended_domains": [domain_interest, "General Tech"],
             "detailed_evaluation": "Based on the input provided, you show a balanced capability matching your selected domain.",
         }
+
+
+def _strip_json_fence(response: str) -> str:
+    text = (response or "").strip()
+    if text.startswith("```json"):
+        text = text[7:]
+    elif text.startswith("```"):
+        text = text[3:]
+    if text.endswith("```"):
+        text = text[:-3]
+    return text.strip()
+
+
+def _question_items(data) -> list:
+    if isinstance(data, dict):
+        for key in ("questions", "items", "assessment"):
+            if isinstance(data.get(key), list):
+                return data[key]
+        return []
+    return data if isinstance(data, list) else []
+
+
+async def generate_career_question_set(experience_level: str, domain_interest: str) -> tuple[list[dict], int]:
+    """One model call for the whole test: mixed career questions, not one call per answer."""
+    from app.modules.jobs_portal.services.assessment_questions import fallback_question_plan
+
+    ai = get_ai()
+    domain = domain_interest or "a career of their choice"
+    level = experience_level or "Fresher / No Experience"
+    system_prompt = f"""
+    You are a career psychologist writing a short multiple-choice assessment.
+    The person is '{level}' and wants to work in '{domain}'.
+    Write exactly 10 questions. Use each of these categories twice, in this order:
+    IQ & Logic, Aptitude, Psychological, Leadership, Decision Making,
+    IQ & Logic, Aptitude, Psychological, Leadership, Decision Making.
+    Rules:
+    - Every question has exactly 4 options.
+    - IQ & Logic and Aptitude questions have one clearly best answer.
+    - Psychological, Leadership, and Decision Making questions reveal work style. Do not make every option obviously wrong.
+    - Keep each question to one or two sentences. No technical interview trivia.
+    - Make the situations relevant to '{domain}'.
+    Return ONLY a JSON array. Each item has "category", "question", and "options".
+    """
+    user_prompt = "Write the 10 questions now."
+    try:
+        response, tokens = await asyncio.wait_for(
+            ai.chat_completion_with_usage(system_prompt, user_prompt),
+            timeout=22,
+        )
+        data = json.loads(_strip_json_fence(response))
+        cleaned = []
+        for item in _question_items(data):
+            if not isinstance(item, dict):
+                continue
+            question = str(item.get("question") or "").strip()
+            options = [str(opt).strip() for opt in (item.get("options") or []) if str(opt).strip()]
+            if not question or len(options) < 4:
+                continue
+            cleaned.append({
+                "category": str(item.get("category") or "Career").strip() or "Career",
+                "question": question,
+                "options": options[:4],
+            })
+        if len(cleaned) < 8:
+            return fallback_question_plan(domain_interest, experience_level), 0
+        return cleaned[:10], tokens
+    except Exception as e:
+        print(f"Error generating assessment questions: {e}")
+        return fallback_question_plan(domain_interest, experience_level), 0
+
+
+async def generate_career_evaluation(history: list, experience_level: str, domain_interest: str) -> dict:
+    """Score the finished answers. Raises on failure so the caller can use a local fallback."""
+    ai = get_ai()
+    domain = domain_interest or "their chosen field"
+    level = experience_level or "their experience"
+    system_prompt = f"""
+    You are a career counselor. Read this person's answers. They are '{level}' and chose '{domain}'.
+    Judge only what the answers show. Do not give everyone the same score.
+    IQ & Logic and Aptitude answers should move the IQ and aptitude scores. Wrong or careless choices score lower.
+    Psychological, Leadership, and Decision Making answers should shape personality and role fit.
+    Return ONLY JSON with this shape:
+    {{
+      "personality_type": "short label",
+      "iq_estimate": 100,
+      "aptitude_score": 70,
+      "reasoning_score": 70,
+      "emotional_intelligence_score": 70,
+      "personality_score": 70,
+      "recommended_domains": ["specific role", "specific role", "specific role"],
+      "career_roadmap": ["step one", "step two", "step three", "step four"],
+      "detailed_evaluation": "3 short paragraphs: personality, why they fit the first role, and what to improve."
+    }}
+    iq_estimate is an integer from 85 to 140. Other scores are integers from 1 to 100.
+    recommended_domains must be job roles, not generic words.
+    """
+    history_text = "\n".join(
+        f"[{item.get('category', 'Question')}] Q: {item.get('question', '')}\nA: {item.get('answer', '')}"
+        for item in (history or [])
+    )
+    response, tokens = await asyncio.wait_for(
+        ai.chat_completion_with_usage(system_prompt, f"Answers:\n{history_text}\n\nScore this person."),
+        timeout=22,
+    )
+    data = json.loads(_strip_json_fence(response))
+    if not isinstance(data, dict):
+        raise ValueError("Evaluation was not an object")
+    roadmap = data.get("career_roadmap") or []
+    if isinstance(roadmap, str):
+        roadmap = [roadmap]
+    roadmap = [str(step).strip() for step in roadmap if str(step).strip()]
+    evaluation = str(data.get("detailed_evaluation") or "").strip()
+    if roadmap:
+        steps = "\n".join(f"{index}. {step}" for index, step in enumerate(roadmap, start=1))
+        evaluation = f"{evaluation}\n\nCareer roadmap:\n{steps}".strip()
+    roles = data.get("recommended_domains") or [domain]
+    if isinstance(roles, str):
+        roles = [roles]
+    roles = [str(role).strip() for role in roles if str(role).strip()] or [domain]
+
+    def score(key: str, default: int) -> int:
+        try:
+            return int(data.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    return {
+        "personality_type": str(data.get("personality_type") or "Balanced").strip() or "Balanced",
+        "tokens_utilized": tokens,
+        "iq_estimate": max(85, min(140, score("iq_estimate", 100))),
+        "aptitude_score": max(1, min(100, score("aptitude_score", 70))),
+        "reasoning_score": max(1, min(100, score("reasoning_score", 70))),
+        "emotional_intelligence_score": max(1, min(100, score("emotional_intelligence_score", 70))),
+        "personality_score": max(1, min(100, score("personality_score", 70))),
+        "recommended_domains": roles[:3],
+        "detailed_evaluation": evaluation or "Your answers show how you approach work, people, and decisions.",
+    }

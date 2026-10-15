@@ -1,11 +1,11 @@
 import logging
 import re
 import uuid
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import List, Optional, Tuple
 
 from fastapi import HTTPException
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, literal, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.jobs_portal.models.career_enquiry import DEFAULT_STATUS, CareerEnquiry
@@ -87,6 +87,67 @@ def _career_to_unified(item: CareerEnquiry) -> UnifiedEnquiryOut:
         visitor_query=item.visitor_query,
         **_follow_up_fields(item),
     )
+
+
+def _sort_desc(sort_dir: Optional[str]) -> bool:
+    return (sort_dir or "desc").strip().lower() != "asc"
+
+
+def _ordered(column, sort_dir: Optional[str]):
+    clause = column.desc() if _sort_desc(sort_dir) else column.asc()
+    return clause.nulls_last()
+
+
+def _career_sort_column(sort_by: Optional[str]):
+    key = (sort_by or "received").strip().lower()
+    columns = {
+        "name": CareerEnquiry.full_name,
+        "email": CareerEnquiry.email,
+        "phone": CareerEnquiry.phone,
+        "location": CareerEnquiry.location,
+        "query": func.coalesce(CareerEnquiry.visitor_query, CareerEnquiry.message),
+        "source": func.coalesce(CareerEnquiry.event_title, CareerEnquiry.domain),
+        "received": CareerEnquiry.created_at,
+        "status": CareerEnquiry.status,
+        "ticket": CareerEnquiry.ticket_number,
+        "event": CareerEnquiry.event_title,
+    }
+    return columns.get(key, CareerEnquiry.created_at)
+
+
+def _contact_sort_column(sort_by: Optional[str]):
+    key = (sort_by or "received").strip().lower()
+    columns = {
+        "name": ContactInquiry.name,
+        "email": ContactInquiry.email,
+        "phone": ContactInquiry.phone,
+        "location": literal(""),
+        "query": ContactInquiry.message,
+        "source": ContactInquiry.subject,
+        "received": ContactInquiry.created_at,
+        "status": ContactInquiry.status,
+        "ticket": literal(""),
+        "event": literal(""),
+    }
+    return columns.get(key, ContactInquiry.created_at)
+
+
+def _merged_sort_value(item: UnifiedEnquiryOut, sort_by: Optional[str]):
+    key = (sort_by or "received").strip().lower()
+    if key == "received":
+        return item.created_at or datetime.min
+    values = {
+        "name": item.name,
+        "email": item.email,
+        "phone": item.phone,
+        "location": item.location,
+        "query": item.visitor_query or item.message,
+        "source": item.event_title or item.domain or item.subject,
+        "status": item.status,
+        "ticket": item.ticket_number,
+        "event": item.event_title,
+    }
+    return (values.get(key) or "").lower()
 
 
 def _contact_to_unified(item: ContactInquiry) -> UnifiedEnquiryOut:
@@ -254,6 +315,78 @@ def _day_bounds_utc(day: Optional[date] = None) -> tuple[datetime, datetime]:
     return start, end
 
 
+_IST_OFFSET = timedelta(hours=5, minutes=30)
+
+
+def _parse_ymd(value: Optional[str]) -> Optional[date]:
+    if not value or not value.strip():
+        return None
+    try:
+        return datetime.strptime(value.strip()[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _created_range_filters(column, created_from: Optional[str], created_to: Optional[str]) -> list:
+    """created_at is naive UTC. The picker dates are IST calendar days."""
+    filters = []
+    start_day = _parse_ymd(created_from)
+    end_day = _parse_ymd(created_to)
+    if start_day:
+        filters.append(column >= datetime.combine(start_day, time.min) - _IST_OFFSET)
+    if end_day:
+        filters.append(column <= datetime.combine(end_day, time.max) - _IST_OFFSET)
+    return filters
+
+
+_LIST_SOURCES = {"all", "career", "contact"}
+_ORIGIN_SOURCES = {"event", "university", "free_course", "courses", "counseling", "career_program"}
+
+
+def _split_list_source(source: Optional[str], default: str = "all") -> Tuple[str, Optional[str]]:
+    raw = (source or default).strip().lower()
+    if raw in _ORIGIN_SOURCES:
+        return "career", raw
+    if raw in _LIST_SOURCES:
+        return raw, None
+    allowed = ", ".join(sorted(_LIST_SOURCES | _ORIGIN_SOURCES))
+    raise HTTPException(status_code=400, detail=f"Invalid source. Allowed: {allowed}")
+
+
+def _origin_filters(origin: Optional[str]) -> list:
+    """Which website page or event the career enquiry came from."""
+    key = (origin or "").strip().lower()
+    if key not in _ORIGIN_SOURCES:
+        return []
+    event = or_(
+        CareerEnquiry.event_title.isnot(None),
+        CareerEnquiry.ticket_number.isnot(None),
+    )
+    university = CareerEnquiry.domain.ilike("University%")
+    free_course = CareerEnquiry.domain.ilike("Free Course%")
+    course_page = CareerEnquiry.message.ilike("Course enquiry:%")
+    counseling_domain = CareerEnquiry.domain.ilike("Free Counseling%")
+    counseling_message = CareerEnquiry.message.ilike("%Free counseling%")
+    if key == "event":
+        return [event]
+    if key == "university":
+        return [university, not_(event)]
+    if key == "free_course":
+        return [free_course, not_(event)]
+    if key == "courses":
+        return [course_page, not_(event)]
+    if key == "counseling":
+        return [or_(counseling_domain, counseling_message), not_(event)]
+    return [
+        not_(event),
+        or_(CareerEnquiry.domain.is_(None), not_(university)),
+        or_(CareerEnquiry.domain.is_(None), not_(free_course)),
+        or_(CareerEnquiry.domain.is_(None), not_(counseling_domain)),
+        or_(CareerEnquiry.message.is_(None), not_(course_page)),
+        or_(CareerEnquiry.message.is_(None), not_(counseling_message)),
+    ]
+
+
 def _career_filters(
     search: Optional[str] = None,
     status: Optional[str] = None,
@@ -263,6 +396,9 @@ def _career_filters(
     follow_up: Optional[str] = None,
     announcement_id: Optional[str] = None,
     draw_date: Optional[str] = None,
+    created_from: Optional[str] = None,
+    created_to: Optional[str] = None,
+    origin: Optional[str] = None,
 ) -> list:
     filters = []
     if search and search.strip():
@@ -314,6 +450,8 @@ def _career_filters(
         filters.append(CareerEnquiry.announcement_id == announcement_id.strip())
     if draw_date and draw_date.strip():
         filters.append(CareerEnquiry.draw_date == draw_date.strip())
+    filters.extend(_created_range_filters(CareerEnquiry.created_at, created_from, created_to))
+    filters.extend(_origin_filters(origin))
     return filters
 
 
@@ -322,6 +460,8 @@ def _contact_filters(
     status: Optional[str] = None,
     objection: Optional[str] = None,
     follow_up: Optional[str] = None,
+    created_from: Optional[str] = None,
+    created_to: Optional[str] = None,
 ) -> list:
     filters = []
     if search and search.strip():
@@ -359,6 +499,7 @@ def _contact_filters(
             filters.append(ContactInquiry.next_follow_up_date > end)
         elif key == "missing":
             filters.append(ContactInquiry.next_follow_up_date.is_(None))
+    filters.extend(_created_range_filters(ContactInquiry.created_at, created_from, created_to))
     return filters
 
 
@@ -374,6 +515,11 @@ async def _list_career_page(
     follow_up: Optional[str] = None,
     announcement_id: Optional[str] = None,
     draw_date: Optional[str] = None,
+    created_from: Optional[str] = None,
+    created_to: Optional[str] = None,
+    origin: Optional[str] = None,
+    sort_by: Optional[str] = None,
+    sort_dir: Optional[str] = None,
 ) -> Tuple[List[CareerEnquiry], int]:
     filters = _career_filters(
         search=search,
@@ -384,6 +530,9 @@ async def _list_career_page(
         follow_up=follow_up,
         announcement_id=announcement_id,
         draw_date=draw_date,
+        created_from=created_from,
+        created_to=created_to,
+        origin=origin,
     )
     count_query = select(func.count()).select_from(CareerEnquiry)
     query = select(CareerEnquiry)
@@ -394,7 +543,7 @@ async def _list_career_page(
     total = int((await db.execute(count_query)).scalar() or 0)
     offset = (page - 1) * page_size
     result = await db.execute(
-        query.order_by(CareerEnquiry.created_at.desc()).offset(offset).limit(page_size)
+        query.order_by(_ordered(_career_sort_column(sort_by), sort_dir)).offset(offset).limit(page_size)
     )
     return list(result.scalars().all()), total
 
@@ -407,12 +556,18 @@ async def _list_contact_page(
     status: Optional[str] = None,
     objection: Optional[str] = None,
     follow_up: Optional[str] = None,
+    created_from: Optional[str] = None,
+    created_to: Optional[str] = None,
+    sort_by: Optional[str] = None,
+    sort_dir: Optional[str] = None,
 ) -> Tuple[List[ContactInquiry], int]:
     filters = _contact_filters(
         search=search,
         status=status,
         objection=objection,
         follow_up=follow_up,
+        created_from=created_from,
+        created_to=created_to,
     )
     count_query = select(func.count()).select_from(ContactInquiry)
     query = select(ContactInquiry)
@@ -423,7 +578,7 @@ async def _list_contact_page(
     total = int((await db.execute(count_query)).scalar() or 0)
     offset = (page - 1) * page_size
     result = await db.execute(
-        query.order_by(ContactInquiry.created_at.desc()).offset(offset).limit(page_size)
+        query.order_by(_ordered(_contact_sort_column(sort_by), sort_dir)).offset(offset).limit(page_size)
     )
     return list(result.scalars().all()), total
 
@@ -440,7 +595,11 @@ async def _list_all_merged(
     follow_up: Optional[str] = None,
     announcement_id: Optional[str] = None,
     draw_date: Optional[str] = None,
+    created_from: Optional[str] = None,
+    created_to: Optional[str] = None,
     include_contact: bool = True,
+    sort_by: Optional[str] = None,
+    sort_dir: Optional[str] = None,
 ) -> CareerEnquiryListResponse:
     """Merge career + contact rows (rare path). Still paginates the merged result."""
     career_filters = _career_filters(
@@ -452,6 +611,8 @@ async def _list_all_merged(
         follow_up=follow_up,
         announcement_id=announcement_id,
         draw_date=draw_date,
+        created_from=created_from,
+        created_to=created_to,
     )
     career_query = select(CareerEnquiry)
     if career_filters:
@@ -468,6 +629,8 @@ async def _list_all_merged(
             status=status,
             objection=objection,
             follow_up=follow_up,
+            created_from=created_from,
+            created_to=created_to,
         )
         contact_query = select(ContactInquiry)
         if contact_filters:
@@ -475,7 +638,7 @@ async def _list_all_merged(
         contact_result = await db.execute(contact_query.order_by(ContactInquiry.created_at.desc()))
         unified.extend(_contact_to_unified(row) for row in contact_result.scalars().all())
 
-    unified.sort(key=lambda item: item.created_at or datetime.min, reverse=True)
+    unified.sort(key=lambda item: _merged_sort_value(item, sort_by), reverse=_sort_desc(sort_dir))
     total = len(unified)
     offset = (page - 1) * page_size
     return CareerEnquiryListResponse(
@@ -499,10 +662,12 @@ async def admin_list_career_enquiries(
     follow_up: Optional[str] = None,
     announcement_id: Optional[str] = None,
     draw_date: Optional[str] = None,
+    created_from: Optional[str] = None,
+    created_to: Optional[str] = None,
+    sort_by: Optional[str] = None,
+    sort_dir: Optional[str] = None,
 ) -> CareerEnquiryListResponse:
-    source_key = (source or "career").strip().lower()
-    if source_key not in {"all", "career", "contact"}:
-        raise HTTPException(status_code=400, detail="Invalid source. Allowed: all, career, contact")
+    source_key, origin = _split_list_source(source, default="career")
 
     # Domain / qualification only apply to Career Program rows.
     career_only_filters = bool(
@@ -526,6 +691,11 @@ async def admin_list_career_enquiries(
             follow_up=follow_up,
             announcement_id=announcement_id,
             draw_date=draw_date,
+            created_from=created_from,
+            created_to=created_to,
+            origin=origin,
+            sort_by=sort_by,
+            sort_dir=sort_dir,
         )
         return CareerEnquiryListResponse(
             items=[_career_to_unified(row) for row in rows],
@@ -545,6 +715,10 @@ async def admin_list_career_enquiries(
             status=status,
             objection=objection,
             follow_up=follow_up,
+            created_from=created_from,
+            created_to=created_to,
+            sort_by=sort_by,
+            sort_dir=sort_dir,
         )
         return CareerEnquiryListResponse(
             items=[_contact_to_unified(row) for row in rows],
@@ -565,7 +739,11 @@ async def admin_list_career_enquiries(
         follow_up=follow_up,
         announcement_id=announcement_id,
         draw_date=draw_date,
+        created_from=created_from,
+        created_to=created_to,
         include_contact=not career_only_filters,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
     )
 
 
@@ -580,30 +758,29 @@ async def admin_enquiry_pipeline_stats(
     db: AsyncSession,
     source: Optional[str] = None,
 ) -> EnquiryPipelineStats:
-    source_key = (source or "all").strip().lower()
-    if source_key not in {"all", "career", "contact"}:
-        raise HTTPException(status_code=400, detail="Invalid source. Allowed: all, career, contact")
+    source_key, origin = _split_list_source(source, default="all")
 
     include_career = source_key in {"all", "career"}
-    include_contact = source_key in {"all", "contact"}
+    include_contact = source_key in {"all", "contact"} and not origin
     start, end = _day_bounds_utc()
+    career_base = _origin_filters(origin)
 
     by_status = {key: 0 for key in PIPELINE_STATUSES}
     total = 0
     follow_up_due_today = 0
 
     if include_career:
-        total += await _count_model(db, CareerEnquiry, [])
+        total += await _count_model(db, CareerEnquiry, career_base)
         follow_up_due_today += await _count_model(
             db,
             CareerEnquiry,
-            [CareerEnquiry.next_follow_up_date.between(start, end)],
+            [*career_base, CareerEnquiry.next_follow_up_date.between(start, end)],
         )
         for status in PIPELINE_STATUSES:
             by_status[status] += await _count_model(
                 db,
                 CareerEnquiry,
-                [CareerEnquiry.status.in_(_status_match_values(status))],
+                [*career_base, CareerEnquiry.status.in_(_status_match_values(status))],
             )
 
     if include_contact:
@@ -1258,6 +1435,8 @@ async def admin_export_enquiries_xlsx(
     follow_up: Optional[str] = None,
     announcement_id: Optional[str] = None,
     draw_date: Optional[str] = None,
+    created_from: Optional[str] = None,
+    created_to: Optional[str] = None,
 ) -> bytes:
     from io import BytesIO
 
@@ -1274,6 +1453,8 @@ async def admin_export_enquiries_xlsx(
         follow_up=follow_up,
         announcement_id=announcement_id,
         draw_date=draw_date,
+        created_from=created_from,
+        created_to=created_to,
     )
     book = Workbook()
     sheet = book.active

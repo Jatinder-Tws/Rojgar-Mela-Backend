@@ -21,12 +21,23 @@ class JobFair(Base):
     banner_image_url = Column(Text, nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
     industries = Column(JSON, nullable=True)
+    event_profile = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     # Relationships
     companies = relationship("JobFairCompany", back_populates="job_fair", cascade="all, delete-orphan")
     seekers = relationship("JobFairSeeker", back_populates="job_fair", cascade="all, delete-orphan")
+
+
+class EventFormSubmission(Base):
+    __tablename__ = "event_form_submissions"
+
+    id = Column(UUID(as_uuid=False), primary_key=True, default=_uuid)
+    job_fair_id = Column(UUID(as_uuid=False), ForeignKey("job_fairs.id", ondelete="CASCADE"), nullable=True, index=True)
+    announcement_id = Column(UUID(as_uuid=False), ForeignKey("site_announcements.id", ondelete="CASCADE"), nullable=True, index=True)
+    answers = Column(JSON, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 class JobFairCompany(Base):

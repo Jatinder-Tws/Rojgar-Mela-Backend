@@ -87,6 +87,34 @@ def classify_job_fair_status(fair_date: datetime, now: Optional[datetime] = None
     return "concluded"
 
 
+def _profile_dict(fair) -> dict:
+    raw = getattr(fair, "event_profile", None)
+    return raw if isinstance(raw, dict) else {}
+
+
+def _public_profile(fair) -> Optional[dict]:
+    profile = _profile_dict(fair)
+    return profile or None
+
+
+def _public_is_online(fair) -> bool:
+    mode = _profile_dict(fair).get("mode")
+    if mode == "online":
+        return True
+    if mode in ("offline", "hybrid"):
+        return False
+    return _is_online_location(getattr(fair, "location", None))
+
+
+def _public_status(fair, now: datetime) -> str:
+    life = _profile_dict(fair).get("lifecycle")
+    if life == "completed":
+        return "concluded"
+    if life == "live":
+        return "live"
+    return classify_job_fair_status(fair.date, now)
+
+
 async def _company_logos_by_fair(
     db: AsyncSession, fair_ids: list[str], per_fair: int = 6
 ) -> dict[str, list[JobFairCompanyLogoOut]]:
@@ -137,11 +165,12 @@ async def _to_public_out(
         banner_image_url=fair.banner_image_url,
         is_active=bool(fair.is_active),
         industries=fair.industries,
-        status=classify_job_fair_status(fair.date, now),
-        is_online=_is_online_location(fair.location),
+        status=_public_status(fair, now),
+        is_online=_public_is_online(fair),
         company_count=int(company_count or 0),
         candidate_count=int(candidate_count or 0),
         company_logos=logos,
+        event_profile=_public_profile(fair),
     )
 
 
@@ -257,11 +286,12 @@ async def get_public_job_fair_db(
         banner_image_url=existing.banner_image_url,
         is_active=existing.is_active,
         industries=existing.industries,
-        status=classify_job_fair_status(existing.date, now),
-        is_online=_is_online_location(existing.location),
+        status=_public_status(existing, now),
+        is_online=_public_is_online(existing),
         company_count=int(company_count),
         candidate_count=int(candidate_count),
         company_logos=logos_map.get(existing.id, []),
+        event_profile=_public_profile(existing),
     )
 
 
@@ -304,6 +334,7 @@ async def create_job_fair_db(
     slug: str,
     banner_image_url: Optional[str] = None,
     industries: Optional[list[str]] = None,
+    event_profile: Optional[dict] = None,
     created_by_id: Optional[str] = None,
 ) -> JobFairOut:
     # created_by_id is ignored since it is not defined in the JobFair model / DB schema
@@ -316,6 +347,7 @@ async def create_job_fair_db(
         slug=slug,
         banner_image_url=banner_image_url,
         industries=industries,
+        event_profile=event_profile,
     )
     db.add(fair)
     await db.commit()
@@ -335,6 +367,7 @@ async def update_job_fair_db(
     slug: Optional[str] = None,
     banner_image_url: Optional[str] = None,
     industries: Optional[list[str]] = None,
+    event_profile: Optional[dict] = None,
 ) -> Optional[JobFairOut]:
     fair = await db.get(JobFair, fair_id)
     if not fair:
@@ -356,6 +389,8 @@ async def update_job_fair_db(
         fair.banner_image_url = banner_image_url
     if industries is not None:
         fair.industries = industries
+    if event_profile is not None:
+        fair.event_profile = event_profile
 
     fair.updated_at = datetime.utcnow()
     await db.commit()

@@ -14,11 +14,13 @@ class AssessmentSession(Base):
 
     id = Column(UUID(as_uuid=False), primary_key=True, default=_uuid)
     # Track the basic seed info
-    experience_level = Column(String(50), nullable=True)
-    domain_interest = Column(String(100), nullable=True)
+    experience_level = Column(String(100), nullable=True)
+    domain_interest = Column(String(255), nullable=True)
     
     # Store Q&A history as JSON to maintain context
     qa_history = Column(JSON, default=list, nullable=False)
+    # Full AI question set, generated once when the test starts.
+    question_plan = Column(JSON, nullable=True)
     
     # State tracking
     status = Column(String(20), default="in_progress") # in_progress, completed

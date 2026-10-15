@@ -2,6 +2,7 @@
 Assessment controller – business logic from routers/assessment.py
 """
 import json as _json
+import asyncio
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,17 +11,68 @@ from app.modules.jobs_portal.models.assessment import AssessmentSession, Assessm
 from app.shared.models.user import User, UserRole
 from app.modules.jobs_portal.schemas.assessment import AssessmentStart, AssessmentAnswer, AssessmentComplete
 from app.shared.schemas.auth import LoginResponse, UserOut
-from app.core.dependencies import create_access_token, hash_password
-from app.modules.jobs_portal.services.ai_service import generate_next_assessment_question, generate_assessment_evaluation
-from app.shared.services.totp_service import totp_service
+from app.core.dependencies import hash_password
+from app.modules.jobs_portal.services.assessment_questions import build_assessment_evaluation
+from app.modules.jobs_portal.services.ai_service import (
+    generate_career_evaluation,
+    generate_career_question_set,
+)
 
 COST_PER_TOKEN = 0.00035 / 1000
 
 
+async def _user_by_phone(phone: str, db: AsyncSession) -> User | None:
+    """Return the newest account for this phone.
+
+    Some phones were saved more than once. scalar_one_or_none raises in that
+    case and the assessment finish step fails before details are saved.
+    """
+    result = await db.execute(
+        select(User).where(User.phone == phone).order_by(User.created_at.desc())
+    )
+    return result.scalars().first()
+
+
+async def _ensure_question_plan(session) -> list:
+    plan = session.question_plan or []
+    if isinstance(plan, list) and plan:
+        return plan
+    plan, tokens = await generate_career_question_set(session.experience_level, session.domain_interest)
+    session.question_plan = plan
+    session.tokens_utilized = (session.tokens_utilized or 0) + (tokens or 0)
+    session.cost = (session.cost or 0) + (tokens or 0) * COST_PER_TOKEN
+    return plan
+
+
+def _question_payload(plan: list, index: int) -> dict:
+    if index >= len(plan):
+        return {"is_complete": True}
+    item = plan[index] or {}
+    return {
+        "question": item.get("question"),
+        "options": item.get("options") or [],
+        "category": item.get("category") or "",
+        "total": len(plan),
+        "is_complete": False,
+    }
+
+
+async def _score_session(session) -> dict:
+    try:
+        return await generate_career_evaluation(
+            session.qa_history, session.experience_level, session.domain_interest
+        )
+    except Exception as exc:
+        print(f"Career evaluation fallback: {exc}")
+        return build_assessment_evaluation(
+            session.qa_history, session.experience_level, session.domain_interest
+        )
+
+
 async def start_assessment(body: AssessmentStart, db: AsyncSession) -> AssessmentSession:
     session = AssessmentSession(
-        experience_level=body.experience_level,
-        domain_interest=body.domain_interest,
+        experience_level=(body.experience_level or "")[:100],
+        domain_interest=(body.domain_interest or "")[:255],
         qa_history=[]
     )
     db.add(session)
@@ -34,16 +86,12 @@ async def get_next_question(session_id: str, db: AsyncSession) -> dict:
     session = result.scalar_one_or_none()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    is_complete = len(session.qa_history or []) >= 15
-    if is_complete:
-        return {"is_complete": True}
-    question_json, tokens = await generate_next_assessment_question(session.qa_history, session.experience_level, session.domain_interest)
-    if isinstance(question_json, list):
-        question_json = question_json[0] if question_json else {"question": "", "options": []}
-    session.tokens_utilized = (session.tokens_utilized or 0) + tokens
-    session.cost = (session.cost or 0) + tokens * COST_PER_TOKEN
+    plan = await _ensure_question_plan(session)
     await db.commit()
-    return {"question": question_json.get("question"), "options": question_json.get("options"), "is_complete": False}
+    index = len(session.qa_history or [])
+    if index >= len(plan):
+        return {"is_complete": True}
+    return _question_payload(plan, index)
 
 
 async def submit_answer(session_id: str, body: AssessmentAnswer, db: AsyncSession) -> dict:
@@ -53,47 +101,41 @@ async def submit_answer(session_id: str, body: AssessmentAnswer, db: AsyncSessio
         raise HTTPException(status_code=404, detail="Session not found")
     new_history = list(session.qa_history) if session.qa_history else []
     new_history.append({"question": body.question, "answer": body.answer})
+    plan = await _ensure_question_plan(session)
+    answered_index = len(new_history) - 1
+    if 0 <= answered_index < len(plan):
+        new_history[-1]["category"] = (plan[answered_index] or {}).get("category") or ""
     session.qa_history = new_history
-    is_complete = len(new_history) >= 15
-    if is_complete:
+    if len(new_history) >= len(plan):
         session.status = "completed"
         await db.commit()
         await db.refresh(session)
-        return {"is_complete": True}
-    question_json, tokens = await generate_next_assessment_question(session.qa_history, session.experience_level, session.domain_interest)
-    if isinstance(question_json, list):
-        question_json = question_json[0] if question_json else {"question": "", "options": []}
-    session.tokens_utilized = (session.tokens_utilized or 0) + tokens
-    session.cost = (session.cost or 0) + tokens * COST_PER_TOKEN
+        return {"is_complete": True, "total": len(plan)}
     await db.commit()
-    return {"question": question_json.get("question"), "options": question_json.get("options"), "is_complete": False}
+    return _question_payload(plan, len(new_history))
 async def complete_assessment(session_id: str, body: AssessmentComplete, db: AsyncSession) -> LoginResponse:
     result = await db.execute(select(AssessmentSession).where(AssessmentSession.id == session_id))
     session = result.scalar_one_or_none()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    user_result = await db.execute(select(User).where(User.phone == body.phone))
-    user = user_result.scalar_one_or_none()
+    user = await _user_by_phone(body.phone, db)
+    existing_account = user is not None
     if not user:
         if body.email:
             email_result = await db.execute(select(User).where(User.email == body.email))
             email_user = email_result.scalar_one_or_none()
             if email_user:
                 raise HTTPException(status_code=400, detail="Email already registered")
-        secret = totp_service.generate_secret()
         user = User(
             email=body.email, phone=body.phone, first_name=body.first_name, last_name=body.last_name,
             role=UserRole(body.role) if body.role else UserRole.seeker,
-            is_verified=False, totp_secret=secret, onboarding_complete=False, is_assessment_done=True
+            is_verified=False, onboarding_complete=False, is_assessment_done=True
         )
         if body.password:
             user.hashed_password = hash_password(body.password)
         db.add(user)
         await db.flush()
     else:
-        if not user.totp_secret:
-            user.totp_secret = totp_service.generate_secret()
-        secret = user.totp_secret
         user.is_assessment_done = True
 
     # Check if AssessmentResult already exists
@@ -102,11 +144,9 @@ async def complete_assessment(session_id: str, body: AssessmentComplete, db: Asy
     if assessment_result:
         if assessment_result.user_id is None:
             assessment_result.user_id = user.id
-        elif assessment_result.user_id != user.id:
-            raise HTTPException(status_code=403, detail="Assessment already linked to another user")
-        db.add(assessment_result)
+            db.add(assessment_result)
     else:
-        eval_data = await generate_assessment_evaluation(session.qa_history, session.experience_level, session.domain_interest)
+        eval_data = await _score_session(session)
         eval_tokens = eval_data.get("tokens_utilized", 0)
         session.tokens_utilized = (session.tokens_utilized or 0) + eval_tokens
         session.cost = (session.cost or 0) + eval_tokens * COST_PER_TOKEN
@@ -123,13 +163,11 @@ async def complete_assessment(session_id: str, body: AssessmentComplete, db: Asy
         db.add(assessment_result)
     await db.commit()
     await db.refresh(user)
-    token = create_access_token(data={"sub": user.id})
-    uri = totp_service.get_provisioning_uri(user.email or user.phone, secret)
-    qr_base64 = totp_service.generate_qr_base64(uri)
     return LoginResponse(
-        message="Assessment complete! Please scan the QR code to set up your account.",
-        requires_setup=True, qr_code_base64=f"data:image/png;base64,{qr_base64}",
-        user=UserOut.model_validate(user)
+        message="Assessment saved on your existing account." if existing_account else "Assessment complete.",
+        linked=existing_account,
+        requires_setup=False,
+        user=UserOut.model_validate(user),
     )
 
 
@@ -144,7 +182,7 @@ async def get_result(session_id: str, db: AsyncSession) -> AssessmentResult:
             raise HTTPException(status_code=404, detail="Result not found")
         
         # Dynamically generate the result!
-        eval_data = await generate_assessment_evaluation(session.qa_history, session.experience_level, session.domain_interest)
+        eval_data = await _score_session(session)
         eval_tokens = eval_data.get("tokens_utilized", 0)
         session.tokens_utilized = (session.tokens_utilized or 0) + eval_tokens
         session.cost = (session.cost or 0) + eval_tokens * COST_PER_TOKEN
@@ -173,8 +211,7 @@ async def get_result(session_id: str, db: AsyncSession) -> AssessmentResult:
 
 
 async def check_phone(phone: str, db: AsyncSession) -> dict:
-    result = await db.execute(select(User).where(User.phone == phone))
-    user = result.scalar_one_or_none()
+    user = await _user_by_phone(phone, db)
     if user:
         return {"exists": True, "first_name": user.first_name, "last_name": user.last_name, "email": user.email}
     return {"exists": False}
@@ -193,7 +230,7 @@ async def link_to_profile(session_id: str, user: User, db: AsyncSession) -> dict
         session = sess_res.scalar_one_or_none()
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
-        eval_data = await generate_assessment_evaluation(session.qa_history, session.experience_level, session.domain_interest)
+        eval_data = await _score_session(session)
         eval_tokens = eval_data.get("tokens_utilized", 0)
         session.tokens_utilized = (session.tokens_utilized or 0) + eval_tokens
         session.cost = (session.cost or 0) + eval_tokens * COST_PER_TOKEN

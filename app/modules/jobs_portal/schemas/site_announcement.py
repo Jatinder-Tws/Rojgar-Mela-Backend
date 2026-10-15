@@ -38,6 +38,7 @@ class SiteAnnouncementCreate(BaseModel):
     lucky_draw_days: int = Field(1, ge=1, le=30)
     lucky_draw_reveal_time: str = Field("18:00", max_length=5)
     sort_order: int = 0
+    event_profile: Optional[dict] = None
 
     @field_validator("text")
     @classmethod
@@ -112,6 +113,7 @@ class SiteAnnouncementUpdate(BaseModel):
     lucky_draw_days: Optional[int] = Field(None, ge=1, le=30)
     lucky_draw_reveal_time: Optional[str] = Field(None, max_length=5)
     sort_order: Optional[int] = None
+    event_profile: Optional[dict] = None
 
     @field_validator("text")
     @classmethod
@@ -189,6 +191,7 @@ class SiteAnnouncementOut(BaseModel):
     lucky_draw_days: int = 1
     lucky_draw_reveal_time: str = "18:00"
     sort_order: int
+    event_profile: Optional[dict] = None
     created_at: datetime
     updated_at: datetime
 
@@ -226,6 +229,7 @@ class SiteAnnouncementPublicOut(BaseModel):
     lucky_draw_days: int = 1
     lucky_draw_reveal_time: str = "18:00"
     start_date: Optional[datetime] = None
+    event_profile: Optional[dict] = None
 
     @field_serializer("event_date", "expires_at", "start_date")
     def serialize_datetimes(self, value: Optional[datetime]) -> Optional[str]:

@@ -10,8 +10,9 @@ from sqlalchemy import select, or_, and_, func, exists
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings, get_upload_dir
+from app.shared.services.event_object_storage import store_event_file
 from app.core.database import get_db
-from app.modules.jobs_portal.models.job_fair import JobFairCompany, JobFairSeeker
+from app.modules.jobs_portal.models.job_fair import EventFormSubmission, JobFairCompany, JobFairSeeker
 from app.shared.models.notification import NotificationType
 from app.shared.models.user import User, UserRole, CompanyType
 from app.shared.models.imported_user_password import ImportedUserPassword
@@ -28,6 +29,7 @@ from app.modules.jobs_portal.schemas.job_fair import (
     JobFairSeekerListResponse,
     JobFairPublicOut,
     JobFairPublicCatalogResponse,
+    EventFormSubmit,
 )
 from app.core.dependencies import (
     get_current_user,
@@ -91,13 +93,8 @@ async def get_job_fair_by_id_or_slug(id_or_slug: str, db: AsyncSession) -> JobFa
 
 
 async def _save_banner_image(banner_image: UploadFile) -> str:
-    """Save a banner image file and return its URL path."""
+    """Save an event banner and return its public URL."""
     from pathlib import Path
-    base_dir = get_upload_dir()
-    if not base_dir.is_absolute():
-        base_dir = get_upload_dir()
-    banner_dir = base_dir / "job_fair_banners"
-    banner_dir.mkdir(parents=True, exist_ok=True)
     ext = Path(banner_image.filename or "").suffix.lower().strip()
     if not ext and banner_image.content_type:
         ct = banner_image.content_type.lower()
@@ -118,12 +115,8 @@ async def _save_banner_image(banner_image: UploadFile) -> str:
             status_code=400,
             detail="Only image files (.jpg, .jpeg, .png, .webp, .svg, .gif) are allowed for the banner image.",
         )
-    safe_name = f"{uuid.uuid4().hex}{ext}"
-    banner_path = banner_dir / safe_name
     content = await banner_image.read()
-    with open(banner_path, "wb") as f:
-        f.write(content)
-    return f"/uploads/job_fair_banners/{safe_name}"
+    return await store_event_file(content, f"{uuid.uuid4().hex}{ext}", "job_fair_banners")
 
 
 # ── SUPER ADMIN CRUD ENDPOINTS ──────────────────────────────────────────────
@@ -217,6 +210,7 @@ async def update_job_fair(
         slug=new_slug,
         banner_image_url=update_data.get("banner_image_url"),
         industries=update_data.get("industries"),
+        event_profile=update_data.get("event_profile"),
     )
     if not updated:
         raise HTTPException(status_code=404, detail="Job Fair not found")
@@ -315,9 +309,59 @@ async def get_job_fair_public(
 ):
     """Public job fair detail with participation stats. No authentication required."""
     job_fair = await get_public_job_fair_db(db, id_or_slug)
-    if not job_fair:
+    if not job_fair or not job_fair.is_active:
         raise HTTPException(status_code=404, detail="Job Fair not found")
     return job_fair
+
+
+@router.post("/public/{id_or_slug}/form")
+async def submit_public_event_form(
+    id_or_slug: str,
+    body: EventFormSubmit,
+    db: AsyncSession = Depends(get_db),
+):
+    """Public attendee form built in the modular event creator."""
+    fair = await get_job_fair_db(db, id_or_slug)
+    if not fair or not fair.is_active:
+        raise HTTPException(status_code=404, detail="Event not found")
+    profile = fair.event_profile or {}
+    if (profile.get("modules") or {}).get("registration") is False:
+        raise HTTPException(status_code=400, detail="Registration is closed for this event.")
+    fields = profile.get("registrationFields") or []
+    answers = body.answers or {}
+    missing = [
+        field.get("label") or "A required question"
+        for field in fields
+        if field.get("required") and not str(answers.get(field.get("label"), "")).strip()
+    ]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Please answer: {', '.join(missing)}")
+    db.add(EventFormSubmission(job_fair_id=fair.id, answers={str(k): str(v) for k, v in answers.items()}))
+    await db.commit()
+    return {"ok": True}
+
+
+@router.get("/{id}/form-submissions")
+async def list_event_form_submissions(
+    id: str,
+    db: AsyncSession = Depends(get_db),
+    _admin: User = Depends(require_super_admin_or_permission("job_fairs")),
+):
+    fair = await get_job_fair_db(db, id)
+    if not fair:
+        raise HTTPException(status_code=404, detail="Event not found")
+    rows = (
+        await db.execute(
+            select(EventFormSubmission)
+            .where(EventFormSubmission.job_fair_id == fair.id)
+            .order_by(EventFormSubmission.created_at.desc())
+            .limit(50)
+        )
+    ).scalars().all()
+    return {
+        "total": len(rows),
+        "items": [{"id": row.id, "answers": row.answers, "created_at": row.created_at.isoformat()} for row in rows],
+    }
 
 
 @router.get("/provider/participated", response_model=List[JobFairOut])

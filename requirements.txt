@@ -9,6 +9,7 @@ asyncpg==0.30.0
 bcrypt==4.2.1
 beautifulsoup4==4.14.2
 billiard==4.2.4
+boto3==1.35.99
 celery==5.6.3
 certifi==2026.2.25
 cffi==2.0.0

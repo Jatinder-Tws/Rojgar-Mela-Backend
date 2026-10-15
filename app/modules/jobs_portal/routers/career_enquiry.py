@@ -87,6 +87,8 @@ async def export_enquiries(
     follow_up: Optional[str] = None,
     announcement_id: Optional[str] = None,
     draw_date: Optional[str] = None,
+    created_from: Optional[str] = None,
+    created_to: Optional[str] = None,
     _admin: User = Depends(require_super_admin_or_permission("enquiries")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -99,6 +101,8 @@ async def export_enquiries(
         follow_up=follow_up,
         announcement_id=announcement_id,
         draw_date=draw_date,
+        created_from=created_from,
+        created_to=created_to,
     )
     return StreamingResponse(
         BytesIO(payload),
@@ -129,6 +133,10 @@ async def list_enquiries(
     follow_up: Optional[str] = None,
     announcement_id: Optional[str] = None,
     draw_date: Optional[str] = None,
+    created_from: Optional[str] = None,
+    created_to: Optional[str] = None,
+    sort_by: Optional[str] = None,
+    sort_dir: Optional[str] = None,
     _admin: User = Depends(require_super_admin_or_permission("enquiries")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -145,6 +153,10 @@ async def list_enquiries(
         follow_up=follow_up,
         announcement_id=announcement_id,
         draw_date=draw_date,
+        created_from=created_from,
+        created_to=created_to,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
     )
 
 
