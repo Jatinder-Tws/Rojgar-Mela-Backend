@@ -58,10 +58,60 @@ from app.modules.super_admin.services.super_admin_utils import normalize_phone a
 
 _INDUSTRY_SPLIT = re.compile(r"[,;/|]+")
 _INDUSTRY_ALIAS_GROUPS = (
-    ("information technology", "it", "it & software", "it/software", "it and software"),
+    ("information technology", "it", "it & software", "it/software", "it and software", "it / saas", "technology", "tech"),
     ("automotive", "automobile"),
-    ("e-commerce", "ecommerce", "e commerce"),
+    ("banking & finance", "banking", "finance", "financial services"),
+    ("logistics", "transportation & logistics", "transportation", "supply chain"),
+    ("hospitality", "hospitality & tourism", "tourism"),
+    ("energy", "energy & utilities", "utilities"),
+    ("retail & e-commerce", "retail", "e-commerce", "ecommerce", "retail & ecommerce"),
+    ("fmcg", "consumer goods", "fast moving consumer goods"),
+    ("fashion & textiles", "textiles", "fashion", "apparel"),
+    ("media & entertainment", "media", "entertainment"),
+    ("pharmaceuticals", "pharma"),
+    ("real estate", "property"),
+    ("telecommunications", "telecom"),
 )
+
+CANONICAL_INDUSTRIES: List[str] = [
+    "Agriculture",
+    "Automotive",
+    "Aviation",
+    "Banking & Finance",
+    "BPO/KPO",
+    "Construction",
+    "Consulting",
+    "Education",
+    "Energy",
+    "Fashion & Textiles",
+    "FMCG",
+    "Government",
+    "Healthcare",
+    "Hospitality",
+    "Human Resources",
+    "Information Technology",
+    "IT & Software",
+    "Legal",
+    "Logistics",
+    "Manufacturing",
+    "Media & Entertainment",
+    "Pharmaceuticals",
+    "Real Estate",
+    "Retail & E-Commerce",
+    "Startups & Entrepreneurship",
+    "Telecommunications",
+]
+
+
+def _is_valid_industry_name(name: str) -> bool:
+    if not name or len(name.strip()) < 2:
+        return False
+    clean = name.strip()
+    if clean.isdigit() or re.match(r"^[\d\s\-_.,/]+$", clean):
+        return False
+    if clean.lower() in ("nan", "null", "undefined", "none", "n/a", "other", "others"):
+        return False
+    return True
 
 
 def _parse_industries(*values: Optional[str]) -> List[str]:
@@ -72,7 +122,7 @@ def _parse_industries(*values: Optional[str]) -> List[str]:
             continue
         for part in _INDUSTRY_SPLIT.split(str(value)):
             name = part.strip()
-            if not name:
+            if not _is_valid_industry_name(name):
                 continue
             key = name.lower()
             if key in seen:
@@ -734,28 +784,22 @@ async def list_seekers(
 
 
 async def list_seeker_industries(db: AsyncSession) -> List[str]:
-    """Distinct industries for the seekers filter dropdown, including master options."""
-    from app.shared.models.master import MasterIndustry
-
+    """Canonical industries for the seekers filter dropdown, aligned across provider, seeker, and admin sides."""
     seen: dict[str, str] = {}
+    for item in CANONICAL_INDUSTRIES:
+        seen[item.lower()] = item
 
-    master_rows = await db.execute(select(MasterIndustry.name).order_by(MasterIndustry.name))
-    for name in master_rows.scalars().all():
-        for parsed in _parse_industries(name):
-            seen.setdefault(parsed.lower(), parsed)
-
+    # Include any valid distinct non-numeric industries registered in users.industry
     seeker_rows = await db.execute(
-        select(User.industry, User.preferred_job_sector).where(
+        select(User.industry).where(
             User.role == UserRole.seeker,
             User.is_super_admin.is_(False),
-            or_(
-                and_(User.industry.isnot(None), func.trim(User.industry) != ""),
-                and_(User.preferred_job_sector.isnot(None), func.trim(User.preferred_job_sector) != ""),
-            ),
+            User.industry.isnot(None),
+            func.trim(User.industry) != "",
         )
     )
-    for industry, sector in seeker_rows.all():
-        for parsed in _parse_industries(industry, sector):
+    for (industry,) in seeker_rows.all():
+        for parsed in _parse_industries(industry):
             seen.setdefault(parsed.lower(), parsed)
 
     return sorted(seen.values(), key=str.lower)

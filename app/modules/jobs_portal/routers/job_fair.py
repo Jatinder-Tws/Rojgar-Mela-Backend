@@ -913,14 +913,17 @@ async def get_job_fair_seekers(
     elif resume == "no_resume":
         query = query.where(~exists().where(Resume.user_id == User.id))
 
-    if industry:
+    if industry and industry.strip().lower() != "all":
         from app.modules.jobs_portal.models.external_candidate import ExternalCandidate
         from sqlalchemy import String
         query = query.where(
-            exists().where(
-                and_(
-                    ExternalCandidate.email == User.email,
-                    func.cast(ExternalCandidate.industries, String).ilike(f"%{industry.strip()}%")
+            or_(
+                User.industry.ilike(f"%{industry.strip()}%"),
+                exists().where(
+                    and_(
+                        ExternalCandidate.email == User.email,
+                        func.cast(ExternalCandidate.industries, String).ilike(f"%{industry.strip()}%")
+                    )
                 )
             )
         )

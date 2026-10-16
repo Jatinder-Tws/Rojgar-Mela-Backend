@@ -60,7 +60,13 @@ async def import_seekers(file: UploadFile, db: AsyncSession) -> dict:
             highest_qualification=clean_value(row.get("Highest Qualification")),
             stream_specialization=clean_value(row.get("Stream / Specialization")),
             college_institute_name=clean_value(row.get("College / Institute Name")),
-            preferred_job_sector=clean_value(row.get("Preferred Job / Sector")),
+            preferred_job_sector=(
+                clean_value(row.get("Preferred Job / Sector"))
+                if clean_value(row.get("Preferred Job / Sector"))
+                and not str(clean_value(row.get("Preferred Job / Sector"))).strip().isdigit()
+                and len(str(clean_value(row.get("Preferred Job / Sector"))).strip()) >= 2
+                else None
+            ),
             experience=clean_value(row.get("Total Experience")),
         )
         db.add(new_user)

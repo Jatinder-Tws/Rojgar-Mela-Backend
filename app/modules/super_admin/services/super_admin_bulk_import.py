@@ -174,10 +174,14 @@ async def _run_bulk_import_job_inner(
                     is_assessment_done=(role == UserRole.seeker),
                 )
                 if role == UserRole.seeker:
-                    user.industry = _pick_first_value(row, "industry") or None
-                    user.job_role = _pick_first_value(
+                    ind_val = _pick_first_value(row, "industry")
+                    user.industry = ind_val if ind_val and not ind_val.strip().isdigit() and len(ind_val.strip()) >= 2 else None
+
+                    jr_val = _pick_first_value(
                         row, "job_role", "preferred_job_sector", "preferred_job", "preferred_sector"
-                    ) or None
+                    )
+                    user.job_role = jr_val if jr_val and not jr_val.strip().isdigit() and len(jr_val.strip()) >= 2 else None
+
                     jt = _pick_first_value(row, "job_type")
                     if jt:
                         user.job_type = JobType(jt)
@@ -205,9 +209,10 @@ async def _run_bulk_import_job_inner(
                     user.college_institute_name = _pick_first_value(
                         row, "college_institute_name", "college_name", "institute_name"
                     ) or None
-                    user.preferred_job_sector = _pick_first_value(
+                    pjs_val = _pick_first_value(
                         row, "preferred_job_sector", "preferred_job", "preferred_sector"
-                    ) or None
+                    )
+                    user.preferred_job_sector = pjs_val if pjs_val and not pjs_val.strip().isdigit() and len(pjs_val.strip()) >= 2 else None
                 else:
                     user.company_name = _pick_first_value(row, "company_name") or None
                     ct = _pick_first_value(row, "company_type")
