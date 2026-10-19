@@ -67,14 +67,14 @@ class PortalEnrollmentCreate(BaseModel):
 class PortalEnrollmentUpdate(BaseModel):
     batch_id: Optional[str] = None
     batch_name: Optional[str] = None
-    payment_status: Optional[Literal["paid_online", "paid_offline", "pending", "free", "overdue", "refunded", "initiated", "token_paid"]] = None
+    payment_status: Optional[Literal["paid_online", "paid_offline", "partially_paid", "pending", "free", "overdue", "refunded", "initiated", "token_paid"]] = None
     payment_mode: Optional[str] = None
     paid_amount: Optional[float] = None
     balance_due: Optional[float] = None
     voter_card_url: Optional[str] = None
     laptop_confirmed: Optional[bool] = None
     notes: Optional[str] = None
-    status: Optional[Literal["active", "completed", "dropped", "pending", "token_booked"]] = None
+    status: Optional[Literal["active", "completed", "dropped", "absconded", "pending", "token_booked"]] = None
     attendance_percentage: Optional[int] = None
     completion_percentage: Optional[int] = None
     is_certificate_issued: Optional[bool] = None
@@ -600,6 +600,7 @@ class PortalEnrollmentStatusCounts(BaseModel):
     active: int = 0
     completed: int = 0
     dropped: int = 0
+    absconded: int = 0
     pending: int = 0
 
 
@@ -644,6 +645,7 @@ class PortalDashboardSummaryOut(BaseModel):
     batch_utilization_percent: int = 0
     fee_collection: float = 0
     pending_fee: float = 0
+    absconded_dues: float = 0
     overdue_count: int = 0
     certificates_issued: int = 0
     certificate_eligible: int = 0

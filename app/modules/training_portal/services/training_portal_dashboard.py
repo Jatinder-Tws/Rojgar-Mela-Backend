@@ -137,6 +137,7 @@ async def build_dashboard_summary(
         "active": 0,
         "completed": 0,
         "dropped": 0,
+        "absconded": 0,
         "pending": 0,
         "payment_initiated": 0,
     }
@@ -146,6 +147,7 @@ async def build_dashboard_summary(
     attendance_compliant = 0
     attendance_below = 0
     outstanding = 0.0
+    absconded_outstanding = 0.0
     overdue_count = 0
     cert_eligible = 0
     cert_issued = 0
@@ -157,7 +159,14 @@ async def build_dashboard_summary(
         status_counts[e.status] = status_counts.get(e.status, 0) + 1
         attendance_sum += int(e.attendance_percentage or 0)
         completion_sum += int(e.completion_percentage or 0)
-        outstanding += float(e.balance_due or 0)
+        
+        # Keep absconded / dropped balance separate so active collection target is accurate & transparent
+        bal = float(e.balance_due or 0)
+        if e.status in ("dropped", "absconded"):
+            absconded_outstanding += bal
+        else:
+            outstanding += bal
+
         if e.payment_status == "overdue":
             overdue_count += 1
             overdue_status += 1
@@ -165,7 +174,7 @@ async def build_dashboard_summary(
             paid_status += 1
         elif e.payment_status == "pending":
             pending_status += 1
-        if e.attendance_percentage < 85 or e.payment_status == "overdue" or e.status == "dropped":
+        if e.attendance_percentage < 85 or e.payment_status == "overdue" or e.status in ("dropped", "absconded"):
             at_risk += 1
         if e.attendance_percentage >= 85:
             attendance_compliant += 1
@@ -385,6 +394,7 @@ async def build_dashboard_summary(
         "batch_utilization_percent": utilization,
         "fee_collection": round(fee_collection, 2),
         "pending_fee": round(outstanding, 2),
+        "absconded_dues": round(absconded_outstanding, 2),
         "overdue_count": overdue_count,
         "certificates_issued": cert_issued,
         "certificate_eligible": cert_eligible,
@@ -399,6 +409,7 @@ async def build_dashboard_summary(
             "active": status_counts.get("active", 0),
             "completed": status_counts.get("completed", 0),
             "dropped": status_counts.get("dropped", 0),
+            "absconded": status_counts.get("absconded", 0),
             "pending": status_counts.get("pending", 0) + status_counts.get("payment_initiated", 0),
         },
         "payment_status": {

@@ -89,7 +89,15 @@ async def list_public_announcements(
 
     query = query.order_by(*_order()).limit(50)
     result = await db.execute(query)
-    return result.scalars().all()
+    items = result.scalars().all()
+    # Filter out draft events from public website
+    visible = []
+    for item in items:
+        ep = getattr(item, "event_page", None)
+        if isinstance(ep, dict) and ep.get("lifecycle") == "draft":
+            continue
+        visible.append(item)
+    return visible
 
 
 @public_router.post("/events/{slug}/register")
@@ -301,7 +309,10 @@ async def create_announcement(
         sort_order=body.sort_order,
         event_profile=body.event_profile,
     )
-    if body.lucky_draw_enabled:
+    ep_slug = (body.event_profile.get("slug") if isinstance(body.event_profile, dict) else None)
+    if ep_slug:
+        row.lucky_draw_slug = ep_slug
+    elif body.lucky_draw_enabled:
         from app.modules.jobs_portal.controllers.event_lucky_controller import unique_lucky_slug
         row.lucky_draw_slug = await unique_lucky_slug(db, body.title or body.text[:40])
     db.add(row)
@@ -340,7 +351,10 @@ async def update_announcement(
         if key in ("event_date", "start_date", "expires_at") and isinstance(value, datetime):
             value = _to_naive_utc(value)
         setattr(row, key, value)
-    if row.lucky_draw_enabled and not row.lucky_draw_slug:
+    ep_slug = (row.event_profile.get("slug") if isinstance(row.event_profile, dict) else None)
+    if ep_slug:
+        row.lucky_draw_slug = ep_slug
+    elif row.lucky_draw_enabled and not row.lucky_draw_slug:
         from app.modules.jobs_portal.controllers.event_lucky_controller import unique_lucky_slug
         row.lucky_draw_slug = await unique_lucky_slug(db, row.title or row.text[:40], exclude_id=row.id)
     row.updated_at = datetime.utcnow()

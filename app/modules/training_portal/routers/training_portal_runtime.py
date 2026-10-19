@@ -1633,7 +1633,8 @@ async def record_offline_payment(
     enrollment.payment_mode = body.payment_mode
     default_notes = f"Offline payment recorded by Admin (Discount: ₹{discount_amt:.2f})" if discount_amt > 0 else "Offline payment recorded by Admin"
     enrollment.notes = body.notes or enrollment.notes or default_notes
-    enrollment.status = "active"
+    if enrollment.status in ("pending", "payment_initiated", "token_booked"):
+        enrollment.status = "active"
     enrollment.updated_at = datetime.utcnow()
 
     # Update EMI installments list if present
@@ -1641,23 +1642,52 @@ async def record_offline_payment(
     if installments_list and isinstance(installments_list, list):
         updated_installments = []
         payment_date_str = body.date or datetime.utcnow().strftime("%Y-%m-%d")
-        matched = False
+
+        # If discount was applied, adjust remaining installment amounts from pending installments
+        current_inst_total = sum(float(inst.get("amount", 0.0) if isinstance(inst, dict) else 0.0) for inst in installments_list)
+        if discount_amt > 0 and current_inst_total > effective_total_fee:
+            excess = current_inst_total - effective_total_fee
+            for inst in reversed(installments_list):
+                if isinstance(inst, dict) and inst.get("status") != "paid" and excess > 0:
+                    orig_amt = float(inst.get("amount", 0.0))
+                    paid_amt = float(inst.get("paidAmount", 0.0))
+                    max_reduction = max(0.0, orig_amt - paid_amt)
+                    reduce_by = min(excess, max_reduction)
+                    new_inst_amt = max(paid_amt, orig_amt - reduce_by)
+                    inst["amount"] = round(new_inst_amt, 2)
+                    inst["remainingAmount"] = round(max(0.0, new_inst_amt - paid_amt), 2)
+                    excess -= reduce_by
+
+        remaining_pay = payment_amt
+        target_num = body.installment_number
 
         for inst in installments_list:
             if isinstance(inst, dict):
                 inst_copy = dict(inst)
-                if not matched and inst_copy.get("status") != "paid":
-                    if body.installment_number:
-                        if inst_copy.get("number") == body.installment_number:
-                            inst_copy["status"] = "paid"
-                            inst_copy["paidDate"] = payment_date_str
-                            inst_copy["paymentMode"] = body.payment_mode
-                            matched = True
-                    else:
+                inst_amt = float(inst_copy.get("amount", 0.0))
+                already_paid = float(inst_copy.get("paidAmount", inst_amt if inst_copy.get("status") == "paid" else 0.0))
+                inst_rem = max(0.0, inst_amt - already_paid)
+
+                is_target = target_num and inst_copy.get("number") == target_num
+                can_pay = inst_rem > 0 and (is_target or (not target_num and remaining_pay > 0) or (target_num and remaining_pay > 0 and inst_copy.get("number", 0) >= target_num))
+
+                if can_pay and remaining_pay > 0:
+                    alloc = min(remaining_pay, inst_rem)
+                    new_paid = already_paid + alloc
+                    new_rem = max(0.0, inst_amt - new_paid)
+                    inst_copy["paidAmount"] = round(new_paid, 2)
+                    inst_copy["remainingAmount"] = round(new_rem, 2)
+                    if new_rem <= 0.01:
                         inst_copy["status"] = "paid"
-                        inst_copy["paidDate"] = payment_date_str
-                        inst_copy["paymentMode"] = body.payment_mode
-                        matched = True
+                    else:
+                        inst_copy["status"] = "partially_paid"
+                    inst_copy["paidDate"] = payment_date_str
+                    inst_copy["paymentMode"] = body.payment_mode
+                    remaining_pay -= alloc
+                else:
+                    inst_copy["paidAmount"] = round(already_paid, 2)
+                    inst_copy["remainingAmount"] = round(inst_rem, 2)
+
                 updated_installments.append(inst_copy)
             else:
                 updated_installments.append(inst)
@@ -4321,9 +4351,11 @@ async def admin_register_and_enroll_student(
 
     # 4. Calculate amounts
     total_fee = max(0.0, float(body.total_fee))
+    discount_amount = max(0.0, float(getattr(body, "discount_amount", 0.0) or 0.0))
+    effective_fee = max(0.0, total_fee - discount_amount)
     paid_amount = max(0.0, float(body.paid_amount))
-    paid_amount = min(paid_amount, total_fee)
-    balance_due = max(0.0, total_fee - paid_amount)
+    paid_amount = min(paid_amount, effective_fee if discount_amount > 0 else total_fee)
+    balance_due = max(0.0, (effective_fee if discount_amount > 0 else total_fee) - paid_amount)
 
     payment_status = body.payment_status
     if not payment_status:
@@ -4353,6 +4385,7 @@ async def admin_register_and_enroll_student(
         payment_status=payment_status,
         payment_mode=body.payment_mode or "Cash",
         total_fee=total_fee,
+        discount_amount=discount_amount,
         paid_amount=paid_amount,
         balance_due=balance_due,
         installments=body.installments or [],
@@ -4447,6 +4480,7 @@ async def admin_register_and_enroll_student(
         candidate_email=email,
         candidate_name=full_name,
         total_fee=total_fee,
+        discount_amount=discount_amount,
         paid_amount=paid_amount,
         balance_due=balance_due,
         payment_status=payment_status,

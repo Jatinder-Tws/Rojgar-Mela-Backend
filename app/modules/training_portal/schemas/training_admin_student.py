@@ -39,6 +39,7 @@ class AdminRegisterAndEnrollStudentCreate(BaseModel):
 
     # Fee & Payment info
     total_fee: float = 0.0
+    discount_amount: float = 0.0
     paid_amount: float = 0.0
     payment_type: Literal["Full Payment", "EMI"] = "Full Payment"
     payment_mode: Optional[str] = "Cash"  # Cash, UPI, Card, Bank Transfer, Online Link, etc.
@@ -57,6 +58,7 @@ class AdminRegisterAndEnrollStudentOut(BaseModel):
     candidate_email: str
     candidate_name: str
     total_fee: float
+    discount_amount: float = 0.0
     paid_amount: float
     balance_due: float
     payment_status: str

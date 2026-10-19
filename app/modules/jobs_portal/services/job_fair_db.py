@@ -2,8 +2,14 @@
 ORM-based database helpers for job_fairs table.
 """
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Optional
+
+try:
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
+except Exception:
+    IST = timezone(timedelta(hours=5, minutes=30))
 
 from sqlalchemy import select, or_, func, exists, and_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -77,14 +83,43 @@ def _is_online_location(location: Optional[str]) -> bool:
     return any(token in loc for token in ("online", "virtual", "remote", "webinar", "zoom"))
 
 
-def classify_job_fair_status(fair_date: datetime, now: Optional[datetime] = None) -> str:
-    """Match the portal convention: same calendar day = live."""
-    now = now or datetime.utcnow()
-    if fair_date.date() == now.date():
+def classify_job_fair_status(
+    fair_date: datetime,
+    end_date_str: Optional[str] = None,
+    now: Optional[datetime] = None,
+) -> str:
+    """Classify event status: same calendar day = live, past = concluded, future = upcoming in IST."""
+    if now is None:
+        now = datetime.now(IST)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc).astimezone(IST)
+    else:
+        now = now.astimezone(IST)
+
+    today = now.date()
+
+    if fair_date.tzinfo is None:
+        fair_ist = fair_date.replace(tzinfo=timezone.utc).astimezone(IST)
+    else:
+        fair_ist = fair_date.astimezone(IST)
+
+    start_date = fair_ist.date()
+    end_date = start_date
+
+    if end_date_str:
+        try:
+            cleaned = str(end_date_str).strip().split("T")[0].split(" ")[0]
+            parts = [int(p) for p in cleaned.split("-")]
+            if len(parts) == 3:
+                end_date = datetime(parts[0], parts[1], parts[2]).date()
+        except Exception:
+            pass
+
+    if end_date < today:
+        return "concluded"
+    if start_date <= today <= end_date:
         return "live"
-    if fair_date > now:
-        return "upcoming"
-    return "concluded"
+    return "upcoming"
 
 
 def _profile_dict(fair) -> dict:
@@ -107,12 +142,15 @@ def _public_is_online(fair) -> bool:
 
 
 def _public_status(fair, now: datetime) -> str:
-    life = _profile_dict(fair).get("lifecycle")
+    profile = _profile_dict(fair)
+    life = profile.get("lifecycle")
+    if life == "draft":
+        return "draft"
     if life == "completed":
         return "concluded"
     if life == "live":
         return "live"
-    return classify_job_fair_status(fair.date, now)
+    return classify_job_fair_status(fair.date, profile.get("endDate"), now)
 
 
 async def _company_logos_by_fair(
@@ -231,6 +269,9 @@ async def list_public_job_fairs_catalog(
     concluded: list[JobFairPublicOut] = []
 
     for fair in fairs:
+        # Exclude draft events from website
+        if _profile_dict(fair).get("lifecycle") == "draft":
+            continue
         fid = str(fair.id)
         item = await _to_public_out(
             fair,
@@ -243,7 +284,7 @@ async def list_public_job_fairs_catalog(
             live.append(item)
         elif item.status == "upcoming":
             upcoming.append(item)
-        else:
+        elif item.status == "concluded":
             concluded.append(item)
 
     live.sort(key=lambda x: x.date)
@@ -262,7 +303,9 @@ async def get_public_job_fair_db(
     db: AsyncSession, id_or_slug: str
 ) -> Optional[JobFairPublicOut]:
     existing = await get_job_fair_db(db, id_or_slug)
-    if not existing:
+    if not existing or not getattr(existing, "is_active", True):
+        return None
+    if _profile_dict(existing).get("lifecycle") == "draft":
         return None
     now = datetime.utcnow()
     logos_map = await _company_logos_by_fair(db, [existing.id])

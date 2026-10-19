@@ -190,38 +190,58 @@ def public_payload(event: SiteAnnouncement, today: Optional[str] = None) -> dict
     day_index = event_day_index(event, day)
     starts_on, ends_on = event_span(event)
     window = registration_window(event, now)
+    slug = (
+        event.lucky_draw_slug
+        or (event.event_profile.get("slug") if isinstance(event.event_profile, dict) else None)
+        or event.id
+    )
+    profile = event.event_profile if isinstance(event.event_profile, dict) else {}
+    modules = profile.get("modules") or {}
+    reg_open = (
+        window["registration_open"]
+        if event.lucky_draw_enabled
+        else (modules.get("registration", True) and bool(event.is_active))
+    )
     return {
-        "slug": event.lucky_draw_slug,
+        "slug": slug,
         "title": event.title or "Event",
         "text": event.text,
         "location": event.event_location,
         "organizer": event.organizer,
         "starts_on": starts_on,
         "ends_on": ends_on,
+        "lucky_draw_enabled": bool(event.lucky_draw_enabled),
         "days": max(int(event.lucky_draw_days or 1), 1),
         "reveal_time": event.lucky_draw_reveal_time or "18:00",
         "today": day,
         "day_index": day_index,
-        "registration_open": window["registration_open"],
+        "registration_open": reg_open,
         "registration_bucket": window["registration_bucket"],
-        "assigned_draw_date": window["assigned_draw_date"],
+        "assigned_draw_date": window["assigned_draw_date"] or day,
         "reveal_at": reveal.isoformat(),
         "seconds_until_reveal": max(int((reveal - now).total_seconds()), 0),
-        "reveal_open": now >= reveal and day_index is not None,
+        "reveal_open": now >= reveal and day_index is not None if event.lucky_draw_enabled else False,
+        "event_profile": profile,
     }
 
 
 async def get_public_event(slug: str, db: AsyncSession) -> dict:
     event = await _event_by_slug(slug, db)
     payload = public_payload(event)
-    payload["board"] = await _public_board(event, db)
-    draw = await _draw_for(event.id, payload["today"], db)
-    payload["drawn"] = draw is not None
-    payload["today_count"] = len(await _day_pool(event.id, payload["today"], db))
-    if draw and draw.winner_entry_id and payload["reveal_open"]:
-        winner = await db.get(EventLuckyEntry, draw.winner_entry_id)
-        payload["winner"] = _public_card(winner) if winner else None
+    if event.lucky_draw_enabled:
+        payload["board"] = await _public_board(event, db)
+        draw = await _draw_for(event.id, payload["today"], db)
+        payload["drawn"] = draw is not None
+        payload["today_count"] = len(await _day_pool(event.id, payload["today"], db))
+        if draw and draw.winner_entry_id and payload["reveal_open"]:
+            winner = await db.get(EventLuckyEntry, draw.winner_entry_id)
+            payload["winner"] = _public_card(winner) if winner else None
+        else:
+            payload["winner"] = None
     else:
+        payload["board"] = []
+        payload["drawn"] = False
+        payload["today_count"] = 0
         payload["winner"] = None
     return payload
 
@@ -275,11 +295,19 @@ async def publish_stage(announcement_id: str, action: str, db: AsyncSession) -> 
 
 async def register(slug: str, body, db: AsyncSession) -> dict:
     event = await _event_by_slug(slug, db, require_open=True)
-    window = registration_window(event)
-    if not window["registration_open"] or not window["assigned_draw_date"]:
-        raise HTTPException(status_code=400, detail="Registration for this event is closed.")
-    draw_day = window["assigned_draw_date"]
-    eligible = bool(window["draw_eligible"])
+    if event.lucky_draw_enabled:
+        window = registration_window(event)
+        if not window["registration_open"] or not window["assigned_draw_date"]:
+            raise HTTPException(status_code=400, detail="Registration for this event is closed.")
+        draw_day = window["assigned_draw_date"]
+        eligible = bool(window["draw_eligible"])
+    else:
+        profile = event.event_profile if isinstance(event.event_profile, dict) else {}
+        modules = profile.get("modules") or {}
+        if modules.get("registration") is False or not event.is_active:
+            raise HTTPException(status_code=400, detail="Registration for this event is closed.")
+        draw_day = ist_today()
+        eligible = False
     email = body.email.strip().lower()
     phone = re.sub(r"\D", "", body.phone or "")
     if not 10 <= len(phone) <= 12:
@@ -389,7 +417,12 @@ async def verify(slug: str, pending_id: str, otp: str, db: AsyncSession) -> dict
         raise HTTPException(status_code=400, detail="Invalid or expired verification code")
     entry.email_verified = True
     entry.verified_at = datetime.utcnow()
-    entry.ticket_number = await _unique_ticket(db)
+    if event.lucky_draw_enabled:
+        entry.ticket_number = await _unique_ticket(db)
+        entry.draw_eligible = True
+    else:
+        entry.ticket_number = f"REG-{uuid.uuid4().hex[:8].upper()}"
+        entry.draw_eligible = False
     track_label = "Tech" if entry.track == "tech" else "Non-tech"
     note_lines = [
         "Lucky draw registration",
@@ -571,10 +604,27 @@ async def _event_by_slug(slug: str, db: AsyncSession, require_open: bool = False
     result = await db.execute(
         select(SiteAnnouncement).where(
             SiteAnnouncement.lucky_draw_slug == slug,
-            SiteAnnouncement.lucky_draw_enabled.is_(True),
         )
     )
     event = result.scalar_one_or_none()
+    if not event:
+        all_events = (
+            await db.execute(
+                select(SiteAnnouncement).where(
+                    SiteAnnouncement.is_active.is_(True),
+                )
+            )
+        ).scalars().all()
+        event = next(
+            (
+                row
+                for row in all_events
+                if (isinstance(row.event_profile, dict) and row.event_profile.get("slug") == slug)
+                or row.id == slug
+                or (row.lucky_draw_slug and row.lucky_draw_slug.lower() == slug.lower())
+            ),
+            None,
+        )
     if not event or (require_open and not event.is_active):
         raise HTTPException(status_code=404, detail="This event registration is not available")
     return event
@@ -608,7 +658,9 @@ def _ticket_payload(event: SiteAnnouncement, entry: EventLuckyEntry) -> dict:
     base = public_payload(event, entry.draw_date)
     return {
         **base,
+        "lucky_draw_enabled": bool(event.lucky_draw_enabled),
         "ticket_number": entry.ticket_number,
+        "registration_number": entry.ticket_number,
         "full_name": entry.full_name,
         "email": entry.email,
         "role": entry.role,
