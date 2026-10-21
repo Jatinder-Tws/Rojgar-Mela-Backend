@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Any
 
 from app.core.database import get_db
 from app.shared.models.user import User
@@ -35,6 +35,97 @@ class ResumeBuilderRequest(BaseModel):
     summary_override: Optional[str] = None
     include_projects: bool = True
     include_certifications: bool = True
+    portfolio_data: Optional[dict] = None
+
+
+class AIAssistRequest(BaseModel):
+    section: str  # summary, headline, experience, skills, projects, education, certifications, languages
+    action: Optional[str] = "generate"  # generate, enhance, shorten, ats_optimize, suggest_skills
+    current_text: Optional[str] = None
+    custom_instruction: Optional[str] = None
+    role: Optional[str] = None
+    company: Optional[str] = None
+    skills: Optional[List[str]] = None
+    context: Optional[dict] = None
+
+
+class AIAssistResponse(BaseModel):
+    section: str
+    suggested_text: Optional[str] = None
+    suggested_skills: Optional[List[str]] = None
+    structured_data: Optional[Any] = None
+    message: str = "Success"
+
+
+class PortfolioDataWrapper:
+    """Wraps either a DB Portfolio model, a dict, or merged data."""
+    def __init__(self, portfolio_obj=None, override_dict=None):
+        self._obj = portfolio_obj
+        self._dict = override_dict or {}
+
+    def _get(self, key, default=None):
+        if key in self._dict and self._dict[key] is not None:
+            return self._dict[key]
+        if self._obj is not None:
+            return getattr(self._obj, key, default)
+        return default
+
+    @property
+    def city(self): return self._get("city")
+    @property
+    def state(self): return self._get("state")
+    @property
+    def linkedin_url(self): return self._get("linkedin_url")
+    @property
+    def github_url(self): return self._get("github_url")
+    @property
+    def headline(self): return self._get("headline")
+    @property
+    def bio(self): return self._get("bio")
+    @property
+    def skills(self): return self._get("skills", [])
+    @property
+    def work_experiences(self): return self._get("work_experiences", [])
+    @property
+    def education(self): return self._get("education", [])
+    @property
+    def certifications(self): return self._get("certifications", [])
+    @property
+    def projects(self): return self._get("projects", [])
+    @property
+    def languages(self): return self._get("languages", [])
+
+
+class UserDataWrapper:
+    """Wraps user fields so user edits can also override user header."""
+    def __init__(self, user_obj=None, override_dict=None):
+        self._obj = user_obj
+        self._dict = override_dict or {}
+
+    def _get(self, key, default=""):
+        if key in self._dict and self._dict[key] is not None:
+            return self._dict[key]
+        if self._obj is not None:
+            return getattr(self._obj, key, default)
+        return default
+
+    @property
+    def first_name(self): return self._get("first_name")
+    @property
+    def last_name(self): return self._get("last_name")
+    @property
+    def email(self): return self._get("email")
+    @property
+    def phone(self): return self._get("phone")
+
+
+def _resolve_data(user: User, portfolio_from_db: Optional[Portfolio], override_data: Optional[dict]):
+    if override_data:
+        p_wrap = PortfolioDataWrapper(portfolio_from_db, override_data)
+        user_dict = override_data.get("user") or override_data
+        u_wrap = UserDataWrapper(user, user_dict)
+        return u_wrap, p_wrap
+    return user, portfolio_from_db
 
 
 class ResumeSection(BaseModel):
@@ -187,6 +278,13 @@ def _generate_html_resume(resume_text: str, polished_text: str, template: str, u
   .exp-item .desc {{ font-size:12px; color:#4b5563; margin-top:4px; }}
   ul {{ list-style:none; padding:0; }} li {{ font-size:12px; margin-bottom:3px; padding-left:12px; position:relative; }}
   li::before {{ content:'\\2022'; position:absolute; left:0; color:#2563eb; }}
+  @media print {{
+    @page {{ size:A4 portrait; margin:8mm 10mm; }}
+    html, body {{ background:#fff !important; -webkit-print-color-adjust:exact !important; print-color-adjust:exact !important; }}
+    .resume {{ max-width:100% !important; padding:0 !important; }}
+    .header {{ border-bottom:3px solid #2563eb !important; }}
+    .skill-tag {{ background:#eff6ff !important; color:#1d4ed8 !important; border:1px solid #bfdbfe !important; }}
+  }}
 </style></head><body><div class="resume">
   <div class="header">
     <h1>{name}</h1>
@@ -219,6 +317,11 @@ def _generate_html_resume(resume_text: str, polished_text: str, template: str, u
   .exp-item .desc {{ font-size:12px; color:#444; margin-top:3px; text-align:justify; }}
   ul {{ list-style:none; padding:0; }} li {{ font-size:12px; margin-bottom:3px; padding-left:14px; position:relative; }}
   li::before {{ content:'—'; position:absolute; left:0; color:#999; }}
+  @media print {{
+    @page {{ size:A4 portrait; margin:8mm 10mm; }}
+    html, body {{ background:#fff !important; -webkit-print-color-adjust:exact !important; print-color-adjust:exact !important; }}
+    .resume {{ max-width:100% !important; padding:0 !important; }}
+  }}
 </style></head><body><div class="resume">
   <div class="header">
     <h1>{name}</h1>
@@ -252,6 +355,11 @@ def _generate_html_resume(resume_text: str, polished_text: str, template: str, u
   .exp-item .meta {{ color:#888; font-size:13px; font-weight:300; }}
   .exp-item .desc {{ font-size:12px; color:#555; font-weight:300; margin-top:3px; }}
   ul {{ list-style:none; padding:0; }} li {{ font-size:12px; margin-bottom:3px; color:#555; font-weight:300; }}
+  @media print {{
+    @page {{ size:A4 portrait; margin:8mm 10mm; }}
+    html, body {{ background:#fff !important; -webkit-print-color-adjust:exact !important; print-color-adjust:exact !important; }}
+    .resume {{ max-width:100% !important; padding:0 !important; }}
+  }}
 </style></head><body><div class="resume">
   <div class="header">
     <h1>{name}</h1>
@@ -297,6 +405,13 @@ def _generate_html_resume(resume_text: str, polished_text: str, template: str, u
   .exp-item .desc {{ font-size:12px; color:#555; margin-top:3px; }}
   ul {{ list-style:none; padding:0; }} li {{ font-size:12px; margin-bottom:3px; padding-left:12px; position:relative; }}
   li::before {{ content:'▸'; position:absolute; left:0; color:#6366f1; }}
+  @media print {{
+    @page {{ size:A4 portrait; margin:0; }}
+    html, body {{ background:#fff !important; -webkit-print-color-adjust:exact !important; print-color-adjust:exact !important; }}
+    .resume {{ display:flex !important; flex-direction:row !important; min-height:100% !important; max-width:100% !important; }}
+    .sidebar {{ width:240px !important; background:#312e81 !important; color:#fff !important; -webkit-print-color-adjust:exact !important; print-color-adjust:exact !important; }}
+    .main {{ flex:1 !important; padding:25px 25px !important; }}
+  }}
 </style></head><body><div class="resume">
   <div class="sidebar">
     <h1>{name}</h1>
@@ -332,6 +447,14 @@ def _generate_html_resume(resume_text: str, polished_text: str, template: str, u
   .exp-item .desc {{ font-size:12px; color:#555; margin-top:4px; }}
   ul {{ list-style:none; padding:0; }} li {{ font-size:12px; margin-bottom:3px; padding-left:12px; position:relative; }}
   li::before {{ content:'◆'; position:absolute; left:0; color:#d4a855; font-size:8px; top:3px; }}
+  @media print {{
+    @page {{ size:A4 portrait; margin:0; }}
+    html, body {{ background:#fff !important; -webkit-print-color-adjust:exact !important; print-color-adjust:exact !important; }}
+    .resume {{ max-width:100% !important; }}
+    .header {{ background:#1a1a2e !important; color:#fff !important; -webkit-print-color-adjust:exact !important; print-color-adjust:exact !important; }}
+    .gold-bar {{ background:#d4a855 !important; -webkit-print-color-adjust:exact !important; print-color-adjust:exact !important; }}
+    .content {{ padding:20px 30px !important; }}
+  }}
 </style></head><body><div class="resume">
   <div class="header">
     <h1>{name}</h1>
@@ -414,9 +537,267 @@ def _generate_html_resume(resume_text: str, polished_text: str, template: str, u
     elif template == "executive":
         html += '</div>'  # close .content
 
-    html += '</div></body></html>'
+    html += '''
+  <script>
+    window.addEventListener('message', function(e) {
+      if (e.data === 'print_resume') {
+        window.focus();
+        window.print();
+      }
+    });
+  </script>
+</div></body></html>'''
     return html
 
+
+
+@router.post("/ai-assist", response_model=AIAssistResponse)
+async def ai_assist_section(
+    body: AIAssistRequest,
+    user: User = Depends(require_seeker),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    AI assistant to generate, improve, or suggest content for specific resume sections:
+    summary, headline, experience, skills, projects.
+    """
+    section = (body.section or "summary").lower().strip()
+    action = (body.action or "generate").lower().strip()
+
+    if not settings.GOOGLE_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="AI assistant service is currently unconfigured (missing Google Gemini API key)."
+        )
+
+    try:
+        gemini_client = google_genai.Client(api_key=settings.GOOGLE_API_KEY)
+
+        import json, re
+
+        system_instructions = {
+            "summary": (
+                "You are an executive resume writer. Craft a punchy, ATS-friendly professional summary (3-4 sentences max). "
+                "Highlight key expertise, quantifiable impact, and core strengths. "
+                "Use strong action verbs. Do not use generic buzzwords or conversational filler. "
+                "Output ONLY the summary text, no quotes, no headings."
+            ),
+            "headline": (
+                "You are a tech recruiter. Craft a sharp, punchy one-line professional headline "
+                "for a resume and LinkedIn profile (max 10-12 words). "
+                "Example: 'Senior Full-Stack Developer | React, Node.js & Cloud Architecture'. "
+                "Output ONLY the headline, no quotes or prefix."
+            ),
+            "skills": (
+                "You are an expert technical recruiter and talent scout. "
+                "The user will provide their existing skills and an edit instruction (e.g. to add or remove skills, or suggest new ones). "
+                "Apply their instructions strictly. If instructed to add or remove specific skills, do so accurately. "
+                "Return ONLY a comma-separated list of the final skills, with NO bullet points, NO numbering, and NO conversational filler."
+            ),
+            "experience": (
+                "You are an ATS resume editor. The user wants to add, edit, or remove work experience entries or improve descriptions. "
+                "You MUST output valid JSON ONLY inside a ```json ... ``` code block containing an array of objects. "
+                "Each object must have the following keys: "
+                '{"role": "Job Title", "company": "Company Name", "start_date": "YYYY-MM", "end_date": "YYYY-MM or Present", "description": "• Quantifiable achievement with metrics\\n• Core responsibility..."}. '
+                "Do NOT write any conversational explanation before or after the JSON block."
+            ),
+            "projects": (
+                "You are a technical resume coach. The user wants to add, edit, or remove project entries. "
+                "You MUST output valid JSON ONLY inside a ```json ... ``` code block containing an array of objects. "
+                "Each object must have: "
+                '{"title": "Project Title", "technologies": ["Tech1", "Tech2"], "description": "• Built feature X using Y...\\n• Delivered result Z..."}. '
+                "Do NOT write any conversational explanation before or after the JSON block."
+            ),
+            "education": (
+                "You are an academic resume coach. The user wants to add, edit, or remove education entries. "
+                "You MUST output valid JSON ONLY inside a ```json ... ``` code block containing an array of objects. "
+                "Each object must have: "
+                '{"degree": "Degree (e.g. B.Tech / MBA / B.Sc)", "field": "Field of Study", "institution": "College / University Name", "end_year": "YYYY"}. '
+                "Do NOT write any conversational explanation before or after the JSON block."
+            ),
+            "certifications": (
+                "You are a professional certification advisor. The user wants to add, edit, or remove certifications. "
+                "You MUST output valid JSON ONLY inside a ```json ... ``` code block containing an array of objects. "
+                "Each object must have: "
+                '{"name": "Certification Name", "issuer": "Issuing Authority (e.g. AWS, Google, Coursera)", "date": "YYYY"}. '
+                "Do NOT write any conversational explanation before or after the JSON block."
+            ),
+            "languages": (
+                "You are a multilingual career advisor. The user wants to add, edit, or remove languages. "
+                "You MUST output valid JSON ONLY inside a ```json ... ``` code block containing an array of objects. "
+                "Each object must have: "
+                '{"language": "Language Name", "proficiency": "Basic / Conversational / Fluent / Native"}. '
+                "Do NOT write any conversational explanation before or after the JSON block."
+            ),
+        }
+
+        system_prompt = system_instructions.get(section, system_instructions["summary"])
+
+        user_prompt_parts = [f"Target section: {section}"]
+        if body.role:
+            user_prompt_parts.append(f"Candidate Role / Job Title: {body.role}")
+        if body.company:
+            user_prompt_parts.append(f"Company: {body.company}")
+        if body.skills:
+            user_prompt_parts.append(f"Current Skills: {', '.join(body.skills)}")
+        if body.context:
+            try:
+                user_prompt_parts.append(f"Current Structured Section Data:\n{json.dumps(body.context, indent=2)}")
+            except Exception:
+                pass
+        if body.current_text:
+            user_prompt_parts.append(f"Current Section Text / Content:\n{body.current_text}")
+        if body.custom_instruction:
+            user_prompt_parts.append(
+                f"User Edit Request (Strictly follow this instruction to add, remove, or modify entries in this section):\n"
+                f"{body.custom_instruction}"
+            )
+        if action == "ats_optimize":
+            user_prompt_parts.append("Goal: Optimize strictly for ATS keywords and high recruiter readability.")
+        elif action == "shorten":
+            user_prompt_parts.append("Goal: Make it exceptionally concise and compact.")
+
+        full_prompt = f"{system_prompt}\n\n" + "\n".join(user_prompt_parts)
+
+        response = gemini_client.models.generate_content(
+            model=settings.GEMINI_CHAT_MODEL,
+            contents=[full_prompt],
+            config={"temperature": 0.2, "max_output_tokens": 2048},
+        )
+
+        generated_text = (response.text or "").strip()
+
+        suggested_skills = None
+        structured_data = None
+
+        # Check for JSON block
+        json_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', generated_text)
+        if json_match:
+            try:
+                structured_data = json.loads(json_match.group(1))
+            except Exception:
+                pass
+        elif (generated_text.startswith('[') and generated_text.endswith(']')) or (generated_text.startswith('{') and generated_text.endswith('}')):
+            try:
+                structured_data = json.loads(generated_text)
+            except Exception:
+                pass
+
+        # If wrapped in a dictionary, unwrap it to list
+        if isinstance(structured_data, dict):
+            for k in ("items", "entries", "roles", "experience", "work_experiences", "projects", "education", "certifications", "languages"):
+                if k in structured_data and isinstance(structured_data[k], list):
+                    structured_data = structured_data[k]
+                    break
+
+        # Fallback text parser if model returned bullet points instead of JSON
+        if structured_data is None and section in ("experience", "projects", "education", "certifications", "languages"):
+            lines = [l.strip() for l in generated_text.splitlines() if l.strip()]
+            if section == "experience":
+                parsed_exps = []
+                cur_exp = None
+                for line in lines:
+                    match = re.match(r'^(?:[-*•\d.]+\s*)?([^|–\-]+?)\s+(?:at|@)\s+([^|(–\-]+)(?:\s*[(|–\-]\s*(.*?)[)|–\-]?\s*)?$', line, re.IGNORECASE)
+                    if match:
+                        if cur_exp:
+                            parsed_exps.append(cur_exp)
+                        role_str = match.group(1).strip()
+                        comp_str = match.group(2).strip()
+                        date_str = match.group(3) or "2023 - Present"
+                        parts = date_str.split("-") if "-" in date_str else date_str.split("–")
+                        start_d = parts[0].strip() if len(parts) > 0 else "2023-01"
+                        end_d = parts[1].strip() if len(parts) > 1 else "Present"
+                        cur_exp = {
+                            "role": role_str,
+                            "company": comp_str,
+                            "start_date": start_d,
+                            "end_date": end_d,
+                            "description": "",
+                        }
+                    elif cur_exp:
+                        cur_exp["description"] += ("\n" if cur_exp["description"] else "") + line
+                if cur_exp:
+                    parsed_exps.append(cur_exp)
+                if parsed_exps:
+                    structured_data = parsed_exps
+
+            elif section == "projects":
+                parsed_projs = []
+                cur_proj = None
+                for line in lines:
+                    match = re.match(r'^(?:[-*•\d.]+\s*)?([^:]+?):\s*(.*)$', line)
+                    if match:
+                        if cur_proj:
+                            parsed_projs.append(cur_proj)
+                        cur_proj = {
+                            "title": match.group(1).strip(),
+                            "technologies": ["React", "Node.js"],
+                            "description": match.group(2).strip(),
+                        }
+                    elif cur_proj:
+                        cur_proj["description"] += ("\n" if cur_proj["description"] else "") + line
+                if cur_proj:
+                    parsed_projs.append(cur_proj)
+                if parsed_projs:
+                    structured_data = parsed_projs
+
+            elif section == "education":
+                parsed_edu = []
+                for line in lines:
+                    m = re.match(r'^(?:[-*•\d.]+\s*)?([^,]+?)\s+(?:in|of)\s+([^,]+?)(?:,\s*|\s+(?:from|at)\s+)([^,(]+)(?:\s*\((.*?)\))?$', line, re.IGNORECASE)
+                    if m:
+                        parsed_edu.append({
+                            "degree": m.group(1).strip(),
+                            "field": m.group(2).strip(),
+                            "institution": m.group(3).strip(),
+                            "end_year": m.group(4).strip() if m.group(4) else "2024",
+                        })
+                if parsed_edu:
+                    structured_data = parsed_edu
+
+            elif section == "certifications":
+                parsed_cert = []
+                for line in lines:
+                    m = re.match(r'^(?:[-*•\d.]+\s*)?([^–\-|(]+?)(?:\s*(?:by|from|–|-)\s*([^–\-|(]+))?(?:\s*\((.*?)\))?$', line, re.IGNORECASE)
+                    if m:
+                        parsed_cert.append({
+                            "name": m.group(1).strip(),
+                            "issuer": m.group(2).strip() if m.group(2) else "Authority",
+                            "date": m.group(3).strip() if m.group(3) else "2024",
+                        })
+                if parsed_cert:
+                    structured_data = parsed_cert
+
+            elif section == "languages":
+                parsed_lang = []
+                for line in lines:
+                    m = re.match(r'^(?:[-*•\d.]+\s*)?([A-Za-z]+)(?:\s*[(–\-:]\s*(.*?)[)]?)?$', line)
+                    if m:
+                        parsed_lang.append({
+                            "language": m.group(1).strip(),
+                            "proficiency": m.group(2).strip() if m.group(2) else "Fluent",
+                        })
+                if parsed_lang:
+                    structured_data = parsed_lang
+
+        if section == "skills":
+            raw_skills = [
+                s.strip().lstrip("•-*0123456789. ")
+                for s in generated_text.replace("\n", ",").split(",")
+                if s.strip()
+            ]
+            suggested_skills = [s for s in raw_skills if 1 < len(s) < 40][:20]
+
+        return AIAssistResponse(
+            section=section,
+            suggested_text=generated_text,
+            suggested_skills=suggested_skills,
+            structured_data=structured_data,
+            message="AI suggestion generated successfully."
+        )
+    except Exception as e:
+        logger.exception(f"[RESUME_AI_ASSIST] Error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate AI suggestion: {str(e)}")
 
 
 @router.post("/preview")
@@ -425,16 +806,19 @@ async def preview_resume(
     user: User = Depends(require_seeker),
     db: AsyncSession = Depends(get_db),
 ):
-    """Preview the resume that would be generated from portfolio data."""
-    portfolio_result = await db.execute(
-        select(Portfolio).where(Portfolio.user_id == user.id)
-    )
-    portfolio = portfolio_result.scalar_one_or_none()
-    if not portfolio:
-        raise HTTPException(status_code=404, detail="Please complete your portfolio first")
+    """Preview the resume that would be generated from portfolio data or live overrides."""
+    portfolio = None
+    if not body.portfolio_data:
+        portfolio_result = await db.execute(
+            select(Portfolio).where(Portfolio.user_id == user.id)
+        )
+        portfolio = portfolio_result.scalar_one_or_none()
+        if not portfolio:
+            raise HTTPException(status_code=404, detail="Please complete your portfolio first")
 
-    resume_text = _portfolio_to_resume_text(portfolio, user)
-    html = _generate_html_resume(resume_text, resume_text, body.template, user, portfolio)
+    eff_user, eff_portfolio = _resolve_data(user, portfolio, body.portfolio_data)
+    resume_text = _portfolio_to_resume_text(eff_portfolio, eff_user)
+    html = _generate_html_resume(resume_text, resume_text, body.template, eff_user, eff_portfolio)
     return HTMLResponse(content=html)
 
 
@@ -450,29 +834,35 @@ async def generate_resume(
         select(Portfolio).where(Portfolio.user_id == user.id)
     )
     portfolio = portfolio_result.scalar_one_or_none()
-    if not portfolio:
+    if not portfolio and not body.portfolio_data:
         raise HTTPException(status_code=404, detail="Please complete your portfolio first")
 
-    raw_text = _portfolio_to_resume_text(portfolio, user)
+    eff_user, eff_portfolio = _resolve_data(user, portfolio, body.portfolio_data)
+    raw_text = _portfolio_to_resume_text(eff_portfolio, eff_user)
     
     # ── Gemini AI resume polish (OpenAI not used) ────────────────────
-    gemini_client = google_genai.Client(api_key=settings.GOOGLE_API_KEY)
-    system_prompt = (
-        "You are a professional resume writer. Given raw resume data, produce a polished, "
-        "ATS-friendly resume in plain text format. Keep it concise, professional, and well-structured. "
-        "Use action verbs, quantify achievements where possible, and highlight key skills. "
-        "Do NOT invent information – only use what is provided."
-    )
-    combined = f"{system_prompt}\n\nPolish this resume:\n\n{raw_text}"
-    response = gemini_client.models.generate_content(
-        model=settings.GEMINI_CHAT_MODEL,
-        contents=[combined],
-        config={"temperature": 0.3, "max_output_tokens": 8192},
-    )
-    polished_text = response.text or raw_text
+    polished_text = raw_text
+    try:
+        gemini_client = google_genai.Client(api_key=settings.GOOGLE_API_KEY)
+        system_prompt = (
+            "You are a professional resume writer. Given raw resume data, produce a polished, "
+            "ATS-friendly resume in plain text format. Keep it concise, professional, and well-structured. "
+            "Use action verbs, quantify achievements where possible, and highlight key skills. "
+            "Do NOT invent information – only use what is provided."
+        )
+        combined = f"{system_prompt}\n\nPolish this resume:\n\n{raw_text}"
+        response = gemini_client.models.generate_content(
+            model=settings.GEMINI_CHAT_MODEL,
+            contents=[combined],
+            config={"temperature": 0.3, "max_output_tokens": 8192},
+        )
+        if response.text:
+            polished_text = response.text
+    except Exception as e:
+        logger.warning(f"[RESUME_BUILDER] AI polish fallback to raw: {e}")
 
     # Generate professional HTML content
-    html_content = _generate_html_resume(raw_text, polished_text, body.template, user, portfolio)
+    html_content = _generate_html_resume(raw_text, polished_text, body.template, eff_user, eff_portfolio)
 
     # Convert HTML to PDF using xhtml2pdf
     file_id = str(uuid.uuid4())
@@ -491,10 +881,10 @@ async def generate_resume(
 
     # Build parsed_json from portfolio
     parsed_json = {
-        "name": f"{user.first_name or ''} {user.last_name or ''}".strip(),
-        "email": user.email,
-        "phone": user.phone,
-        "skills": [s.get("name", s) if isinstance(s, dict) else s for s in (portfolio.skills or [])],
+        "name": f"{getattr(eff_user, 'first_name', '')} {getattr(eff_user, 'last_name', '')}".strip(),
+        "email": getattr(eff_user, "email", user.email),
+        "phone": getattr(eff_user, "phone", user.phone),
+        "skills": [s.get("name", s) if isinstance(s, dict) else s for s in (eff_portfolio.skills or [])],
         "experience": [
             {
                 "title": exp.get("role", exp.get("title", "")),
@@ -503,7 +893,7 @@ async def generate_resume(
                 "end_date": _format_date_str(exp.get("end_date")),
                 "description": exp.get("description", ""),
             }
-            for exp in (portfolio.work_experiences or []) if isinstance(exp, dict)
+            for exp in (eff_portfolio.work_experiences or []) if isinstance(exp, dict)
         ],
         "education": [
             {
@@ -512,9 +902,9 @@ async def generate_resume(
                 "field": edu.get("field", ""),
                 "graduation_date": edu.get("end_year", ""),
             }
-            for edu in (portfolio.education or []) if isinstance(edu, dict)
+            for edu in (eff_portfolio.education or []) if isinstance(edu, dict)
         ],
-        "summary": portfolio.bio or portfolio.headline or "",
+        "summary": eff_portfolio.bio or eff_portfolio.headline or "",
     }
 
     if existing:
@@ -599,16 +989,45 @@ async def download_pdf(
     with open(file_path, "wb") as f:
         pisa.CreatePDF(html, dest=f)
     
+    user_name = f"{user.first_name or ''}_{user.last_name or ''}".strip() or "seeker"
     return FileResponse(
         path=file_path,
-        filename=f"resume_{user.first_name}_{user.last_name}.pdf",
+        filename=f"resume_{user_name}.pdf",
         media_type="application/pdf"
     )
+
+
 @router.post("/download")
 async def download_resume_post(
     body: ResumeBuilderRequest,
     user: User = Depends(require_seeker),
     db: AsyncSession = Depends(get_db),
 ):
-    """Alias for download-pdf using POST to match frontend."""
-    return await download_pdf(body.template, user, db)
+    """Download the built resume matching the exact template."""
+    portfolio = None
+    if not body.portfolio_data:
+        portfolio_result = await db.execute(
+            select(Portfolio).where(Portfolio.user_id == user.id)
+        )
+        portfolio = portfolio_result.scalar_one_or_none()
+        if not portfolio:
+            raise HTTPException(status_code=404, detail="Please complete your portfolio first")
+
+    eff_user, eff_portfolio = _resolve_data(user, portfolio, body.portfolio_data)
+    resume_text = _portfolio_to_resume_text(eff_portfolio, eff_user)
+    html = _generate_html_resume(resume_text, resume_text, body.template, eff_user, eff_portfolio)
+
+    pdf_id = str(uuid.uuid4())[:8]
+    filename = f"resume_temp_{pdf_id}.pdf"
+    file_path = str(UPLOAD_DIR / filename)
+
+    from xhtml2pdf import pisa
+    with open(file_path, "wb") as f:
+        pisa.CreatePDF(html, dest=f)
+
+    user_name = f"{getattr(eff_user, 'first_name', '')}_{getattr(eff_user, 'last_name', '')}".strip() or "seeker"
+    return FileResponse(
+        path=file_path,
+        filename=f"resume_{user_name}.pdf",
+        media_type="application/pdf"
+    )

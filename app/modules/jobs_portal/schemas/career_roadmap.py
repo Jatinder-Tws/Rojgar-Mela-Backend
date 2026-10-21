@@ -112,6 +112,13 @@ class CareerRoadmapCreate(CareerRoadmapBase):
     pass
 
 
+class CareerRoadmapAIGenerateRequest(BaseModel):
+    role: str = Field(..., min_length=2, max_length=150)
+    category: Optional[str] = None
+    level: Optional[str] = "Intermediate"
+    target_level: Optional[str] = "Senior"
+
+
 class CareerRoadmapUpdate(BaseModel):
     title: Optional[str] = Field(None, min_length=1, max_length=200)
     slug: Optional[str] = Field(None, max_length=200)

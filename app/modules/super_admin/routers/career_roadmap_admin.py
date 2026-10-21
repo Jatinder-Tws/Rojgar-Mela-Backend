@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.dependencies import require_super_admin, require_super_admin_or_permission
 from app.modules.jobs_portal.schemas.career_roadmap import (
+    CareerRoadmapAIGenerateRequest,
     CareerRoadmapCreate,
     CareerRoadmapImageUploadResponse,
     CareerRoadmapListResponse,
@@ -76,6 +77,22 @@ async def create_career_roadmap(
 ):
     row = await svc.create_roadmap(db, body, admin.id)
     return svc._to_out(row)
+
+
+@router.post("/career-roadmaps/ai-generate")
+async def generate_career_roadmap_with_ai(
+    body: CareerRoadmapAIGenerateRequest,
+    _admin: User = Depends(require_super_admin_or_permission("roadmaps")),
+):
+    """Generate a complete career roadmap using AI (milestones, stages, resources, skills)."""
+    try:
+        return await svc.generate_career_roadmap_ai(
+            role=body.role,
+            category=body.category,
+            level=body.level,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to generate roadmap: {str(exc)}")
 
 
 @router.get("/career-roadmaps/{roadmap_id}", response_model=CareerRoadmapOut)

@@ -35,14 +35,29 @@ class Roadmap(Base):
     __tablename__ = "roadmaps"
 
     id = Column(UUID(as_uuid=False), primary_key=True, default=_uuid)
-    user_id = Column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=False, index=True)
+    user_id = Column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True, index=True)
     target_role = Column(String(100), nullable=False)
-    current_level = Column(String(50), nullable=False)
-    target_level = Column(String(50), nullable=False)
+    slug = Column(String(200), nullable=True, index=True)
+    category = Column(String(100), default="Technology", nullable=False)
+    current_level = Column(String(50), nullable=False, default="beginner")
+    target_level = Column(String(50), nullable=False, default="senior")
     skills_to_develop = Column(ARRAY(String), nullable=True)
     current_skills = Column(ARRAY(String), nullable=True)
     estimated_duration = Column(String(50), nullable=True)
     market_based_salary = Column(JSON, nullable=True)
+    short_description = Column(Text, nullable=True)
+    long_description = Column(Text, nullable=True)
+    industries = Column(JSON, nullable=True, default=list)
+    salary_lpa = Column(String(80), nullable=True)
+    growth_percent = Column(String(80), nullable=True)
+    openings_count = Column(String(80), nullable=True)
+    hero_image_url = Column(String(500), nullable=True)
+    is_published = Column(Boolean, default=True, nullable=False, index=True)
+    is_featured = Column(Boolean, default=False, nullable=False)
+    is_trending = Column(Boolean, default=False, nullable=False)
+    sort_order = Column(Integer, default=0, nullable=False)
+    career_insights = Column(JSON, nullable=True, default=dict)
+    faqs = Column(JSON, nullable=True, default=list)
     status = Column(String(20), default="active", nullable=False)
     
     # AI generation metadata
@@ -54,7 +69,7 @@ class Roadmap(Base):
 
     # Relationships
     user = relationship("User", back_populates="roadmaps")
-    milestones = relationship("Milestone", back_populates="roadmap", cascade="all, delete-orphan")
+    milestones = relationship("Milestone", back_populates="roadmap", cascade="all, delete-orphan", order_by="Milestone.order_num")
 
 
 
