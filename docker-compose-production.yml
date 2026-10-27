@@ -1,30 +1,18 @@
 services:
-  postgres:
-    container_name: rojgar-mela-postgres
-    image: ankane/pgvector:latest
-    restart: always
-    environment:
-      POSTGRES_USER: adminuser
-      POSTGRES_PASSWORD: jobXrojgarmela
-      POSTGRES_DB: job_db
-    ports:
-      - "5432:5432"
-    volumes:
-      - pg_data_prod:/var/lib/postgresql/data
-    healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U adminuser -d job_db" ]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
   redis:
     container_name: rojgar-mela-redis
     image: redis:7-alpine
     restart: always
+    command: redis-server --requirepass ${REDIS_PASSWORD}
     ports:
       - "6380:6379" # Exposed on different port to avoid conflicts with local dev
     volumes:
       - redis_data_prod:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a ${REDIS_PASSWORD} ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   backend:
     container_name: rojgar-mela-backend
@@ -35,20 +23,17 @@ services:
     ports:
       - "8001:8000" # Exposed on 8001 so it doesn't clash with local dev
     environment:
-      - DATABASE_URL=postgresql+asyncpg://adminuser:jobXrojgarmela@postgres:5432/job_db
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
     env_file:
       - .env
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
     volumes:
       - .:/app
       - ./uploads:/app/uploads
     # In production, we typically don't use --reload.
-    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips='*'"
+    command: sh -c "python scripts/run_migrations.py && uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips='*'"
 
   celery-worker:
     container_name: rojgar-mela-celery-worker
@@ -57,15 +42,12 @@ services:
       dockerfile: Dockerfile
     restart: always
     environment:
-      - DATABASE_URL=postgresql+asyncpg://adminuser:jobXrojgarmela@postgres:5432/job_db
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
     env_file:
       - .env
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
     volumes:
       - .:/app
       - ./uploads:/app/uploads
@@ -78,16 +60,13 @@ services:
       dockerfile: Dockerfile
     restart: always
     environment:
-      - DATABASE_URL=postgresql+asyncpg://adminuser:jobXrojgarmela@postgres:5432/job_db
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - PYTHONPATH=/app
     env_file:
       - .env
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
       celery-worker:
         condition: service_started
     volumes:
@@ -95,5 +74,4 @@ services:
     command: celery -A app.core.celery_app beat --loglevel=info
 
 volumes:
-  pg_data_prod:
   redis_data_prod:
