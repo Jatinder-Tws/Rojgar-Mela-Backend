@@ -53,20 +53,21 @@ async def list_public_announcements(
         SiteAnnouncement.show_on_website.is_(True),
     )
 
-    # Auto-hide expired
-    query = query.where(
-        or_(
-            SiteAnnouncement.expires_at.is_(None),
-            SiteAnnouncement.expires_at > now,
+    # Event start/end dates are schedule only — do not hide event pages by window.
+    # Other announcement categories still auto-hide via expires_at / start_date.
+    if category != "event":
+        query = query.where(
+            or_(
+                SiteAnnouncement.expires_at.is_(None),
+                SiteAnnouncement.expires_at > now,
+            )
         )
-    )
-    # Start date if set
-    query = query.where(
-        or_(
-            SiteAnnouncement.start_date.is_(None),
-            SiteAnnouncement.start_date <= now,
+        query = query.where(
+            or_(
+                SiteAnnouncement.start_date.is_(None),
+                SiteAnnouncement.start_date <= now,
+            )
         )
-    )
 
     if placement:
         query = query.where(

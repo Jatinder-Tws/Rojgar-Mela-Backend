@@ -14,6 +14,7 @@ from app.modules.training_portal.models.training_portal_behavior_report import T
 from app.modules.training_portal.models.training_portal_class_session import TrainingPortalClassSession
 from app.modules.training_portal.models.training_portal_course import TrainingPortalCourse
 from app.modules.training_portal.models.training_portal_enrollment import TrainingPortalEnrollment
+from app.modules.training_portal.models.training_portal_free_course import TrainingPortalFreeCourse
 from app.modules.training_portal.models.training_portal_internship import TrainingPortalInternship
 from app.modules.training_portal.models.training_portal_leave_request import TrainingPortalLeaveRequest
 from app.modules.training_portal.models.training_portal_teacher import TrainingPortalTeacher
@@ -90,9 +91,13 @@ async def build_dashboard_summary(
     )
     batches = list((await db.execute(select(TrainingPortalBatch))).scalars().all())
     teachers = list((await db.execute(select(TrainingPortalTeacher))).scalars().all())
-    courses_count = int(
+    paid_courses_count = int(
         (await db.execute(select(func.count()).select_from(TrainingPortalCourse))).scalar() or 0
     )
+    free_courses_count = int(
+        (await db.execute(select(func.count()).select_from(TrainingPortalFreeCourse))).scalar() or 0
+    )
+    courses_count = paid_courses_count + free_courses_count
     internships_count = int(
         (await db.execute(select(func.count()).select_from(TrainingPortalInternship))).scalar() or 0
     )
@@ -160,14 +165,14 @@ async def build_dashboard_summary(
         attendance_sum += int(e.attendance_percentage or 0)
         completion_sum += int(e.completion_percentage or 0)
         
-        # Keep absconded / dropped balance separate so active collection target is accurate & transparent
+        # Pending fee excludes completed / dropped / absconded — those dues stay in absconded_dues bucket
         bal = float(e.balance_due or 0)
-        if e.status in ("dropped", "absconded"):
+        if e.status in ("dropped", "absconded", "completed"):
             absconded_outstanding += bal
         else:
             outstanding += bal
 
-        if e.payment_status == "overdue":
+        if e.payment_status == "overdue" and e.status not in ("dropped", "absconded", "completed"):
             overdue_count += 1
             overdue_status += 1
         if e.payment_status in {"paid_online", "paid_offline", "free"}:
@@ -384,6 +389,8 @@ async def build_dashboard_summary(
         "total_teachers": len(teachers),
         "active_teachers": active_teachers,
         "total_courses": courses_count,
+        "paid_courses": paid_courses_count,
+        "free_courses": free_courses_count,
         "total_internships": internships_count,
         "active_batches": active_batches,
         "upcoming_batches": upcoming,

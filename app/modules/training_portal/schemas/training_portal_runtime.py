@@ -524,6 +524,8 @@ class PortalTransactionOut(BaseModel):
     batch_id: Optional[str] = None
     batch_name: Optional[str] = None
     notes: Optional[str] = None
+    created_by_id: Optional[str] = None
+    recorded_by: Optional[str] = None
     created_at: datetime
 
 
@@ -638,6 +640,8 @@ class PortalDashboardSummaryOut(BaseModel):
     total_teachers: int = 0
     active_teachers: int = 0
     total_courses: int = 0
+    paid_courses: int = 0
+    free_courses: int = 0
     total_internships: int = 0
     active_batches: int = 0
     upcoming_batches: int = 0

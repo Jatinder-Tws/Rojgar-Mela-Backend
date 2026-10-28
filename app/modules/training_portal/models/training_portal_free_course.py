@@ -21,6 +21,7 @@ class TrainingPortalFreeCourse(Base):
     created_by_id = Column(UUID(as_uuid=False), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     title = Column(String(300), nullable=False)
     description = Column(Text, nullable=True)
+    category = Column(String(100), nullable=True, index=True)
     youtube_url = Column(String(500), nullable=False)
     playlist_id = Column(String(80), nullable=True, unique=True, index=True)
     thumbnail_url = Column(String(500), nullable=True)

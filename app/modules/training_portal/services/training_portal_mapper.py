@@ -1,7 +1,7 @@
 """Mappers between SQLAlchemy models and portal API schemas."""
 
 from datetime import date, datetime
-from typing import Optional
+from typing import Iterable, List, Optional, Sequence, Union
 
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,6 +25,7 @@ from app.modules.training_portal.schemas.training_portal_runtime import (
     PortalLeaveRequestOut,
     PortalBehaviorReportOut,
 )
+from app.shared.models.user import User
 from app.modules.training_portal.services.training_portal_class_live import (
     effective_live_status,
     should_show_start_button,
@@ -242,7 +243,22 @@ def payment_order_to_out(row: TrainingPortalPaymentOrder, razorpay_key_id: str |
     )
 
 
-def transaction_to_out(row: TrainingPortalTransaction) -> PortalTransactionOut:
+def _user_display_name(user: User, fallback: str = "Staff") -> str:
+    name = f"{user.first_name or ''} {user.last_name or ''}".strip()
+    if name:
+        return name
+    email = (user.email or "").strip()
+    if email:
+        return email.split("@")[0]
+    return fallback
+
+
+def transaction_to_out(
+    row: TrainingPortalTransaction,
+    *,
+    recorded_by: Optional[str] = None,
+) -> PortalTransactionOut:
+    created_by_id = str(row.created_by_id) if row.created_by_id else None
     return PortalTransactionOut(
         id=row.id,
         transaction_id=row.transaction_id,
@@ -263,8 +279,30 @@ def transaction_to_out(row: TrainingPortalTransaction) -> PortalTransactionOut:
         batch_id=row.batch_id,
         batch_name=row.batch_name,
         notes=row.notes,
+        created_by_id=created_by_id,
+        recorded_by=recorded_by,
         created_at=row.created_at,
     )
+
+
+async def transactions_to_out(
+    db: AsyncSession,
+    rows: Union[Sequence[TrainingPortalTransaction], Iterable[TrainingPortalTransaction]],
+) -> List[PortalTransactionOut]:
+    txn_rows = list(rows)
+    creator_ids = {str(row.created_by_id) for row in txn_rows if row.created_by_id}
+    name_by_id: dict[str, str] = {}
+    if creator_ids:
+        users_result = await db.execute(select(User).where(User.id.in_(creator_ids)))
+        for user in users_result.scalars().all():
+            name_by_id[str(user.id)] = _user_display_name(user)
+    return [
+        transaction_to_out(
+            row,
+            recorded_by=name_by_id.get(str(row.created_by_id)) if row.created_by_id else None,
+        )
+        for row in txn_rows
+    ]
 
 
 def refund_request_to_out(row: TrainingPortalRefundRequest) -> PortalRefundRequestOut:

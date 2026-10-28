@@ -77,6 +77,7 @@ def _to_out(course: TrainingPortalFreeCourse, *, include_lessons: bool, include_
         id=course.id,
         title=course.title,
         description=course.description,
+        category=getattr(course, "category", None),
         youtube_url=course.youtube_url,
         playlist_id=course.playlist_id,
         thumbnail_url=course.thumbnail_url,
@@ -104,6 +105,7 @@ def _to_list_item(
         id=course.id,
         title=course.title,
         description=course.description,
+        category=getattr(course, "category", None),
         youtube_url=course.youtube_url,
         playlist_id=course.playlist_id,
         thumbnail_url=course.thumbnail_url,
@@ -607,6 +609,8 @@ async def import_free_course(
     if not source_url:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Please paste a URL.")
     custom_title = (body.title or "").strip()
+    course_category = (body.category or "").strip() or None
+    course_description = (body.description or "").strip() or None
 
     if source == "youtube":
         try:
@@ -635,7 +639,8 @@ async def import_free_course(
             id=str(uuid.uuid4()),
             created_by_id=current_user.id,
             title=(custom_title or imported.title)[:300],
-            description=imported.description or None,
+            description=course_description or imported.description or None,
+            category=course_category,
             youtube_url=source_url,
             playlist_id=imported.playlist_id,
             thumbnail_url=imported.thumbnail_url,
@@ -671,7 +676,8 @@ async def import_free_course(
             id=str(uuid.uuid4()),
             created_by_id=current_user.id,
             title=meta.title[:300],
-            description=meta.description or None,
+            description=course_description or meta.description or None,
+            category=course_category,
             youtube_url=meta.url[:500],
             playlist_id=None,
             thumbnail_url=meta.thumbnail_url,
@@ -720,7 +726,8 @@ async def import_free_course(
         id=str(uuid.uuid4()),
         created_by_id=current_user.id,
         title=(custom_title or meta.title)[:300],
-        description=meta.description or None,
+        description=course_description or meta.description or None,
+        category=course_category,
         youtube_url=meta.url[:500],
         playlist_id=None,
         thumbnail_url=meta.thumbnail_url,
@@ -774,6 +781,8 @@ async def update_free_course(
     data = body.model_dump(exclude_unset=True)
     if "title" in data and data["title"] is not None:
         data["title"] = data["title"].strip()
+    if "category" in data and data["category"] is not None:
+        data["category"] = str(data["category"]).strip() or None
     for field, value in data.items():
         setattr(course, field, value)
     course.updated_at = datetime.utcnow()

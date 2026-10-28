@@ -97,6 +97,7 @@ from app.modules.training_portal.services.training_portal_mapper import (
     payment_settings_to_out,
     payment_order_to_out,
     transaction_to_out,
+    transactions_to_out,
     refund_request_to_out,
     leave_to_out,
     behavior_report_to_out,
@@ -452,7 +453,7 @@ async def _build_invoice(
         .where(TrainingPortalTransaction.enrollment_id == enrollment.id)
         .order_by(TrainingPortalTransaction.created_at.desc())
     )
-    transaction_history = [transaction_to_out(row) for row in txn_history_result.scalars().all()]
+    transaction_history = await transactions_to_out(db, txn_history_result.scalars().all())
 
     return PortalPaymentInvoiceOut(
         invoice_number=_make_invoice_number(transaction.transaction_id),
@@ -1179,16 +1180,18 @@ async def generic_export_csv(
             query = query.where(TrainingPortalTransaction.id.in_(ids))
         res = await db.execute(query)
         txns = res.scalars().all()
-        
+        txn_outs = await transactions_to_out(db, txns)
+
         writer.writerow([
             'Transaction ID', 'Date', 'Student Name', 'Email', 'Program',
-            'Type', 'Amount', 'Payment Mode', 'Status', 'Notes'
+            'Type', 'Amount', 'Payment Mode', 'Status', 'Recorded By', 'Notes'
         ])
-        for t in txns:
+        for t in txn_outs:
             date_str = t.created_at.strftime("%Y-%m-%d %H:%M") if t.created_at else "—"
             writer.writerow([
                 t.transaction_id, date_str, t.candidate_name, t.candidate_email, t.program_title,
-                t.transaction_type, t.amount, t.payment_mode or "—", t.status, t.notes or ""
+                t.transaction_type, t.amount, t.payment_mode or "—", t.status,
+                t.recorded_by or "—", t.notes or "",
             ])
             
     elif entity == "attendance":
@@ -1612,28 +1615,60 @@ async def record_offline_payment(
     if not enrollment:
         raise HTTPException(status_code=404, detail="Enrollment not found")
 
-    discount_amt = max(0.0, float(body.discount_amount or 0.0))
+    current_balance = max(0.0, float(enrollment.balance_due or 0.0))
+    discount_amt = round(max(0.0, float(body.discount_amount or 0.0)), 2)
+    payment_amt = round(max(0.0, float(body.amount or 0.0)), 2)
+
+    # Discount and cash received are separate. Never auto-fill remaining dues as payment.
+    if discount_amt <= 0 and payment_amt <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Enter Amount Received and/or Discount. At least one must be greater than zero.",
+        )
+    if discount_amt > current_balance + 0.01:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Discount (₹{discount_amt:,.2f}) cannot exceed pending dues (₹{current_balance:,.2f}).",
+        )
+    max_payable = max(0.0, current_balance - discount_amt)
+    if payment_amt > max_payable + 0.01:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Amount Received (₹{payment_amt:,.2f}) cannot exceed payable after discount "
+                f"(₹{max_payable:,.2f})."
+            ),
+        )
+
     if discount_amt > 0:
         current_discount = float(getattr(enrollment, "discount_amount", 0.0) or 0.0)
-        enrollment.discount_amount = current_discount + discount_amt
+        enrollment.discount_amount = round(current_discount + discount_amt, 2)
 
     total_discount = float(getattr(enrollment, "discount_amount", 0.0) or 0.0)
     effective_total_fee = max(0.0, float(enrollment.total_fee or 0.0) - total_discount)
 
-    payment_amt = max(0.0, float(body.amount or 0.0))
-    if payment_amt <= 0 and (enrollment.balance_due or 0.0) > 0:
-        payment_amt = max(0.0, effective_total_fee - float(enrollment.paid_amount or 0.0))
-
     new_paid_amount = min(effective_total_fee, float(enrollment.paid_amount or 0.0) + payment_amt)
-    new_balance_due = max(0.0, effective_total_fee - new_paid_amount)
+    new_balance_due = max(0.0, round(effective_total_fee - new_paid_amount, 2))
 
-    enrollment.paid_amount = new_paid_amount
+    enrollment.paid_amount = round(new_paid_amount, 2)
     enrollment.balance_due = new_balance_due
-    enrollment.payment_status = "paid_offline" if new_balance_due <= 0.01 else "partially_paid"
-    enrollment.payment_mode = body.payment_mode
-    default_notes = f"Offline payment recorded by Admin (Discount: ₹{discount_amt:.2f})" if discount_amt > 0 else "Offline payment recorded by Admin"
+    if new_balance_due <= 0.01:
+        enrollment.payment_status = "paid_offline" if new_paid_amount > 0.01 else "free"
+    elif new_paid_amount > 0.01:
+        enrollment.payment_status = "partially_paid"
+    # else: keep existing pending/overdue when only discount reduced dues
+    if payment_amt > 0:
+        enrollment.payment_mode = body.payment_mode
+    if discount_amt > 0 and payment_amt > 0:
+        default_notes = f"Offline payment ₹{payment_amt:.2f} + discount ₹{discount_amt:.2f} by Admin"
+    elif discount_amt > 0:
+        default_notes = f"Fee concession ₹{discount_amt:.2f} applied by Admin (no cash received)"
+    else:
+        default_notes = "Offline payment recorded by Admin"
     enrollment.notes = body.notes or enrollment.notes or default_notes
-    if enrollment.status in ("pending", "payment_initiated", "token_booked"):
+    if enrollment.status in ("pending", "payment_initiated", "token_booked") and (
+        payment_amt > 0 or new_balance_due <= 0.01
+    ):
         enrollment.status = "active"
     enrollment.updated_at = datetime.utcnow()
 
@@ -1694,46 +1729,49 @@ async def record_offline_payment(
         enrollment.installments = updated_installments
 
     await _try_assign_preferred_batch(db, enrollment)
-    await _record_transaction(
-        db,
-        enrollment=enrollment,
-        transaction_type="payment",
-        amount=payment_amt,
-        payment_mode=body.payment_mode,
-        provider="offline",
-        transaction_reference=body.transaction_reference,
-        bank_name=body.bank_name,
-        notes=body.notes or default_notes,
-        created_by_id=current_user.id,
-    )
+    # Only ledger a payment row when cash was actually received (discount-only ≠ payment)
+    if payment_amt > 0:
+        await _record_transaction(
+            db,
+            enrollment=enrollment,
+            transaction_type="payment",
+            amount=payment_amt,
+            payment_mode=body.payment_mode,
+            provider="offline",
+            transaction_reference=body.transaction_reference,
+            bank_name=body.bank_name,
+            notes=body.notes or default_notes,
+            created_by_id=current_user.id,
+        )
     await db.commit()
 
-    # Dispatch formal payment receipt email with attachment to student
-    try:
-        receipt_no = f"REC-{str(enrollment.id)[:8].upper()}"
-        payment_date_str = body.date or datetime.utcnow().strftime("%Y-%m-%d")
-        base_fee, _interest_amt, _interest_pct = await _emi_interest_for_enrollment(db, enrollment)
-        import asyncio
-        asyncio.create_task(
-            send_training_enrollment_receipt_email(
-                to_email=enrollment.candidate_email,
-                first_name=(enrollment.candidate_name or "").split(" ")[0] or enrollment.candidate_name,
-                program_title=enrollment.title,
-                total_fee=float(enrollment.total_fee or 0.0),
-                discount_amount=total_discount,
-                paid_amount=float(enrollment.paid_amount or 0.0),
-                balance_due=float(enrollment.balance_due or 0.0),
-                payment_type=enrollment.payment_type or "Full Payment",
-                payment_mode=body.payment_mode,
-                receipt_number=receipt_no,
-                enrollment_date=payment_date_str,
-                batch_name=enrollment.batch_name,
-                installments=enrollment.installments,
-                base_fee=base_fee,
+    # Receipt email only when money was collected
+    if payment_amt > 0:
+        try:
+            receipt_no = f"REC-{str(enrollment.id)[:8].upper()}"
+            payment_date_str = body.date or datetime.utcnow().strftime("%Y-%m-%d")
+            base_fee, _interest_amt, _interest_pct = await _emi_interest_for_enrollment(db, enrollment)
+            import asyncio
+            asyncio.create_task(
+                send_training_enrollment_receipt_email(
+                    to_email=enrollment.candidate_email,
+                    first_name=(enrollment.candidate_name or "").split(" ")[0] or enrollment.candidate_name,
+                    program_title=enrollment.title,
+                    total_fee=float(enrollment.total_fee or 0.0),
+                    discount_amount=total_discount,
+                    paid_amount=float(enrollment.paid_amount or 0.0),
+                    balance_due=float(enrollment.balance_due or 0.0),
+                    payment_type=enrollment.payment_type or "Full Payment",
+                    payment_mode=body.payment_mode,
+                    receipt_number=receipt_no,
+                    enrollment_date=payment_date_str,
+                    batch_name=enrollment.batch_name,
+                    installments=enrollment.installments,
+                    base_fee=base_fee,
+                )
             )
-        )
-    except Exception as exc:
-        logging.getLogger(__name__).error(f"Failed to dispatch payment receipt email: {exc}")
+        except Exception as exc:
+            logging.getLogger(__name__).error(f"Failed to dispatch payment receipt email: {exc}")
 
     return enrollment_to_out(enrollment)
 
@@ -3747,7 +3785,7 @@ async def list_transactions(
     if transaction_type:
         query = query.where(TrainingPortalTransaction.transaction_type == transaction_type.strip())
     result = await db.execute(query)
-    return [transaction_to_out(row) for row in result.scalars().all()]
+    return await transactions_to_out(db, result.scalars().all())
 
 
 @router.get("/transactions/{transaction_id}/invoice", response_model=PortalPaymentInvoiceOut)

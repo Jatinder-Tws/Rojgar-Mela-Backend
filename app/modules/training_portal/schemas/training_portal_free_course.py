@@ -49,6 +49,7 @@ class FreeCourseOut(BaseModel):
     id: str
     title: str
     description: Optional[str] = None
+    category: Optional[str] = None
     youtube_url: str
     playlist_id: Optional[str] = None
     thumbnail_url: Optional[str] = None
@@ -69,6 +70,7 @@ class FreeCourseListItemOut(BaseModel):
     id: str
     title: str
     description: Optional[str] = None
+    category: Optional[str] = None
     youtube_url: str
     playlist_id: Optional[str] = None
     thumbnail_url: Optional[str] = None
@@ -136,10 +138,13 @@ class FreeCourseImportIn(BaseModel):
     url: Optional[str] = Field(None, min_length=8, max_length=700)
     youtube_url: Optional[str] = Field(None, min_length=8, max_length=500)
     title: Optional[str] = Field(None, max_length=300)
+    category: Optional[str] = Field(None, max_length=100)
+    description: Optional[str] = None
 
 
 class FreeCourseUpdateIn(BaseModel):
     title: Optional[str] = Field(None, min_length=1, max_length=300)
     description: Optional[str] = None
+    category: Optional[str] = Field(None, max_length=100)
     status: Optional[FreeCourseStatus] = None
     thumbnail_url: Optional[str] = None
