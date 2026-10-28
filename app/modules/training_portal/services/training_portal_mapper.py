@@ -238,6 +238,7 @@ def payment_order_to_out(row: TrainingPortalPaymentOrder, razorpay_key_id: str |
         provider_order_id=row.provider_order_id,
         razorpay_key_id=razorpay_key_id,
         mock_checkout=mock,
+        idempotency_key=getattr(row, "idempotency_key", None),
     )
 
 

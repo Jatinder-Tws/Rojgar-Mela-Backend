@@ -127,17 +127,22 @@ async def respond_to_coach(session_id: str, answer: str, user: User, db: AsyncSe
         raise HTTPException(status_code=500, detail=str(e))
 
 
-async def create_credit_order(package_id: str, user: User, db: AsyncSession) -> dict:
+async def create_credit_order(package_id: str, user: User, db: AsyncSession, idempotency_key: str | None = None) -> dict:
     AICoachCreditsService.verify_seeker_role(user)
-    return await AICoachCreditsService.create_purchase_order(db, user, package_id)
+    return await AICoachCreditsService.create_purchase_order(db, user, package_id, idempotency_key=idempotency_key)
 
 
 async def verify_credit_order(
-    provider_order_id: str, provider_payment_id: str, provider_signature: str, user: User, db: AsyncSession
+    provider_order_id: str,
+    provider_payment_id: str,
+    provider_signature: str,
+    user: User,
+    db: AsyncSession,
+    idempotency_key: str | None = None,
 ) -> dict:
     AICoachCreditsService.verify_seeker_role(user)
     return await AICoachCreditsService.verify_and_fulfill_order(
-        db, user, provider_order_id, provider_payment_id, provider_signature
+        db, user, provider_order_id, provider_payment_id, provider_signature, idempotency_key=idempotency_key
     )
 
 

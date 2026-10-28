@@ -4,13 +4,14 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_upload_dir
 from app.shared.services.event_object_storage import store_event_file
 from app.core.database import get_db
 from app.core.dependencies import require_super_admin_or_permission
+from app.modules.jobs_portal.models.career_enquiry import CareerEnquiry
 from app.modules.jobs_portal.models.job_fair import EventFormSubmission
 from app.modules.jobs_portal.models.site_announcement import SiteAnnouncement
 from app.modules.jobs_portal.schemas.job_fair import EventFormSubmit
@@ -147,12 +148,17 @@ async def list_admin_announcements(
     search: Optional[str] = Query(None),
     category: Optional[str] = Query(None),
     placement: Optional[str] = Query(None),
+    is_active: Optional[bool] = Query(None),
+    sort_by: Optional[str] = Query("created_at"),
+    sort_order: Optional[str] = Query("desc"),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=100),
     _admin: User = Depends(require_super_admin_or_permission("announcements")),
     db: AsyncSession = Depends(get_db),
 ):
     query = select(SiteAnnouncement)
+    if is_active is not None:
+        query = query.where(SiteAnnouncement.is_active == is_active)
     if category and category != "all":
         query = query.where(SiteAnnouncement.category == category)
     if placement and placement != "all":
@@ -174,13 +180,49 @@ async def list_admin_announcements(
             )
         )
 
-    query = query.order_by(*_order())
+    # Sort column mapping
+    sort_map = {
+        "title": SiteAnnouncement.title,
+        "event_date": SiteAnnouncement.event_date,
+        "created_at": SiteAnnouncement.created_at,
+        "sort_order": SiteAnnouncement.sort_order,
+        "is_active": SiteAnnouncement.is_active,
+    }
+    col = sort_map.get(sort_by, SiteAnnouncement.created_at)
+    if (sort_order or "desc").lower() == "asc":
+        query = query.order_by(col.asc().nulls_last())
+    else:
+        query = query.order_by(col.desc().nulls_last())
+
+    # Get total count
+    count_query = select(func.count()).select_from(query.subquery())
+    total_res = await db.execute(count_query)
+    total = total_res.scalar() or 0
+
+    # Paginate
+    query = query.offset((page - 1) * page_size).limit(page_size)
     result = await db.execute(query)
-    items = result.scalars().all()
-    start = (page - 1) * page_size
+    page_items = result.scalars().all()
+
+    # Calculate registered candidate counts per announcement
+    announcement_ids = [item.id for item in page_items]
+    if announcement_ids:
+        counts_q = (
+            select(CareerEnquiry.announcement_id, func.count(CareerEnquiry.id))
+            .where(CareerEnquiry.announcement_id.in_(announcement_ids))
+            .group_by(CareerEnquiry.announcement_id)
+        )
+        counts_res = await db.execute(counts_q)
+        counts_map = {str(row[0]): row[1] for row in counts_res.all() if row[0]}
+        for item in page_items:
+            setattr(item, "registered_count", counts_map.get(str(item.id), 0))
+    else:
+        for item in page_items:
+            setattr(item, "registered_count", 0)
+
     return SiteAnnouncementListResponse(
-        items=items[start : start + page_size],
-        total=len(items),
+        items=page_items,
+        total=total,
     )
 
 
@@ -331,7 +373,90 @@ async def get_admin_announcement(
     row = result.scalar_one_or_none()
     if not row:
         raise HTTPException(status_code=404, detail="Announcement not found")
+
+    count_res = await db.execute(
+        select(func.count(CareerEnquiry.id)).where(CareerEnquiry.announcement_id == announcement_id)
+    )
+    row.registered_count = count_res.scalar() or 0
     return row
+
+
+@admin_router.get("/{announcement_id}/candidates")
+async def get_announcement_candidates(
+    announcement_id: str,
+    search: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    _admin: User = Depends(require_super_admin_or_permission("announcements")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Retrieve all candidates registered for a particular announcement/event."""
+    announcement_res = await db.execute(select(SiteAnnouncement).where(SiteAnnouncement.id == announcement_id))
+    announcement = announcement_res.scalar_one_or_none()
+    if not announcement:
+        raise HTTPException(status_code=404, detail="Announcement not found")
+
+    query = select(CareerEnquiry).where(CareerEnquiry.announcement_id == announcement_id)
+    if search:
+        s = f"%{search.strip()}%"
+        query = query.where(
+            or_(
+                CareerEnquiry.full_name.ilike(s),
+                CareerEnquiry.email.ilike(s),
+                CareerEnquiry.phone.ilike(s),
+                CareerEnquiry.qualification.ilike(s),
+                CareerEnquiry.location.ilike(s),
+                CareerEnquiry.ticket_number.ilike(s),
+            )
+        )
+    if status and status != "all":
+        query = query.where(CareerEnquiry.status == status)
+
+    query = query.order_by(CareerEnquiry.created_at.desc())
+    result = await db.execute(query)
+    all_candidates = result.scalars().all()
+    total = len(all_candidates)
+    start = (page - 1) * page_size
+    candidates_page = all_candidates[start : start + page_size]
+
+    items = [
+        {
+            "id": c.id,
+            "full_name": c.full_name,
+            "email": c.email,
+            "phone": c.phone,
+            "qualification": c.qualification,
+            "organization": c.qualification.split("·")[-1].strip() if "·" in (c.qualification or "") else c.qualification,
+            "track": "tech" if "tech" in (c.qualification or "").lower() else "non_tech",
+            "location": c.location,
+            "ticket_number": c.ticket_number,
+            "status": c.status,
+            "photo_url": c.photo_url,
+            "visitor_query": c.visitor_query or c.message,
+            "interests": c.interests,
+            "is_event_winner": c.is_event_winner,
+            "created_at": c.created_at.isoformat() + "Z" if c.created_at else None,
+        }
+        for c in candidates_page
+    ]
+
+    return {
+        "event": {
+            "id": announcement.id,
+            "title": announcement.title,
+            "category": announcement.category,
+            "event_date": announcement.event_date.isoformat() + "Z" if announcement.event_date else None,
+            "event_location": announcement.event_location,
+            "organizer": announcement.organizer,
+            "ticketing_enabled": bool(announcement.ticketing_enabled),
+            "lucky_draw_enabled": bool(announcement.lucky_draw_enabled),
+            "is_active": announcement.is_active,
+            "image_url": announcement.image_url,
+        },
+        "total": total,
+        "items": items,
+    }
 
 
 @admin_router.patch("/{announcement_id}", response_model=SiteAnnouncementOut)
@@ -373,6 +498,22 @@ async def delete_announcement(
     row = result.scalar_one_or_none()
     if not row:
         raise HTTPException(status_code=404, detail="Announcement not found")
+
+    from app.modules.jobs_portal.models.event_lucky import EventLuckyEntry
+
+    # Preserve all candidate registrations in enquiries & lucky entries:
+    # Set announcement_id to None so candidates are NEVER cascade deleted!
+    await db.execute(
+        update(EventLuckyEntry)
+        .where(EventLuckyEntry.announcement_id == announcement_id)
+        .values(announcement_id=None)
+    )
+    await db.execute(
+        update(EventFormSubmission)
+        .where(EventFormSubmission.announcement_id == announcement_id)
+        .values(announcement_id=None)
+    )
+
     await db.delete(row)
     await db.commit()
 

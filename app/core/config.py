@@ -81,6 +81,16 @@ class Settings(BaseSettings):
     AUTO_MATCH_THRESHOLD: float = 0.70
     PROVIDER_MATCH_THRESHOLD: float = 0.75
 
+    # AI Resume Screening (provider bulk screening)
+    SCREENING_MAX_RESUMES_PER_BATCH: int = 500
+    SCREENING_MAX_CONCURRENT_BATCHES: int = 3
+    SCREENING_MAX_FILE_MB: int = 10
+    SCREENING_MONTHLY_RESUME_LIMIT: int = 2000
+    SCREENING_CHUNK_SIZE: int = 25
+    SCREENING_PARSER_VERSION: str = "rm-screening-1.0"
+    SCREENING_SCORING_VERSION: str = "1.0"
+    SCREENING_RETENTION_DAYS: int = 90
+
     # Super admin
     SUPER_ADMIN_EMAIL: str = "superadmin@rojgarmela.ai"
     SUPER_ADMIN_PASSWORD: str = "SuperAdmin@123"

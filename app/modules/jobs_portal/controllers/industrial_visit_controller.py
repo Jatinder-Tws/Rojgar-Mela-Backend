@@ -203,7 +203,10 @@ async def _align_placeholder_visit(db: AsyncSession, visit: IndustrialVisit) -> 
 async def ensure_default_visit(db: AsyncSession) -> IndustrialVisit:
     result = await db.execute(
         select(IndustrialVisit)
-        .where(IndustrialVisit.is_active.is_(True))
+        .where(
+            IndustrialVisit.is_active.is_(True),
+            IndustrialVisit.is_deleted.is_(False),
+        )
         .order_by(IndustrialVisit.created_at.asc())
         .limit(1)
     )
@@ -245,7 +248,12 @@ async def get_public_visit(slug: str, db: AsyncSession) -> IndustrialVisitPublic
         visit = await ensure_default_visit(db)
         return _visit_to_public(visit)
 
-    result = await db.execute(select(IndustrialVisit).where(IndustrialVisit.slug == key))
+    result = await db.execute(
+        select(IndustrialVisit).where(
+            IndustrialVisit.slug == key,
+            IndustrialVisit.is_deleted.is_(False),
+        )
+    )
     visit = result.scalar_one_or_none()
     if not visit or not visit.is_active:
         raise HTTPException(status_code=404, detail="This industrial visit is not available")
@@ -254,7 +262,10 @@ async def get_public_visit(slug: str, db: AsyncSession) -> IndustrialVisitPublic
 
 async def get_check_in_visit(check_in_slug: str, db: AsyncSession) -> IndustrialVisitCheckInPublicOut:
     result = await db.execute(
-        select(IndustrialVisit).where(IndustrialVisit.check_in_slug == (check_in_slug or "").strip())
+        select(IndustrialVisit).where(
+            IndustrialVisit.check_in_slug == (check_in_slug or "").strip(),
+            IndustrialVisit.is_deleted.is_(False),
+        )
     )
     visit = result.scalar_one_or_none()
     if not visit or not visit.is_active:
@@ -271,7 +282,12 @@ async def register_student(
     if key in {"", "default"}:
         visit = await ensure_default_visit(db)
     else:
-        result = await db.execute(select(IndustrialVisit).where(IndustrialVisit.slug == key))
+        result = await db.execute(
+            select(IndustrialVisit).where(
+                IndustrialVisit.slug == key,
+                IndustrialVisit.is_deleted.is_(False),
+            )
+        )
         visit = result.scalar_one_or_none()
         if not visit or not visit.is_active:
             raise HTTPException(status_code=404, detail="This industrial visit is not available")
@@ -435,9 +451,14 @@ async def admin_list_visits(
     page: int = 1,
     page_size: int = 20,
     search: Optional[str] = None,
+    sort_by: Optional[str] = None,
+    sort_order: Optional[str] = None,
+    is_active: Optional[bool] = None,
 ) -> IndustrialVisitAdminListResponse:
     await ensure_default_visit(db)
-    filters = []
+    filters = [IndustrialVisit.is_deleted.is_(False)]
+    if is_active is not None:
+        filters.append(IndustrialVisit.is_active.is_(is_active))
     if search and search.strip():
         term = f"%{search.strip()}%"
         filters.append(
@@ -455,10 +476,24 @@ async def admin_list_visits(
         query = query.where(*filters)
     total = int((await db.execute(count_query)).scalar() or 0)
     offset = (page - 1) * page_size
+
+    is_asc = (sort_order or "").lower() == "asc"
+    norm_sort = (sort_by or "visit_date").lower()
+    if norm_sort == "title":
+        order_col = IndustrialVisit.title.asc() if is_asc else IndustrialVisit.title.desc()
+    elif norm_sort == "created_at":
+        order_col = IndustrialVisit.created_at.asc() if is_asc else IndustrialVisit.created_at.desc()
+    elif norm_sort == "venue":
+        order_col = IndustrialVisit.venue.asc() if is_asc else IndustrialVisit.venue.desc()
+    elif norm_sort == "college_name":
+        order_col = IndustrialVisit.college_name.asc() if is_asc else IndustrialVisit.college_name.desc()
+    else:
+        order_col = IndustrialVisit.visit_date.asc() if is_asc else IndustrialVisit.visit_date.desc()
+
     rows = list(
         (
             await db.execute(
-                query.order_by(IndustrialVisit.visit_date.desc(), IndustrialVisit.created_at.desc())
+                query.order_by(order_col, IndustrialVisit.id.desc())
                 .offset(offset)
                 .limit(page_size)
             )
@@ -472,7 +507,12 @@ async def admin_list_visits(
 
 
 async def admin_get_visit(visit_id: str, db: AsyncSession) -> IndustrialVisitAdminOut:
-    result = await db.execute(select(IndustrialVisit).where(IndustrialVisit.id == visit_id))
+    result = await db.execute(
+        select(IndustrialVisit).where(
+            IndustrialVisit.id == visit_id,
+            IndustrialVisit.is_deleted.is_(False),
+        )
+    )
     visit = result.scalar_one_or_none()
     if not visit:
         raise HTTPException(status_code=404, detail="Industrial visit not found")
@@ -485,7 +525,7 @@ async def admin_create_visit(body: IndustrialVisitCreate, db: AsyncSession) -> I
     visit = IndustrialVisit(
         title=body.title.strip(),
         visit_date=body.visit_date,
-        venue=(body.venue or "").strip() or None,
+        venue=body.venue.strip(),
         college_name=(body.college_name or "").strip() or None,
         slug=slug,
         check_in_slug=generate_check_in_slug(),
@@ -526,11 +566,18 @@ async def admin_update_visit(
 
 
 async def admin_delete_visit(visit_id: str, db: AsyncSession) -> None:
-    result = await db.execute(select(IndustrialVisit).where(IndustrialVisit.id == visit_id))
+    result = await db.execute(
+        select(IndustrialVisit).where(
+            IndustrialVisit.id == visit_id,
+            IndustrialVisit.is_deleted.is_(False),
+        )
+    )
     visit = result.scalar_one_or_none()
     if not visit:
         raise HTTPException(status_code=404, detail="Industrial visit not found")
-    await db.delete(visit)
+    visit.is_deleted = True
+    visit.deleted_at = datetime.utcnow()
+    visit.is_active = False
     await db.commit()
 
 

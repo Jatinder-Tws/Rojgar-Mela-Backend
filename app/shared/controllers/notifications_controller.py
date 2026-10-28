@@ -50,4 +50,8 @@ async def unread_count(db: AsyncSession, current_user: User):
             Notification.is_read.is_(False)
         )
     )
-    return {"unread_count": result.scalar() or 0}
+    count = int(result.scalar() or 0)
+    return {
+        "unread_count": count,
+        "count": count,
+    }

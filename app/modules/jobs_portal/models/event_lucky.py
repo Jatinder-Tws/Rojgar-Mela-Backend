@@ -19,8 +19,8 @@ class EventLuckyEntry(Base):
     id = Column(UUID(as_uuid=False), primary_key=True, default=_uuid)
     announcement_id = Column(
         UUID(as_uuid=False),
-        ForeignKey("site_announcements.id", ondelete="CASCADE"),
-        nullable=False,
+        ForeignKey("site_announcements.id", ondelete="SET NULL"),
+        nullable=True,
         index=True,
     )
     full_name = Column(String(150), nullable=False)

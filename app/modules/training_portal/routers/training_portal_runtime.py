@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import List, Optional
 from fastapi.responses import StreamingResponse
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response, status, UploadFile, File
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response, status, UploadFile, File, Header
 from sqlalchemy import select, func, update, or_, and_, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -3972,6 +3972,7 @@ async def create_payment_order(
     body: PortalPaymentOrderCreate,
     current_user: User = Depends(require_training_portal_user),
     db: AsyncSession = Depends(get_db),
+    idempotency_key_hdr: Optional[str] = Header(None, alias="Idempotency-Key"),
 ):
     result = await db.execute(
         select(TrainingPortalEnrollment).where(TrainingPortalEnrollment.id == body.enrollment_id)
@@ -3981,6 +3982,27 @@ async def create_payment_order(
         raise HTTPException(status_code=404, detail="Enrollment not found")
     if enrollment.candidate_email != (current_user.email or ""):
         raise HTTPException(status_code=403, detail="Not your enrollment")
+
+    idempotency_key = body.idempotency_key or idempotency_key_hdr
+    if idempotency_key:
+        existing_res = await db.execute(
+            select(TrainingPortalPaymentOrder).where(
+                TrainingPortalPaymentOrder.idempotency_key == idempotency_key,
+                TrainingPortalPaymentOrder.enrollment_id == enrollment.id,
+            )
+        )
+        existing_order = existing_res.scalar_one_or_none()
+        if existing_order:
+            is_mock = (
+                existing_order.provider_order_id.startswith("order_mock_")
+                if existing_order.provider_order_id
+                else False
+            )
+            return payment_order_to_out(
+                existing_order,
+                razorpay_key_id=settings.RAZORPAY_KEY_ID if not is_mock else None,
+                mock=is_mock,
+            )
 
     if body.payment_purpose == "token":
         # Never trust the client for the real-money token amount — always charge
@@ -3995,7 +4017,12 @@ async def create_payment_order(
     rz_order = await create_razorpay_order(
         amount_paise,
         receipt=enrollment.id,
-        notes={"enrollment_id": enrollment.id, "email": enrollment.candidate_email, "purpose": body.payment_purpose},
+        notes={
+            "enrollment_id": enrollment.id,
+            "email": enrollment.candidate_email,
+            "purpose": body.payment_purpose,
+            "idempotency_key": idempotency_key or "",
+        },
     )
     is_mock = bool(rz_order.get("mock"))
 
@@ -4007,6 +4034,7 @@ async def create_payment_order(
         payment_method=body.payment_method,
         payment_purpose=body.payment_purpose,
         provider_order_id=rz_order.get("id"),
+        idempotency_key=idempotency_key,
         status="created",
     )
     db.add(order)
@@ -4025,9 +4053,13 @@ async def verify_payment(
     background_tasks: BackgroundTasks,
     current_user: User = Depends(require_training_portal_user),
     db: AsyncSession = Depends(get_db),
+    idempotency_key_hdr: Optional[str] = Header(None, alias="Idempotency-Key"),
 ):
+    # Lock the order row to prevent concurrent verification race condition
     order_result = await db.execute(
-        select(TrainingPortalPaymentOrder).where(TrainingPortalPaymentOrder.id == body.order_id)
+        select(TrainingPortalPaymentOrder)
+        .where(TrainingPortalPaymentOrder.id == body.order_id)
+        .with_for_update()
     )
     order = order_result.scalar_one_or_none()
     if not order:
@@ -4035,15 +4067,23 @@ async def verify_payment(
     if order.candidate_email != (current_user.email or ""):
         raise HTTPException(status_code=403, detail="Not your payment order")
 
-    if not verify_razorpay_signature(body.provider_order_id, body.provider_payment_id, body.provider_signature):
-        raise HTTPException(status_code=400, detail="Invalid payment signature")
-
     enrollment_result = await db.execute(
         select(TrainingPortalEnrollment).where(TrainingPortalEnrollment.id == order.enrollment_id)
     )
     enrollment = enrollment_result.scalar_one_or_none()
     if not enrollment:
         raise HTTPException(status_code=404, detail="Enrollment not found")
+
+    # Idempotency check: if order has already been verified and marked paid, return safely
+    if order.status == "paid":
+        return enrollment_to_out(enrollment)
+
+    if not verify_razorpay_signature(body.provider_order_id, body.provider_payment_id, body.provider_signature):
+        raise HTTPException(status_code=400, detail="Invalid payment signature")
+
+    idempotency_key = body.idempotency_key or idempotency_key_hdr
+    if idempotency_key and not order.idempotency_key:
+        order.idempotency_key = idempotency_key
 
     order.provider_payment_id = body.provider_payment_id
     order.provider_signature = body.provider_signature
@@ -4163,9 +4203,9 @@ async def razorpay_webhook(request: Request, db: AsyncSession = Depends(get_db))
         return {"status": "ignored"}
 
     order_result = await db.execute(
-        select(TrainingPortalPaymentOrder).where(
-            TrainingPortalPaymentOrder.provider_order_id == payment_info["provider_order_id"]
-        )
+        select(TrainingPortalPaymentOrder)
+        .where(TrainingPortalPaymentOrder.provider_order_id == payment_info["provider_order_id"])
+        .with_for_update()
     )
     order = order_result.scalar_one_or_none()
     if not order or order.status == "paid":

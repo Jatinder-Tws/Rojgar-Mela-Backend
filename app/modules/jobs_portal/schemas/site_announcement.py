@@ -33,6 +33,7 @@ class SiteAnnouncementCreate(BaseModel):
     expires_at: Optional[datetime] = None
     is_active: bool = True
     show_on_website: bool = True
+    ticketing_enabled: bool = False
     lucky_draw_enabled: bool = False
     lucky_draw_slug: Optional[str] = Field(None, max_length=80)
     lucky_draw_days: int = Field(1, ge=1, le=30)
@@ -108,6 +109,7 @@ class SiteAnnouncementUpdate(BaseModel):
     expires_at: Optional[datetime] = None
     is_active: Optional[bool] = None
     show_on_website: Optional[bool] = None
+    ticketing_enabled: Optional[bool] = None
     lucky_draw_enabled: Optional[bool] = None
     lucky_draw_slug: Optional[str] = Field(None, max_length=80)
     lucky_draw_days: Optional[int] = Field(None, ge=1, le=30)
@@ -166,9 +168,9 @@ class SiteAnnouncementOut(BaseModel):
     id: str
     title: Optional[str] = None
     text: str
-    category: str = "announcement"
-    display_placement: str = "top_banner"
-    target_pages: str = "all"
+    category: Optional[str] = "announcement"
+    display_placement: Optional[str] = "top_banner"
+    target_pages: Optional[str] = "all"
     image_url: Optional[str] = None
     link_url: Optional[str] = None
     link_text: Optional[str] = None
@@ -178,22 +180,55 @@ class SiteAnnouncementOut(BaseModel):
     home_layout: Optional[str] = None
     badge_label: Optional[str] = None
     tagline: Optional[str] = None
-    show_content_on_image: bool = True
+    show_content_on_image: Optional[bool] = True
     gallery_images: Optional[List[str]] = None
     qr_code_url: Optional[str] = None
-    modal_delay_seconds: int = 5
+    modal_delay_seconds: Optional[int] = 5
     start_date: Optional[datetime] = None
     expires_at: Optional[datetime] = None
-    is_active: bool
-    show_on_website: bool = True
-    lucky_draw_enabled: bool = False
+    is_active: bool = True
+    show_on_website: Optional[bool] = True
+    ticketing_enabled: Optional[bool] = False
+    lucky_draw_enabled: Optional[bool] = False
     lucky_draw_slug: Optional[str] = None
-    lucky_draw_days: int = 1
-    lucky_draw_reveal_time: str = "18:00"
-    sort_order: int
+    lucky_draw_days: Optional[int] = 1
+    lucky_draw_reveal_time: Optional[str] = "18:00"
+    sort_order: Optional[int] = 0
     event_profile: Optional[dict] = None
+    registered_count: Optional[int] = 0
     created_at: datetime
     updated_at: datetime
+
+    @field_validator(
+        "category",
+        "display_placement",
+        "target_pages",
+        "show_content_on_image",
+        "modal_delay_seconds",
+        "show_on_website",
+        "lucky_draw_enabled",
+        "lucky_draw_days",
+        "lucky_draw_reveal_time",
+        "sort_order",
+        mode="before",
+    )
+    @classmethod
+    def fallback_none(cls, v, info):
+        if v is not None:
+            return v
+        defaults = {
+            "category": "announcement",
+            "display_placement": "top_banner",
+            "target_pages": "all",
+            "show_content_on_image": True,
+            "modal_delay_seconds": 5,
+            "show_on_website": True,
+            "lucky_draw_enabled": False,
+            "lucky_draw_days": 1,
+            "lucky_draw_reveal_time": "18:00",
+            "sort_order": 0,
+        }
+        return defaults.get(info.field_name)
 
     @field_serializer("created_at", "updated_at", "event_date", "start_date", "expires_at")
     def serialize_datetimes(self, value: Optional[datetime]) -> Optional[str]:
@@ -207,9 +242,9 @@ class SiteAnnouncementPublicOut(BaseModel):
     id: str
     title: Optional[str] = None
     text: str
-    category: str = "announcement"
-    display_placement: str = "top_banner"
-    target_pages: str = "all"
+    category: Optional[str] = "announcement"
+    display_placement: Optional[str] = "top_banner"
+    target_pages: Optional[str] = "all"
     image_url: Optional[str] = None
     link_url: Optional[str] = None
     link_text: Optional[str] = None
@@ -219,17 +254,45 @@ class SiteAnnouncementPublicOut(BaseModel):
     home_layout: Optional[str] = None
     badge_label: Optional[str] = None
     tagline: Optional[str] = None
-    show_content_on_image: bool = True
+    show_content_on_image: Optional[bool] = True
     gallery_images: Optional[List[str]] = None
     qr_code_url: Optional[str] = None
-    modal_delay_seconds: int = 5
+    modal_delay_seconds: Optional[int] = 5
     expires_at: Optional[datetime] = None
-    lucky_draw_enabled: bool = False
+    ticketing_enabled: Optional[bool] = False
+    lucky_draw_enabled: Optional[bool] = False
     lucky_draw_slug: Optional[str] = None
-    lucky_draw_days: int = 1
-    lucky_draw_reveal_time: str = "18:00"
+    lucky_draw_days: Optional[int] = 1
+    lucky_draw_reveal_time: Optional[str] = "18:00"
     start_date: Optional[datetime] = None
     event_profile: Optional[dict] = None
+
+    @field_validator(
+        "category",
+        "display_placement",
+        "target_pages",
+        "show_content_on_image",
+        "modal_delay_seconds",
+        "lucky_draw_enabled",
+        "lucky_draw_days",
+        "lucky_draw_reveal_time",
+        mode="before",
+    )
+    @classmethod
+    def fallback_none_public(cls, v, info):
+        if v is not None:
+            return v
+        defaults = {
+            "category": "announcement",
+            "display_placement": "top_banner",
+            "target_pages": "all",
+            "show_content_on_image": True,
+            "modal_delay_seconds": 5,
+            "lucky_draw_enabled": False,
+            "lucky_draw_days": 1,
+            "lucky_draw_reveal_time": "18:00",
+        }
+        return defaults.get(info.field_name)
 
     @field_serializer("event_date", "expires_at", "start_date")
     def serialize_datetimes(self, value: Optional[datetime]) -> Optional[str]:

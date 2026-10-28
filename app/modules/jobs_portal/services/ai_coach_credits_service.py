@@ -92,7 +92,9 @@ class AICoachCreditsService:
         return True, round(account.balance, 2)
 
     @classmethod
-    async def create_purchase_order(cls, db: AsyncSession, user: User, package_id: str) -> Dict[str, Any]:
+    async def create_purchase_order(
+        cls, db: AsyncSession, user: User, package_id: str, idempotency_key: Optional[str] = None
+    ) -> Dict[str, Any]:
         cls.verify_seeker_role(user)
         
         if package_id not in CREDIT_PACKAGES:
@@ -100,12 +102,41 @@ class AICoachCreditsService:
             
         pkg = CREDIT_PACKAGES[package_id]
         amount_paise = int(pkg["amount_rupees"] * 100)
+
+        # Idempotency check: if an order with this idempotency key already exists for the user
+        if idempotency_key:
+            stmt = select(CreditPurchaseOrder).where(
+                CreditPurchaseOrder.idempotency_key == idempotency_key,
+                CreditPurchaseOrder.user_id == user.id,
+            )
+            res = await db.execute(stmt)
+            existing_order = res.scalar_one_or_none()
+            if existing_order:
+                is_mock = (
+                    existing_order.provider_order_id.startswith("order_mock_")
+                    if existing_order.provider_order_id
+                    else True
+                )
+                return {
+                    "order_id": existing_order.id,
+                    "provider_order_id": existing_order.provider_order_id,
+                    "amount_rupees": existing_order.amount_rupees,
+                    "credits": existing_order.credits,
+                    "package_name": CREDIT_PACKAGES.get(existing_order.package_id, {}).get("name", existing_order.package_id),
+                    "razorpay_key_id": settings.RAZORPAY_KEY_ID if not is_mock else "rzp_test_mock",
+                    "is_mock": is_mock,
+                    "status": existing_order.status,
+                }
         
         # Call Razorpay helper
         rz_order = await create_razorpay_order(
             amount_paise=amount_paise,
             receipt=f"ai_coach_{user.id[:8]}",
-            notes={"package_id": package_id, "user_id": str(user.id)}
+            notes={
+                "package_id": package_id,
+                "user_id": str(user.id),
+                "idempotency_key": idempotency_key or "",
+            }
         )
         
         order = CreditPurchaseOrder(
@@ -114,6 +145,7 @@ class AICoachCreditsService:
             credits=pkg["credits"],
             amount_rupees=pkg["amount_rupees"],
             provider_order_id=rz_order["id"],
+            idempotency_key=idempotency_key,
             status="pending"
         )
         db.add(order)
@@ -128,7 +160,8 @@ class AICoachCreditsService:
             "credits": pkg["credits"],
             "package_name": pkg["name"],
             "razorpay_key_id": settings.RAZORPAY_KEY_ID if not is_mock else "rzp_test_mock",
-            "is_mock": is_mock
+            "is_mock": is_mock,
+            "status": "pending",
         }
 
     @classmethod
@@ -138,13 +171,19 @@ class AICoachCreditsService:
         user: User,
         provider_order_id: str,
         provider_payment_id: str,
-        provider_signature: str
+        provider_signature: str,
+        idempotency_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         cls.verify_seeker_role(user)
         
-        stmt = select(CreditPurchaseOrder).where(
-            CreditPurchaseOrder.provider_order_id == provider_order_id,
-            CreditPurchaseOrder.user_id == user.id
+        # Row-level lock to prevent concurrent verification race condition
+        stmt = (
+            select(CreditPurchaseOrder)
+            .where(
+                CreditPurchaseOrder.provider_order_id == provider_order_id,
+                CreditPurchaseOrder.user_id == user.id,
+            )
+            .with_for_update()
         )
         res = await db.execute(stmt)
         order = res.scalar_one_or_none()
@@ -154,7 +193,11 @@ class AICoachCreditsService:
             
         if order.status == "paid":
             account = await cls.get_or_create_account(db, user)
-            return {"status": "already_fulfilled", "new_balance": account.balance}
+            return {
+                "status": "already_fulfilled",
+                "credits_added": order.credits,
+                "new_balance": account.balance,
+            }
 
         # Signature check
         is_valid = verify_razorpay_signature(provider_order_id, provider_payment_id, provider_signature)
@@ -165,20 +208,31 @@ class AICoachCreditsService:
 
         order.status = "paid"
         order.provider_payment_id = provider_payment_id
-        
-        # Credit user's account
-        account = await cls.get_or_create_account(db, user)
-        account.balance += order.credits
-        account.total_earned += order.credits
-        
-        txn = CreditTransaction(
-            user_id=user.id,
-            amount=order.credits,
-            transaction_type="purchase",
-            description=f"Purchased {order.credits} Credits ({order.package_id})",
-            reference_id=order.id
+        if idempotency_key and not order.idempotency_key:
+            order.idempotency_key = idempotency_key
+
+        # Guard against duplicate credit transaction
+        existing_txn_stmt = select(CreditTransaction).where(
+            CreditTransaction.reference_id == str(order.id),
+            CreditTransaction.transaction_type == "purchase"
         )
-        db.add(txn)
+        existing_txn = (await db.execute(existing_txn_stmt)).scalar_one_or_none()
+        
+        account = await cls.get_or_create_account(db, user)
+        if not existing_txn:
+            # Credit user's account
+            account.balance += order.credits
+            account.total_earned += order.credits
+            
+            txn = CreditTransaction(
+                user_id=user.id,
+                amount=order.credits,
+                transaction_type="purchase",
+                description=f"Purchased {order.credits} Credits ({order.package_id})",
+                reference_id=str(order.id)
+            )
+            db.add(txn)
+            
         await db.commit()
         await db.refresh(account)
         

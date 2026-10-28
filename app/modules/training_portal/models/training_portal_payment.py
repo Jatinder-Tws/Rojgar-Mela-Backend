@@ -39,6 +39,7 @@ class TrainingPortalPaymentOrder(Base):
     provider_order_id = Column(String(100), nullable=True, index=True)
     provider_payment_id = Column(String(100), nullable=True, index=True)
     provider_signature = Column(String(300), nullable=True)
+    idempotency_key = Column(String(100), unique=True, nullable=True, index=True)
     status = Column(String(30), nullable=False, default="created", index=True)
     webhook_payload = Column(JSON, nullable=True)
     paid_at = Column(DateTime, nullable=True)

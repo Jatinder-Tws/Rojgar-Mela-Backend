@@ -121,9 +121,17 @@ class IndustrialVisitCheckIn(BaseModel):
 class IndustrialVisitCreate(BaseModel):
     title: str = Field(..., min_length=2, max_length=200)
     visit_date: datetime
-    venue: Optional[str] = Field(None, max_length=300)
+    venue: str = Field(..., min_length=2, max_length=300)
     college_name: Optional[str] = Field(None, max_length=200)
     is_active: bool = True
+
+    @field_validator("title", "venue")
+    @classmethod
+    def strip_and_validate_required(cls, value: str) -> str:
+        cleaned = (value or "").strip()
+        if len(cleaned) < 2:
+            raise ValueError("This field is required and must be at least 2 characters")
+        return cleaned
 
 
 class IndustrialVisitUpdate(BaseModel):

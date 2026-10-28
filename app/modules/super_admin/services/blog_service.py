@@ -41,6 +41,20 @@ async def ensure_unique_slug(db: AsyncSession, base_slug: str, exclude_id: Optio
         counter += 1
 
 
+def resolve_publish_status(
+    status: Optional[str],
+    author_avatar: Optional[str],
+    cover_image: Optional[str],
+) -> str:
+    """A post may only be 'published' when it has both an author avatar and a cover
+    image. Otherwise it is forced back to 'draft' so it drops out of public view."""
+    resolved = status or "published"
+    has_required_media = bool((author_avatar or "").strip()) and bool((cover_image or "").strip())
+    if resolved == "published" and not has_required_media:
+        return "draft"
+    return resolved
+
+
 SORTABLE_COLUMNS = {
     "title": BlogPost.title,
     "category": BlogPost.category,
@@ -129,6 +143,8 @@ async def create_blog_post(db: AsyncSession, data: BlogPostCreate, created_by_id
     if not published_date_str:
         published_date_str = datetime.utcnow().strftime("%B %d, %Y")
 
+    resolved_status = resolve_publish_status(data.status, data.author_avatar, data.cover_image)
+
     post = BlogPost(
         id=str(uuid.uuid4()),
         slug=unique_slug,
@@ -144,7 +160,7 @@ async def create_blog_post(db: AsyncSession, data: BlogPostCreate, created_by_id
         cover_image=data.cover_image,
         read_time=data.read_time or "6 min read",
         published_date=published_date_str,
-        status=data.status or "published",
+        status=resolved_status,
         is_featured=data.is_featured or False,
         content_markdown=data.content_markdown,
         sections=[s if isinstance(s, dict) else s.dict() for s in (data.sections or [])],
@@ -180,6 +196,11 @@ async def update_blog_post(db: AsyncSession, blog_id: str, data: BlogPostUpdate)
         update_dict["faqs"] = [
             f if isinstance(f, dict) else f.dict() for f in update_dict["faqs"]
         ]
+
+    final_author_avatar = update_dict.get("author_avatar", post.author_avatar)
+    final_cover_image = update_dict.get("cover_image", post.cover_image)
+    final_status = update_dict.get("status", post.status)
+    update_dict["status"] = resolve_publish_status(final_status, final_author_avatar, final_cover_image)
 
     for key, value in update_dict.items():
         setattr(post, key, value)

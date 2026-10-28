@@ -210,8 +210,9 @@ async def list_seekers(
     page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
     search: Optional[str] = None, industry: Optional[str] = Query(None),
     status: Optional[str] = Query(None), job_fair_id: Optional[str] = Query(None),
+    sort_by: Optional[str] = Query(None), sort_dir: Optional[str] = Query(None),
 ):
-    return await ctrl_list_seekers(db, page, page_size, search, industry, status, job_fair_id)
+    return await ctrl_list_seekers(db, page, page_size, search, industry, status, job_fair_id, sort_by, sort_dir)
 
 
 @router.get("/seekers/industries", response_model=List[str])
@@ -269,8 +270,9 @@ async def list_providers(
     admin: User = Depends(require_super_admin_or_permission("job_providers")), db: AsyncSession = Depends(get_db),
     page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
     search: Optional[str] = None, status: Optional[str] = Query(None),
+    sort_by: Optional[str] = Query(None), sort_dir: Optional[str] = Query(None),
 ):
-    return await ctrl_list_providers(db, page, page_size, search, status)
+    return await ctrl_list_providers(db, page, page_size, search, status, sort_by, sort_dir)
 
 
 @router.post("/providers", response_model=AdminUserOut, status_code=201)

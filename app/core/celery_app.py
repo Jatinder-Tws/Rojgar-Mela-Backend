@@ -45,6 +45,9 @@ celery_app.conf.update(
         "send_supervisor_welcome_email_task": {"queue": "emails"},
         "dead_letter_queue_task": {"queue": "dead_letter"},
         "send_notification_email_task": {"queue": "emails"},
+        "send_interview_scheduled_email_task": {"queue": "emails"},
+        "send_job_match_email_task": {"queue": "emails"},
+        "send_candidate_match_email_task": {"queue": "emails"},
         "send_calendar_invite_email_task": {"queue": "emails"},
         "broadcast_bulk_email_task": {"queue": "broadcast"},
         "process_bulk_candidate_import_task": {"queue": "ai_and_heavy"},
@@ -52,6 +55,9 @@ celery_app.conf.update(
         "invalidate_seeker_matches_task": {"queue": "ai_and_heavy"},
         "run_external_matching_for_job": {"queue": "ai_and_heavy"},
         "improve_resume_task": {"queue": "ai_and_heavy"},
+        "process_screening_batch_task": {"queue": "ai_and_heavy"},
+        "generate_screening_report_task": {"queue": "ai_and_heavy"},
+        "purge_expired_screening_batches_task": {"queue": "default"},
         "process_training_class_lifecycles": {"queue": "default"},
         "process_expired_token_bookings": {"queue": "default"},
         "sync_scholarships_task": {"queue": "default"},
@@ -67,6 +73,11 @@ celery_app.conf.update(
         "process-expired-token-bookings": {
             "task": "process_expired_token_bookings",
             "schedule": crontab(hour=1, minute=0),
+            "options": {"queue": "default"},
+        },
+        "purge-expired-screening-batches-daily": {
+            "task": "purge_expired_screening_batches_task",
+            "schedule": crontab(hour=3, minute=15),
             "options": {"queue": "default"},
         },
         "sync-scholarships-every-5-hours": {

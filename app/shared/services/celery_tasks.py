@@ -148,6 +148,171 @@ def send_notification_email_task(email: str, title: str, message: str, first_nam
 
 
 @celery_app.task(
+    name="send_interview_scheduled_email_task",
+    autoretry_for=(Exception,),
+    retry_kwargs={"max_retries": 3, "countdown": 5},
+    retry_backoff=True,
+)
+def send_interview_scheduled_email_task(
+    to_email: str,
+    seeker_name: str,
+    job_title: str,
+    company_name: str,
+    scheduled_at: str,
+    interview_type: str = "video",
+    meeting_link: str | None = None,
+    location: str | None = None,
+    agenda: str | None = None,
+    scheduled_period: str | None = None,
+    interviewer_name: str | None = None,
+):
+    """Task for sending interview scheduled email to job seeker."""
+    async def _send():
+        from app.shared.services.email_service import send_interview_scheduled_email
+        await send_interview_scheduled_email(
+            to_email=to_email,
+            seeker_name=seeker_name,
+            job_title=job_title,
+            company_name=company_name,
+            scheduled_at=scheduled_at,
+            interview_type=interview_type,
+            meeting_link=meeting_link,
+            location=location,
+            agenda=agenda,
+            scheduled_period=scheduled_period,
+            interviewer_name=interviewer_name,
+        )
+
+    logger.info(f"[Task: send_interview_scheduled_email_task] Enqueued interview email for {to_email}")
+    run_async(_send())
+
+
+@celery_app.task(
+    name="send_job_match_email_task",
+    autoretry_for=(Exception,),
+    retry_kwargs={"max_retries": 3, "countdown": 5},
+    retry_backoff=True,
+)
+def send_job_match_email_task(
+    to_email: str,
+    seeker_name: str,
+    job_title: str,
+    company_name: str,
+    match_score: float,
+    job_id: str,
+    experience_required: str | None = None,
+    salary_range: str | None = None,
+    location: str | None = None,
+    fit_reason: str | None = None,
+):
+    """Task for sending job match email to job seeker."""
+    async def _send():
+        from app.shared.services.email_service import send_job_match_email
+        await send_job_match_email(
+            to_email=to_email,
+            seeker_name=seeker_name,
+            job_title=job_title,
+            company_name=company_name,
+            match_score=match_score,
+            job_id=job_id,
+            experience_required=experience_required,
+            salary_range=salary_range,
+            location=location,
+            fit_reason=fit_reason,
+        )
+
+    logger.info(f"[Task: send_job_match_email_task] Enqueued job match email for {to_email}")
+    run_async(_send())
+
+
+@celery_app.task(
+    name="send_candidate_match_email_task",
+    autoretry_for=(Exception,),
+    retry_kwargs={"max_retries": 3, "countdown": 5},
+    retry_backoff=True,
+)
+def send_candidate_match_email_task(
+    to_email: str,
+    provider_name: str,
+    candidate_name: str,
+    job_title: str,
+    match_score: float,
+    job_id: str,
+    candidate_location: str | None = None,
+    candidate_skills: str | None = None,
+    fit_reason: str | None = None,
+):
+    """Task for sending candidate match email to recruiter/provider."""
+    async def _send():
+        from app.shared.services.email_service import send_candidate_match_email
+        await send_candidate_match_email(
+            to_email=to_email,
+            provider_name=provider_name,
+            candidate_name=candidate_name,
+            job_title=job_title,
+            match_score=match_score,
+            job_id=job_id,
+            candidate_location=candidate_location,
+            candidate_skills=candidate_skills,
+            fit_reason=fit_reason,
+        )
+
+    logger.info(f"[Task: send_candidate_match_email_task] Enqueued candidate match email for {to_email}")
+    run_async(_send())
+
+
+def queue_interview_scheduled_email(**kwargs):
+    to_email = kwargs.get("to_email")
+    if not to_email:
+        return
+    try:
+        send_interview_scheduled_email_task.delay(**kwargs)
+    except Exception as exc:
+        logger.warning(f"Failed to queue interview email via celery to {to_email}: {exc}")
+        import asyncio
+        from app.shared.services.email_service import send_interview_scheduled_email
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(send_interview_scheduled_email(**kwargs))
+        except RuntimeError:
+            pass
+
+
+def queue_job_match_email(**kwargs):
+    to_email = kwargs.get("to_email")
+    if not to_email:
+        return
+    try:
+        send_job_match_email_task.delay(**kwargs)
+    except Exception as exc:
+        logger.warning(f"Failed to queue job match email via celery to {to_email}: {exc}")
+        import asyncio
+        from app.shared.services.email_service import send_job_match_email
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(send_job_match_email(**kwargs))
+        except RuntimeError:
+            pass
+
+
+def queue_candidate_match_email(**kwargs):
+    to_email = kwargs.get("to_email")
+    if not to_email:
+        return
+    try:
+        send_candidate_match_email_task.delay(**kwargs)
+    except Exception as exc:
+        logger.warning(f"Failed to queue candidate match email via celery to {to_email}: {exc}")
+        import asyncio
+        from app.shared.services.email_service import send_candidate_match_email
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(send_candidate_match_email(**kwargs))
+        except RuntimeError:
+            pass
+
+
+@celery_app.task(
     name="send_calendar_invite_email_task",
     autoretry_for=(Exception,),
     retry_kwargs={"max_retries": 3, "countdown": 5},
@@ -337,6 +502,43 @@ def invalidate_seeker_matches_task(seeker_id: str):
     run_async(_run())
 
 
+@celery_app.task(
+    name="process_screening_batch_task",
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_kwargs={"max_retries": 2, "countdown": 30},
+    retry_backoff=True,
+    soft_time_limit=3600,
+    time_limit=3900,
+)
+def process_screening_batch_task(self, batch_id: str):
+    """Process an AI resume screening batch (parse once, match all JDs)."""
+    async def _run():
+        from app.modules.jobs_portal.services.screening_pipeline import process_batch
+        return await process_batch(batch_id)
+
+    logger.info(f"[Task: process_screening_batch_task] Processing screening batch {batch_id}")
+    return run_async(_run())
+
+
+@celery_app.task(
+    name="generate_screening_report_task",
+    autoretry_for=(Exception,),
+    retry_kwargs={"max_retries": 2, "countdown": 15},
+    retry_backoff=True,
+    soft_time_limit=600,
+    time_limit=660,
+)
+def generate_screening_report_task(report_id: str):
+    """Generate CSV/XLSX/PDF screening report asynchronously."""
+    async def _run():
+        from app.modules.jobs_portal.services.screening_report_service import generate_report
+        return await generate_report(report_id)
+
+    logger.info(f"[Task: generate_screening_report_task] Generating report {report_id}")
+    return run_async(_run())
+
+
 # ── DEFAULT QUEUE TASKS ────────────────────────────────────────────────────────
 
 @celery_app.task(name="process_training_class_lifecycles")
@@ -376,6 +578,33 @@ def process_expired_token_bookings():
                 logger.error(f"Error in process_expired_token_bookings task: {e}", exc_info=True)
 
     run_async(_run())
+
+
+@celery_app.task(name="purge_expired_screening_batches_task")
+def purge_expired_screening_batches_task():
+    """Daily hard-delete of provider AI screening batches past SCREENING_RETENTION_DAYS."""
+    async def _run():
+        async with AsyncSessionLocal() as db:
+            try:
+                from app.modules.jobs_portal.services.screening_service import (
+                    purge_expired_screening_batches,
+                )
+                res = await purge_expired_screening_batches(db)
+                logger.info(
+                    "[Task: purge_expired_screening_batches_task] Sweep result: %s",
+                    res,
+                )
+                return res
+            except Exception as e:
+                await db.rollback()
+                logger.error(
+                    "Error in purge_expired_screening_batches_task: %s",
+                    e,
+                    exc_info=True,
+                )
+                return {"ok": False, "error": str(e)}
+
+    return run_async(_run())
 
 
 @celery_app.task(name="sync_scholarships_task")

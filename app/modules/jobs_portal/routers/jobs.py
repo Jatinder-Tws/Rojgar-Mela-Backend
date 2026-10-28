@@ -47,11 +47,13 @@ async def list_jobs(
     job_type: Optional[str] = Query(None),
     salary_range: Optional[str] = Query(None),
     industry: Optional[str] = Query(None),
+    sort_by: Optional[str] = Query(None),
+    sort_order: Optional[str] = Query(None),
     user: User = Depends(require_verified),
     db: AsyncSession = Depends(get_db)
 ):
     return await ctrl_list_jobs(
-        user, db, page, page_size, search, job_type, salary_range, industry
+        user, db, page, page_size, search, job_type, salary_range, industry, sort_by, sort_order
     )
 
 

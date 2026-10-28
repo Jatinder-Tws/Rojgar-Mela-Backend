@@ -173,6 +173,42 @@ def _seeker_industry_clause(industry: Optional[str]):
     return or_(*clauses) if clauses else None
 
 
+_USER_FULL_NAME_EXPR = func.concat(func.coalesce(User.first_name, ""), " ", func.coalesce(User.last_name, ""))
+
+
+def _sort_desc(sort_dir: Optional[str]) -> bool:
+    return (sort_dir or "desc").strip().lower() != "asc"
+
+
+def _ordered(column, sort_dir: Optional[str]):
+    clause = column.desc() if _sort_desc(sort_dir) else column.asc()
+    return clause.nulls_last()
+
+
+def _seeker_sort_column(sort_by: Optional[str]):
+    key = (sort_by or "created_at").strip().lower()
+    columns = {
+        "candidate": _USER_FULL_NAME_EXPR,
+        "contact": User.phone,
+        "role": User.job_role,
+        "email": User.email,
+        "created_at": User.created_at,
+    }
+    return columns.get(key, User.created_at)
+
+
+def _provider_sort_column(sort_by: Optional[str]):
+    key = (sort_by or "created_at").strip().lower()
+    columns = {
+        "candidate": _USER_FULL_NAME_EXPR,
+        "contact": User.phone,
+        "role": User.company_name,
+        "email": User.email,
+        "created_at": User.created_at,
+    }
+    return columns.get(key, User.created_at)
+
+
 def _build_user_search_filter(search: str, include_company: bool = False):
     term = f"%{search.strip()}%"
     full_name_expr = func.concat(func.coalesce(User.first_name, ""), " ", func.coalesce(User.last_name, ""))
@@ -727,7 +763,8 @@ def get_import_job_status(job_id: str) -> ImportJobStatus:
 
 async def list_seekers(
     db: AsyncSession, page: int, page_size: int, search: Optional[str],
-    industry: Optional[str], status: Optional[str] = None, job_fair_id: Optional[str] = None
+    industry: Optional[str], status: Optional[str] = None, job_fair_id: Optional[str] = None,
+    sort_by: Optional[str] = None, sort_dir: Optional[str] = None,
 ) -> AdminUserListResponse:
     from app.modules.jobs_portal.models.job_fair import JobFairSeeker
     seeker_filters = [User.role == UserRole.seeker, User.is_super_admin.is_(False)]
@@ -757,7 +794,7 @@ async def list_seekers(
 
     total = await db.scalar(count_q)
     result = await db.execute(
-        select_q.order_by(User.created_at.desc(), User.id.desc())
+        select_q.order_by(_ordered(_seeker_sort_column(sort_by), sort_dir), User.id.desc())
         .offset((page - 1) * page_size).limit(page_size)
     )
     rows = result.all()
@@ -809,12 +846,16 @@ async def create_seeker(body: AdminSeekerCreate, db: AsyncSession) -> AdminUserO
     phone = _normalize_phone(body.phone)
     if len(phone) != 10:
         raise HTTPException(status_code=400, detail="Phone must be 10 digits")
+    if not body.industry or not body.industry.strip():
+        raise HTTPException(status_code=400, detail="Industry Type is required")
+    if not body.job_role or not body.job_role.strip():
+        raise HTTPException(status_code=400, detail="Job Role is required")
     await _check_duplicate(db, body.email, phone)
     pwd = body.password or _temp_password()
     user = User(
         first_name=body.first_name.strip(), last_name=body.last_name.strip(), email=body.email, phone=phone,
         hashed_password=hash_password(pwd), role=UserRole.seeker, is_verified=True, onboarding_complete=True,
-        industry=body.industry, job_role=body.job_role, job_type=JobType(body.job_type) if body.job_type else None,
+        industry=body.industry.strip(), job_role=body.job_role.strip(), job_type=JobType(body.job_type) if body.job_type else None,
         salary_range=body.salary_range, experience=body.experience, is_assessment_done=True,
     )
     db.add(user)
@@ -990,7 +1031,7 @@ async def update_seeker(user_id: str, body: AdminSeekerUpdate, db: AsyncSession)
     for field in ("industry", "job_role", "salary_range", "experience"):
         val = getattr(body, field, None)
         if val is not None:
-            setattr(user, field, val)
+            setattr(user, field, val.strip() if isinstance(val, str) else val)
     await db.commit()
     await db.refresh(user)
     return _user_to_admin_out(user, "seeker")
@@ -1018,7 +1059,8 @@ async def bulk_import_seekers(content: bytes, filename: str) -> BulkImportJobSta
 
 
 async def list_providers(
-    db: AsyncSession, page: int, page_size: int, search: Optional[str], status: Optional[str] = None
+    db: AsyncSession, page: int, page_size: int, search: Optional[str], status: Optional[str] = None,
+    sort_by: Optional[str] = None, sort_dir: Optional[str] = None,
 ) -> AdminUserListResponse:
     provider_filters = [User.role == UserRole.provider, User.is_super_admin.is_(False)]
     if search:
@@ -1036,7 +1078,8 @@ async def list_providers(
 
     total = await db.scalar(select(func.count(User.id)).where(*provider_filters))
     result = await db.execute(
-        select(User).where(*provider_filters).order_by(User.created_at.desc(), User.id.desc())
+        select(User).where(*provider_filters)
+        .order_by(_ordered(_provider_sort_column(sort_by), sort_dir), User.id.desc())
         .offset((page - 1) * page_size).limit(page_size)
     )
     users = result.scalars().all()

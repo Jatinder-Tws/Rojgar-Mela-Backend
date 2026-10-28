@@ -52,6 +52,7 @@ class CreditPurchaseOrder(Base):
     
     provider_order_id = Column(String(100), nullable=True, index=True)  # Razorpay order_id
     provider_payment_id = Column(String(100), nullable=True)
+    idempotency_key = Column(String(100), unique=True, nullable=True, index=True)
     status = Column(String(20), default="pending", nullable=False)  # pending, paid, failed
     
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

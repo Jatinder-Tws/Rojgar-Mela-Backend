@@ -911,3 +911,223 @@ async def send_industrial_visit_certificate_email(
 
     await _deliver_message(msg, to_email, raise_on_error=True)
 
+
+async def _render_template_with_fallback(
+    template_filename: str,
+    slug: str,
+    context: dict[str, Any],
+    default_subject: str,
+) -> tuple[Optional[str], Optional[str]]:
+    """
+    Renders an email template by checking:
+    1. Database `email_templates` table for an active template matching `slug`.
+    2. Filesystem template in `app/shared/templates/` as fallback.
+    3. If neither is found, returns (None, None) so the caller can skip sending.
+    """
+    # 1. Try DB template first
+    try:
+        from app.core.database import AsyncSessionLocal
+        from app.modules.super_admin.models.email_template import EmailTemplate
+        from sqlalchemy import select
+        from jinja2 import Template as JinjaTemplate
+
+        slug_candidates = [
+            slug,
+            slug.replace("-", "_"),
+            template_filename,
+            template_filename.replace(".html", ""),
+        ]
+        async with AsyncSessionLocal() as session:
+            stmt = select(EmailTemplate).where(
+                EmailTemplate.slug.in_(slug_candidates),
+                EmailTemplate.is_active.is_(True),
+            )
+            result = await session.execute(stmt)
+            db_tmpl = result.scalars().first()
+            if db_tmpl and db_tmpl.html_body:
+                subject = (
+                    JinjaTemplate(db_tmpl.subject).render(**context)
+                    if db_tmpl.subject
+                    else default_subject
+                )
+                html = JinjaTemplate(db_tmpl.html_body).render(**context)
+                return subject, html
+    except Exception as db_err:
+        print(f"[EMAIL TEMPLATE] DB lookup skipped or failed for '{slug}': {db_err}")
+
+    # 2. Fallback to Filesystem template
+    try:
+        file_path = _templates_dir / template_filename
+        if file_path.is_file():
+            tmpl = _env.get_template(template_filename)
+            html = tmpl.render(**context)
+            return default_subject, html
+    except Exception as fs_err:
+        print(f"[EMAIL TEMPLATE] Filesystem template load error for '{template_filename}': {fs_err}")
+
+    # 3. No template found in DB or filesystem
+    print(f"[EMAIL TEMPLATE SKIP] No template found in DB (slug={slug}) or filesystem ({template_filename}).")
+    return None, None
+
+
+async def send_interview_scheduled_email(
+    to_email: str,
+    seeker_name: str,
+    job_title: str,
+    company_name: str,
+    scheduled_at: Any,
+    interview_type: str = "video",
+    meeting_link: Optional[str] = None,
+    location: Optional[str] = None,
+    agenda: Optional[str] = None,
+    scheduled_period: Optional[str] = None,
+    interviewer_name: Optional[str] = None,
+) -> None:
+    """Send interview schedule confirmation email to the job seeker."""
+    try:
+        # Format scheduled_at
+        if isinstance(scheduled_at, str):
+            try:
+                dt = datetime.fromisoformat(scheduled_at.replace("Z", "+00:00"))
+            except Exception:
+                dt = datetime.now(timezone.utc)
+        elif isinstance(scheduled_at, datetime):
+            dt = scheduled_at
+        else:
+            dt = datetime.now(timezone.utc)
+
+        ist_dt = _to_ist(dt)
+        date_part = f"{ist_dt.strftime('%A')}, {_ordinal_day(ist_dt.day)} {ist_dt.strftime('%B')}, {ist_dt.year}"
+        hour = ist_dt.hour % 12 or 12
+        minute = ist_dt.minute
+        am_pm = scheduled_period or ("AM" if ist_dt.hour < 12 else "PM")
+        time_part = f"{hour}:{minute:02d} {am_pm} IST"
+        scheduled_at_display = f"{date_part} at {time_part}"
+
+        interview_type_display = (
+            "Online Video Call (Google Meet)" if str(interview_type).lower() == "video" else "In-Person Walk-In"
+        )
+
+        ctx = {
+            "seeker_name": seeker_name or "there",
+            "job_title": job_title,
+            "company_name": company_name or "Employer",
+            "scheduled_at_display": scheduled_at_display,
+            "interview_type_display": interview_type_display,
+            "meeting_link": meeting_link,
+            "location": location,
+            "agenda": agenda,
+            "interviewer_name": interviewer_name,
+            "dashboard_url": f"{settings.FRONTEND_URL.rstrip('/')}/interviews",
+            "year": datetime.utcnow().year,
+            **_support_context(),
+        }
+
+        default_subject = f"Interview Scheduled: {job_title} at {company_name or 'Employer'}"
+        subject, html = await _render_template_with_fallback(
+            template_filename="interview_scheduled_email.html",
+            slug="interview-scheduled",
+            context=ctx,
+            default_subject=default_subject,
+        )
+
+        if not html:
+            print(f"[EMAIL SKIP] No template found for interview-scheduled. Skipping sending to {to_email}.")
+            return
+
+        await _send_branded_email(to_email, subject, html)
+    except Exception as exc:
+        print(f"[EMAIL ERROR] Failed to send interview scheduled email to {to_email}: {exc}")
+
+
+async def send_job_match_email(
+    to_email: str,
+    seeker_name: str,
+    job_title: str,
+    company_name: str,
+    match_score: float,
+    job_id: str,
+    experience_required: Optional[str] = None,
+    salary_range: Optional[str] = None,
+    location: Optional[str] = None,
+    fit_reason: Optional[str] = None,
+) -> None:
+    """Send notification email to job seeker when AI finds a high-scoring matching job."""
+    try:
+        score_display = int(round(match_score))
+        ctx = {
+            "seeker_name": seeker_name or "there",
+            "job_title": job_title,
+            "company_name": company_name or "Hiring Company",
+            "match_score": score_display,
+            "experience_required": experience_required,
+            "salary_range": salary_range,
+            "location": location,
+            "fit_reason": fit_reason,
+            "job_url": f"{settings.FRONTEND_URL.rstrip('/')}/jobs/{job_id}",
+            "year": datetime.utcnow().year,
+            **_support_context(),
+        }
+
+        default_subject = f"🎯 AI Job Match: {job_title} at {company_name or 'Hiring Company'} ({score_display}% Match)"
+        subject, html = await _render_template_with_fallback(
+            template_filename="job_match_email.html",
+            slug="job-match",
+            context=ctx,
+            default_subject=default_subject,
+        )
+
+        if not html:
+            print(f"[EMAIL SKIP] No template found for job-match. Skipping sending to {to_email}.")
+            return
+
+        await _send_branded_email(to_email, subject, html)
+    except Exception as exc:
+        print(f"[EMAIL ERROR] Failed to send job match email to {to_email}: {exc}")
+
+
+async def send_candidate_match_email(
+    to_email: str,
+    provider_name: str,
+    candidate_name: str,
+    job_title: str,
+    match_score: float,
+    job_id: str,
+    candidate_location: Optional[str] = None,
+    candidate_skills: Optional[str] = None,
+    fit_reason: Optional[str] = None,
+) -> None:
+    """Send notification email to recruiter/provider when AI finds a top matching candidate."""
+    try:
+        score_display = int(round(match_score))
+        ctx = {
+            "provider_name": provider_name or "there",
+            "candidate_name": candidate_name or "A candidate",
+            "job_title": job_title,
+            "match_score": score_display,
+            "candidate_location": candidate_location,
+            "candidate_skills": candidate_skills,
+            "fit_reason": fit_reason,
+            "candidates_url": f"{settings.FRONTEND_URL.rstrip('/')}/provider/jobs/{job_id}/applicants",
+            "year": datetime.utcnow().year,
+            **_support_context(),
+        }
+
+        default_subject = f"🌟 Top Candidate Matched: {candidate_name} for '{job_title}' ({score_display}% Match)"
+        subject, html = await _render_template_with_fallback(
+            template_filename="candidate_match_email.html",
+            slug="candidate-match",
+            context=ctx,
+            default_subject=default_subject,
+        )
+
+        if not html:
+            print(f"[EMAIL SKIP] No template found for candidate-match. Skipping sending to {to_email}.")
+            return
+
+        await _send_branded_email(to_email, subject, html)
+    except Exception as exc:
+        print(f"[EMAIL ERROR] Failed to send candidate match email to {to_email}: {exc}")
+
+
+

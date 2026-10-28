@@ -53,6 +53,8 @@ class IndustrialVisit(Base):
     slug = Column(String(120), unique=True, nullable=False, index=True)
     check_in_slug = Column(String(80), unique=True, nullable=False, index=True)
     is_active = Column(Boolean, default=True, nullable=False, index=True)
+    is_deleted = Column(Boolean, default=False, nullable=False, index=True)
+    deleted_at = Column(DateTime, nullable=True)
     certificates_sent_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)

@@ -65,19 +65,21 @@ async def apply_to_job(
             select(Match.id).where(and_(Match.seeker_id == user.id, Match.job_id == body.job_id))
         )
         match_id = match_result.scalar()
+        applicant_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or (user.email or "A candidate")
+        notif_msg = f"{applicant_name} has applied to your '{job.title}' posting."
         await create_notification(
             db=db,
             user_id=provider.id,
             type=NotificationType.application,
             title="New Application",
-            message=f"{user.first_name} {user.last_name} has applied to your '{job.title}' posting.",
+            message=notif_msg,
             related_job_id=body.job_id,
             related_user_id=match_id if match_id else user.id,
         )
         _queue_notification_email(
             provider,
             "New Application",
-            f"{user.first_name} {user.last_name} has applied to your '{job.title}' posting.",
+            notif_msg,
         )
 
     await log_audit_event(

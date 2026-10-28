@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 
 class SuperAdminLoginRequest(BaseModel):
@@ -38,11 +38,25 @@ class AdminUserBase(BaseModel):
 
 
 class AdminSeekerCreate(AdminUserBase):
-    industry: Optional[str] = None
-    job_role: Optional[str] = None
+    industry: str = Field(..., min_length=1, max_length=100)
+    job_role: str = Field(..., min_length=1, max_length=100)
     job_type: Optional[str] = None
     salary_range: Optional[str] = None
     experience: Optional[str] = None
+
+    @field_validator("industry")
+    @classmethod
+    def validate_industry(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("Industry Type is required")
+        return v.strip()
+
+    @field_validator("job_role")
+    @classmethod
+    def validate_job_role(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("Job Role is required")
+        return v.strip()
 
 
 class AdminSeekerUpdate(BaseModel):
@@ -58,6 +72,13 @@ class AdminSeekerUpdate(BaseModel):
     experience: Optional[str] = None
     is_verified: Optional[bool] = None
     onboarding_complete: Optional[bool] = None
+
+    @field_validator("industry", "job_role")
+    @classmethod
+    def validate_optional_text_not_blank(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not v.strip():
+            raise ValueError("Field cannot be empty")
+        return v.strip() if v else None
 
 
 class AdminProviderCreate(AdminUserBase):

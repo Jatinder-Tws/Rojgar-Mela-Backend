@@ -72,10 +72,21 @@ async def list_visits(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     search: Optional[str] = None,
+    sort_by: Optional[str] = None,
+    sort_order: Optional[str] = None,
+    is_active: Optional[bool] = None,
     _admin: User = Depends(require_super_admin_or_permission("industrial_visits")),
     db: AsyncSession = Depends(get_db),
 ):
-    return await ctrl.admin_list_visits(db, page=page, page_size=page_size, search=search)
+    return await ctrl.admin_list_visits(
+        db,
+        page=page,
+        page_size=page_size,
+        search=search,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        is_active=is_active,
+    )
 
 
 @admin_router.post("", response_model=IndustrialVisitAdminOut, status_code=201)

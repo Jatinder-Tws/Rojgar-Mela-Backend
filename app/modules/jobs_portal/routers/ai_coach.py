@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, Body
+from fastapi import APIRouter, Depends, Body, Header
+from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -31,10 +32,11 @@ async def get_credit_balance(
 @router.post("/credits/order")
 async def create_credit_order(
     package_id: str = Body(..., embed=True),
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
     user: User = Depends(require_seeker),
     db: AsyncSession = Depends(get_db),
 ):
-    return await ctrl_create_credit_order(package_id, user, db)
+    return await ctrl_create_credit_order(package_id, user, db, idempotency_key=idempotency_key)
 
 
 @router.post("/credits/verify")
@@ -42,11 +44,17 @@ async def verify_credit_order(
     provider_order_id: str = Body(...),
     provider_payment_id: str = Body(...),
     provider_signature: str = Body(...),
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
     user: User = Depends(require_seeker),
     db: AsyncSession = Depends(get_db),
 ):
     return await ctrl_verify_credit_order(
-        provider_order_id, provider_payment_id, provider_signature, user, db
+        provider_order_id,
+        provider_payment_id,
+        provider_signature,
+        user,
+        db,
+        idempotency_key=idempotency_key,
     )
 
 

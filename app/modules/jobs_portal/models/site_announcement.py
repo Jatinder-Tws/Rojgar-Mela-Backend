@@ -37,6 +37,7 @@ class SiteAnnouncement(Base):
     expires_at = Column(DateTime, nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
     show_on_website = Column(Boolean, nullable=False, default=True)
+    ticketing_enabled = Column(Boolean, nullable=False, default=False)
     lucky_draw_enabled = Column(Boolean, nullable=False, default=False)
     lucky_draw_slug = Column(String(80), nullable=True, unique=True)
     lucky_draw_days = Column(Integer, nullable=False, default=1)

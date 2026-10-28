@@ -82,7 +82,7 @@ def _kpi_labels(period_start: datetime, period_end: datetime) -> dict[str, str]:
         "interviews": _period_label("Interviews"),
         "new_matches": _period_label("New Matches"),
         "selections": _period_label("Selections"),
-        "companies_active": "Companies Active",
+        "companies_active": "Companies with Jobs",
     }
 
 

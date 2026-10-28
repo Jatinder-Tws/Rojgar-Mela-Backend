@@ -272,15 +272,17 @@ async def create_career_enquiry(body: CareerEnquiryCreate, db: AsyncSession) -> 
     await db.refresh(enquiry)
 
     try:
+        contact_str = f" ({enquiry.email}, {enquiry.phone})" if enquiry.phone else f" ({enquiry.email})"
         await notify_super_admins(
             db=db,
             title="New Career Program Enquiry",
             message=(
-                f"New enquiry from {enquiry.full_name} ({enquiry.email}) "
-                f"for {enquiry.domain}"
+                f"New enquiry from {enquiry.full_name}{contact_str} "
+                f"for {enquiry.domain} (Qualification: {enquiry.qualification})"
             ),
             type=NotificationType.general,
             related_user_id=str(enquiry.id),
+            auto_commit=True,
         )
     except Exception as exc:
         logger.warning("Career enquiry admin notify failed (non-fatal): %s", exc)

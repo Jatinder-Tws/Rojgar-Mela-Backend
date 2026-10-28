@@ -410,29 +410,41 @@ async def register(slug: str, body, db: AsyncSession) -> dict:
 async def verify(slug: str, pending_id: str, otp: str, db: AsyncSession) -> dict:
     event = await _event_by_slug(slug, db)
     entry = await _pending(event.id, pending_id, db)
-    if entry.email_verified and entry.ticket_number:
+    if entry.email_verified and (entry.ticket_number or not bool(getattr(event, "ticketing_enabled", False))):
         return _ticket_payload(event, entry)
     ok = await verify_and_consume_otp(_otp_key(entry.id), otp.strip(), purpose=OTP_PURPOSE)
     if not ok:
         raise HTTPException(status_code=400, detail="Invalid or expired verification code")
     entry.email_verified = True
     entry.verified_at = datetime.utcnow()
-    if event.lucky_draw_enabled:
-        entry.ticket_number = await _unique_ticket(db)
-        entry.draw_eligible = True
+    has_tickets = bool(
+        getattr(event, "ticketing_enabled", False)
+        or event.lucky_draw_enabled
+        or (isinstance(event.event_profile, dict) and event.event_profile.get("modules", {}).get("ticketing"))
+    )
+    if has_tickets:
+        if event.lucky_draw_enabled:
+            entry.ticket_number = await _unique_ticket(db)
+            entry.draw_eligible = True
+        else:
+            entry.ticket_number = f"TKT-{uuid.uuid4().hex[:8].upper()}"
+            entry.draw_eligible = False
     else:
-        entry.ticket_number = f"REG-{uuid.uuid4().hex[:8].upper()}"
+        entry.ticket_number = None
         entry.draw_eligible = False
     track_label = "Tech" if entry.track == "tech" else "Non-tech"
     note_lines = [
-        "Lucky draw registration",
+        "Event registration",
         f"Event: {event.title}",
-        f"Ticket: {entry.ticket_number}",
+    ]
+    if entry.ticket_number:
+        note_lines.append(f"Ticket: {entry.ticket_number}")
+    note_lines.extend([
         f"Day: {entry.draw_date}",
         f"Location: {entry.location or '-'}",
         f"Organisation: {entry.organization}",
         f"Track: {track_label}",
-    ]
+    ])
     if entry.interests:
         note_lines.append(f"Interest: {entry.interests}")
     if entry.visitor_query:
@@ -656,11 +668,20 @@ async def _unique_ticket(db: AsyncSession) -> str:
 
 def _ticket_payload(event: SiteAnnouncement, entry: EventLuckyEntry) -> dict:
     base = public_payload(event, entry.draw_date)
+    has_tickets = bool(
+        getattr(event, "ticketing_enabled", False)
+        or event.lucky_draw_enabled
+        or (isinstance(event.event_profile, dict) and event.event_profile.get("modules", {}).get("ticketing"))
+    )
+    sec_hash = None
+    if entry.ticket_number:
+        sec_hash = hashlib.sha256(f"{entry.ticket_number}:{entry.email}".encode()).hexdigest()[:10].upper()
     return {
         **base,
+        "ticketing_enabled": has_tickets,
         "lucky_draw_enabled": bool(event.lucky_draw_enabled),
         "ticket_number": entry.ticket_number,
-        "registration_number": entry.ticket_number,
+        "registration_number": entry.ticket_number or f"REG-{str(entry.id)[:8].upper()}",
         "full_name": entry.full_name,
         "email": entry.email,
         "role": entry.role,
@@ -671,7 +692,7 @@ def _ticket_payload(event: SiteAnnouncement, entry: EventLuckyEntry) -> dict:
         "draw_eligible": bool(entry.draw_eligible),
         "phone": entry.phone,
         "issued_at": ((entry.verified_at or datetime.utcnow()).isoformat() + "Z"),
-        "security_hash": hashlib.sha256(f"{entry.ticket_number}:{entry.email}".encode()).hexdigest()[:10].upper(),
+        "security_hash": sec_hash,
     }
 
 

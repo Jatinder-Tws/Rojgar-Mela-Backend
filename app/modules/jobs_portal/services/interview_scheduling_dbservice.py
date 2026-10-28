@@ -199,10 +199,30 @@ async def create_interview(
     await db.refresh(interview)
     
     # Enrichment for response
-    seeker_result = await db.execute(select(User.first_name, User.last_name).where(User.id == body.seeker_id))
+    seeker_result = await db.execute(select(User.first_name, User.last_name, User.email).where(User.id == body.seeker_id))
     seeker_data = seeker_result.first()
-    s_fn, s_ln = (seeker_data.first_name, seeker_data.last_name) if seeker_data else ("Unknown", "User")
+    s_fn, s_ln, s_email = (seeker_data.first_name, seeker_data.last_name, seeker_data.email) if seeker_data else ("Unknown", "User", None)
     
+    # Send email notification to seeker
+    if s_email:
+        try:
+            from app.shared.services.celery_tasks import queue_interview_scheduled_email
+            queue_interview_scheduled_email(
+                to_email=s_email,
+                seeker_name=s_fn or "there",
+                job_title=job.title,
+                company_name=provider.company_name or f"{provider.first_name or ''} {provider.last_name or ''}".strip(),
+                scheduled_at=scheduled_at.isoformat() if hasattr(scheduled_at, "isoformat") else str(scheduled_at),
+                interview_type=body.interview_type,
+                meeting_link=body.meeting_link,
+                location=body.location,
+                agenda=body.agenda,
+                scheduled_period=body.scheduled_period,
+                interviewer_name=body.interviewer_name,
+            )
+        except Exception as exc:
+            logger.warning(f"Failed to queue interview email: {exc}")
+
     res = InterviewOut.model_validate(interview)
     res.job_title = job.title
     res.seeker_name = f"{s_fn} {s_ln}"

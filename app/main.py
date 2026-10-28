@@ -59,7 +59,7 @@ from app.shared.routers import (
     auth, master_data, notifications, users
 )
 from app.modules.jobs_portal.routers import (
-    ai_coach, ai_coach_live_ws, ai_interview, analytics, applications, assessment, blog_public, career_enquiry,
+    ai_coach, ai_coach_live_ws, ai_interview, ai_screening, ai_screening_ws, analytics, applications, assessment, blog_public, career_enquiry,
     career_roadmap, company_internships, company_profile, dashboard, event_lucky, external_candidate, industrial_visit, interviews, interview_scheduling,
     jobs, job_fair, landing_chat, master, matches, onboarding, portfolio, resumes, resume_builder,
     roadmap, saved_jobs, scholarships, site_announcement, college_public
@@ -84,6 +84,8 @@ routers = [
     resumes.router,
     attendance.router,
     matches.router,
+    ai_screening.router,
+    ai_screening_ws.router,
     applications.router,
     saved_jobs.router,
     notifications.router,

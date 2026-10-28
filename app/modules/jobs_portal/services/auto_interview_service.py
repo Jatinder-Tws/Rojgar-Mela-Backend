@@ -145,4 +145,26 @@ async def auto_schedule_for_application(
         related_user_id=str(provider.id),
     )
 
+    # Send email notification to seeker
+    try:
+        seeker_row = await db.execute(select(User).where(User.id == application.seeker_id))
+        seeker = seeker_row.scalar_one_or_none()
+        if seeker and seeker.email:
+            from app.shared.services.celery_tasks import queue_interview_scheduled_email
+            queue_interview_scheduled_email(
+                to_email=seeker.email,
+                seeker_name=seeker.first_name or "there",
+                job_title=job.title,
+                company_name=provider.company_name or f"{provider.first_name or ''} {provider.last_name or ''}".strip(),
+                scheduled_at=interview.scheduled_at.isoformat() if hasattr(interview.scheduled_at, "isoformat") else str(interview.scheduled_at),
+                interview_type=interview.interview_type or "video",
+                meeting_link=interview.meeting_link,
+                location=interview.location,
+                agenda=interview.agenda,
+                scheduled_period=interview.scheduled_period,
+                interviewer_name=interview.interviewer_name,
+            )
+    except Exception as exc:
+        logger.warning(f"Failed to queue auto-interview email: {exc}")
+
     return interview

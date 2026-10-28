@@ -426,6 +426,7 @@ class PortalPaymentOrderCreate(BaseModel):
     payment_method: Literal["upi", "card", "emi"] = "upi"
     amount: Optional[float] = None
     payment_purpose: Literal["token", "balance", "full"] = "full"
+    idempotency_key: Optional[str] = None
 
 
 class PortalPaymentOrderOut(BaseModel):
@@ -439,6 +440,7 @@ class PortalPaymentOrderOut(BaseModel):
     provider_order_id: Optional[str] = None
     razorpay_key_id: Optional[str] = None
     mock_checkout: bool = False
+    idempotency_key: Optional[str] = None
 
 
 class PortalPaymentVerify(BaseModel):
@@ -446,6 +448,7 @@ class PortalPaymentVerify(BaseModel):
     provider_order_id: str
     provider_payment_id: str
     provider_signature: str
+    idempotency_key: Optional[str] = None
 
 
 class PortalOfflinePaymentRecord(BaseModel):

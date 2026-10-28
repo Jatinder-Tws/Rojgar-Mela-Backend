@@ -135,6 +135,15 @@ async def create_job(
     return JobOut.model_validate(job)
 
 
+JOB_SORTABLE_COLUMNS = {
+    "title": JobPosting.title,
+    "posted_by_name": JobPosting.posted_by_name,
+    "location": JobPosting.location,
+    "job_type": JobPosting.job_type,
+    "created_at": JobPosting.created_at,
+}
+
+
 async def list_jobs(
     user: User,
     db: AsyncSession,
@@ -144,22 +153,27 @@ async def list_jobs(
     job_type: Optional[str] = None,
     salary_range: Optional[str] = None,
     industry: Optional[str] = None,
+    sort_by: Optional[str] = None,
+    sort_order: Optional[str] = None,
 ):
     from app.shared.models.user import UserRole
     from app.modules.jobs_portal.models.job import JobType as ModelJobType
     from sqlalchemy import func, and_, or_
 
+    sort_column = JOB_SORTABLE_COLUMNS.get(sort_by or "created_at", JobPosting.created_at)
+    order_fn = sort_column.asc() if sort_order == "asc" else sort_column.desc()
+
     if user.role == UserRole.provider:
         base_query = (
             select(JobPosting)
             .where(JobPosting.provider_id == user.id)
-            .order_by(JobPosting.created_at.desc())
+            .order_by(order_fn)
         )
     else:
         base_query = (
             select(JobPosting)
             .where(JobPosting.is_active == True)  # noqa
-            .order_by(JobPosting.created_at.desc())
+            .order_by(order_fn)
         )
 
     # Apply search and filters
