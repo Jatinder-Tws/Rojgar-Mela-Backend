@@ -578,6 +578,175 @@ def _extract_rankings(raw: str) -> list | None:
     return None
 
 
+def _rank_highlights_as_skills(rank: dict) -> str | None:
+    highlights = rank.get("highlights", [])
+    if isinstance(highlights, list) and highlights:
+        return ", ".join(str(h) for h in highlights)
+    return None
+
+
+def _queue_job_match_email_safe(**kwargs) -> None:
+    to_email = kwargs.get("to_email")
+    if not to_email:
+        return
+    try:
+        from app.shared.services.celery_tasks import queue_job_match_email
+        queue_job_match_email(**kwargs)
+    except Exception as exc:
+        logger.warning("Failed to queue job match email to %s: %s", to_email, exc)
+
+
+def _queue_candidate_match_email_safe(**kwargs) -> None:
+    to_email = kwargs.get("to_email")
+    if not to_email:
+        return
+    try:
+        from app.shared.services.celery_tasks import queue_candidate_match_email
+        queue_candidate_match_email(**kwargs)
+    except Exception as exc:
+        logger.warning("Failed to queue candidate match email to %s: %s", to_email, exc)
+
+
+async def _after_new_seeker_job_match(
+    db: AsyncSession,
+    *,
+    seeker: User,
+    job_row,
+    rank: dict,
+    score: float,
+) -> None:
+    """Top-score in-app alerts plus match emails for every stored match."""
+    from app.shared.services.notification_service import create_notification
+    from app.shared.models.notification import NotificationType
+
+    if score >= 85:
+        await create_notification(
+            db=db,
+            user_id=seeker.id,
+            type=NotificationType.match,
+            title="Perfect match found",
+            message=(
+                f"We found a job that perfectly matches your profile: {job_row.title} "
+                f"with a {score}% match score."
+            ),
+            related_job_id=str(job_row.id),
+        )
+        await create_notification(
+            db=db,
+            user_id=str(job_row.provider_id),
+            type=NotificationType.match,
+            title="Top Candidate",
+            message=(
+                f"A new candidate {seeker.first_name} {seeker.last_name} is a {score}% match "
+                f"for {job_row.title}."
+            ),
+            related_job_id=str(job_row.id),
+            related_user_id=str(seeker.id),
+        )
+
+    _queue_job_match_email_safe(
+        to_email=getattr(seeker, "email", None),
+        seeker_name=seeker.first_name or "there",
+        job_title=job_row.title,
+        company_name=job_row.posted_by_name or "Hiring Company",
+        match_score=score,
+        job_id=str(job_row.id),
+        experience_required=job_row.experience_required,
+        salary_range=job_row.salary_range,
+        location=getattr(job_row, "location", None),
+        fit_reason=rank.get("fit_reason", ""),
+    )
+
+    try:
+        provider_res = await db.execute(
+            select(User.email, User.first_name, User.company_name).where(
+                User.id == job_row.provider_id
+            )
+        )
+        prov = provider_res.first()
+        if prov and prov.email:
+            _queue_candidate_match_email_safe(
+                to_email=prov.email,
+                provider_name=prov.first_name or "there",
+                candidate_name=f"{seeker.first_name or ''} {seeker.last_name or ''}".strip()
+                or "Candidate",
+                job_title=job_row.title,
+                match_score=score,
+                job_id=str(job_row.id),
+                candidate_location=getattr(seeker, "address", None) or getattr(seeker, "city", None),
+                candidate_skills=_rank_highlights_as_skills(rank),
+                fit_reason=rank.get("fit_reason", ""),
+            )
+    except Exception as exc:
+        logger.warning("Failed to queue candidate match email for job %s: %s", job_row.id, exc)
+
+
+async def _after_new_provider_candidate_match(
+    db: AsyncSession,
+    *,
+    job: JobPosting,
+    candidate_row,
+    provider_row,
+    rank: dict,
+    score: float,
+) -> None:
+    from app.shared.services.notification_service import create_notification
+    from app.shared.models.notification import NotificationType
+
+    if score >= 85:
+        await create_notification(
+            db=db,
+            user_id=job.provider_id,
+            type=NotificationType.match,
+            title="Top Candidate",
+            message=(
+                f"A new candidate {candidate_row.first_name} {candidate_row.last_name} "
+                f"is a {score}% match for {job.title}."
+            ),
+            related_job_id=str(job.id),
+            related_user_id=str(candidate_row.user_id),
+        )
+        await create_notification(
+            db=db,
+            user_id=str(candidate_row.user_id),
+            type=NotificationType.match,
+            title="Perfect match found",
+            message=f"You're a {score}% match for {job.title}. Log in to view and apply.",
+            related_job_id=str(job.id),
+        )
+
+    if provider_row and provider_row.email:
+        _queue_candidate_match_email_safe(
+            to_email=provider_row.email,
+            provider_name=provider_row.first_name or "there",
+            candidate_name=f"{candidate_row.first_name or ''} {candidate_row.last_name or ''}".strip()
+            or "Candidate",
+            job_title=job.title,
+            match_score=score,
+            job_id=str(job.id),
+            candidate_skills=_rank_highlights_as_skills(rank),
+            fit_reason=rank.get("fit_reason", ""),
+        )
+
+    candidate_email = getattr(candidate_row, "email", None)
+    if candidate_email:
+        company_name = job.posted_by_name or (
+            provider_row.company_name if provider_row else None
+        ) or "Hiring Company"
+        _queue_job_match_email_safe(
+            to_email=candidate_email,
+            seeker_name=candidate_row.first_name or "there",
+            job_title=job.title,
+            company_name=company_name,
+            match_score=score,
+            job_id=str(job.id),
+            experience_required=job.experience_required,
+            salary_range=job.salary_range,
+            location=job.location,
+            fit_reason=rank.get("fit_reason", ""),
+        )
+
+
 async def match_jobs_for_seeker(seeker: User, db: AsyncSession) -> List[dict]:
     """
     Seeker flow:
@@ -1045,8 +1214,6 @@ async def proactive_match_resume_to_jobs(resume_id: str) -> None:
 
             # Store matches in DB
             matches_created = 0
-            from app.shared.services.notification_service import create_notification
-            from app.shared.models.notification import NotificationType
 
             for list_idx, job_row in jobs_to_process:
                 rank = rankings_by_idx.get(list_idx)
@@ -1067,65 +1234,9 @@ async def proactive_match_resume_to_jobs(resume_id: str) -> None:
                 db.add(new_match)
                 await db.flush()
 
-                if score >= 85:
-                    await create_notification(
-                        db=db,
-                        user_id=seeker.id,
-                        type=NotificationType.match,
-                        title="Perfect match found",
-                        message=f"We found a job that perfectly matches your profile: {job_row.title} with a {score}% match score.",
-                        related_job_id=str(job_row.id),
-                    )
-                    await create_notification(
-                        db=db,
-                        user_id=str(job_row.provider_id),
-                        type=NotificationType.match,
-                        title="Top Candidate",
-                        message=f"A new candidate {seeker.first_name} {seeker.last_name} is a {score}% match for {job_row.title}.",
-                        related_job_id=str(job_row.id),
-                        related_user_id=str(seeker.id),
-                    )
-
-                    # Send Job Match Email to Job Seeker
-                    if getattr(seeker, "email", None):
-                        try:
-                            from app.shared.services.celery_tasks import queue_job_match_email
-                            queue_job_match_email(
-                                to_email=seeker.email,
-                                seeker_name=seeker.first_name or "there",
-                                job_title=job_row.title,
-                                company_name=job_row.posted_by_name or "Hiring Company",
-                                match_score=score,
-                                job_id=str(job_row.id),
-                                experience_required=job_row.experience_required,
-                                salary_range=job_row.salary_range,
-                                location=getattr(job_row, "location", None),
-                                fit_reason=rank.get("fit_reason", ""),
-                            )
-                        except Exception as exc:
-                            logger.warning(f"Failed to queue job match email to seeker {seeker.email}: {exc}")
-
-                    # Send Candidate Match Email to Recruiter
-                    try:
-                        provider_res = await db.execute(
-                            select(User.email, User.first_name, User.company_name).where(User.id == job_row.provider_id)
-                        )
-                        prov = provider_res.first()
-                        if prov and prov.email:
-                            from app.shared.services.celery_tasks import queue_candidate_match_email
-                            queue_candidate_match_email(
-                                to_email=prov.email,
-                                provider_name=prov.first_name or "there",
-                                candidate_name=f"{seeker.first_name or ''} {seeker.last_name or ''}".strip() or "Candidate",
-                                job_title=job_row.title,
-                                match_score=score,
-                                job_id=str(job_row.id),
-                                candidate_location=getattr(seeker, "address", None) or getattr(seeker, "city", None),
-                                candidate_skills=", ".join(rank.get("highlights", [])) if isinstance(rank.get("highlights"), list) else None,
-                                fit_reason=rank.get("fit_reason", ""),
-                            )
-                    except Exception as exc:
-                        logger.warning(f"Failed to queue candidate match email to provider: {exc}")
+                await _after_new_seeker_job_match(
+                    db, seeker=seeker, job_row=job_row, rank=rank, score=score
+                )
 
                 matches_created += 1
             
@@ -1223,8 +1334,6 @@ async def proactive_match_job_to_candidates(job_id: str) -> None:
 
             # Store matches in DB
             matches_created = 0
-            from app.shared.services.notification_service import create_notification
-            from app.shared.models.notification import NotificationType
 
             # Fetch provider info for candidate match notifications
             provider_res = await db.execute(
@@ -1251,60 +1360,14 @@ async def proactive_match_job_to_candidates(job_id: str) -> None:
                 db.add(new_match)
                 await db.flush()
 
-                if score >= 85:
-                    await create_notification(
-                        db=db,
-                        user_id=job.provider_id,
-                        type=NotificationType.match,
-                        title="Top Candidate",
-                        message=f"A new candidate {candidate_row.first_name} {candidate_row.last_name} is a {score}% match for {job.title}.",
-                        related_job_id=str(job.id),
-                        related_user_id=str(candidate_row.user_id),
-                    )
-                    await create_notification(
-                        db=db,
-                        user_id=str(candidate_row.user_id),
-                        type=NotificationType.match,
-                        title="Perfect match found",
-                        message=f"You're a {score}% match for {job.title}. Log in to view and apply.",
-                        related_job_id=str(job.id),
-                    )
-
-                    # Send Candidate Match Email to Recruiter
-                    if provider_row and provider_row.email:
-                        try:
-                            from app.shared.services.celery_tasks import queue_candidate_match_email
-                            queue_candidate_match_email(
-                                to_email=provider_row.email,
-                                provider_name=provider_row.first_name or "there",
-                                candidate_name=f"{candidate_row.first_name or ''} {candidate_row.last_name or ''}".strip() or "Candidate",
-                                job_title=job.title,
-                                match_score=score,
-                                job_id=str(job.id),
-                                candidate_skills=", ".join(rank.get("highlights", [])) if isinstance(rank.get("highlights"), list) else None,
-                                fit_reason=rank.get("fit_reason", ""),
-                            )
-                        except Exception as exc:
-                            logger.warning(f"Failed to queue candidate match email to provider: {exc}")
-
-                    # Send Job Match Email to Candidate / Seeker
-                    if getattr(candidate_row, "email", None):
-                        try:
-                            from app.shared.services.celery_tasks import queue_job_match_email
-                            queue_job_match_email(
-                                to_email=candidate_row.email,
-                                seeker_name=candidate_row.first_name or "there",
-                                job_title=job.title,
-                                company_name=job.posted_by_name or (provider_row.company_name if provider_row else "Hiring Company"),
-                                match_score=score,
-                                job_id=str(job.id),
-                                experience_required=job.experience_required,
-                                salary_range=job.salary_range,
-                                location=job.location,
-                                fit_reason=rank.get("fit_reason", ""),
-                            )
-                        except Exception as exc:
-                            logger.warning(f"Failed to queue job match email to candidate: {exc}")
+                await _after_new_provider_candidate_match(
+                    db,
+                    job=job,
+                    candidate_row=candidate_row,
+                    provider_row=provider_row,
+                    rank=rank,
+                    score=score,
+                )
 
                 matches_created += 1
             

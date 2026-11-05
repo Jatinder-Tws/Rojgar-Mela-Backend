@@ -88,6 +88,11 @@ from app.core.dependencies import (
     require_super_admin_or_permission,
 )
 from app.modules.training_portal.services.training_portal_dashboard import build_dashboard_summary
+from app.modules.training_portal.services.enrollment_access import (
+    has_learning_access,
+    is_batch_assignable,
+    is_fee_complete,
+)
 from app.modules.training_portal.services.training_portal_mapper import (
     enrollment_to_out,
     batch_to_out,
@@ -256,9 +261,7 @@ async def _batch_student_count(db: AsyncSession, batch_id: str) -> int:
 
 
 def _is_fee_complete(enrollment: TrainingPortalEnrollment) -> bool:
-    if enrollment.payment_status in ("paid_online", "paid_offline", "free"):
-        return True
-    return enrollment.balance_due <= 0.01 and enrollment.paid_amount > 0
+    return is_fee_complete(enrollment)
 
 
 def _is_fee_complete_from_create(body: PortalEnrollmentCreate) -> bool:
@@ -278,7 +281,8 @@ async def _try_assign_preferred_batch(
     preferred_id = getattr(enrollment, "preferred_batch_id", None)
     if not preferred_id or enrollment.batch_id:
         return False
-    if not _is_fee_complete(enrollment):
+    # Full fee or first EMI / partial payment — same gate as admin batch assign.
+    if not is_batch_assignable(enrollment):
         return False
 
     batch_result = await db.execute(
@@ -327,6 +331,41 @@ async def _try_assign_preferred_batch(
     return True
 
 
+async def _unassign_enrollments_from_batch(
+    db: AsyncSession,
+    batch: TrainingPortalBatch,
+    enrollments: list[TrainingPortalEnrollment],
+    *,
+    notify: bool = True,
+) -> None:
+    """Clear batch seat for selected enrollments. Keeps fee / attendance history intact."""
+    now = datetime.utcnow()
+    for enrollment in enrollments:
+        if enrollment.batch_id != batch.id:
+            continue
+        previous_name = enrollment.batch_name or batch.batch_name
+        enrollment.batch_id = None
+        enrollment.batch_name = None
+        enrollment.preferred_batch_id = None
+        enrollment.updated_at = now
+        if notify:
+            db.add(
+                TrainingPortalCandidateNotification(
+                    id=str(uuid.uuid4()),
+                    candidate_email=enrollment.candidate_email,
+                    notification_type="batch_pending",
+                    title="Batch Unassigned",
+                    description=(
+                        f'You have been removed from batch "{previous_name}". '
+                        "Admin will assign another batch when ready."
+                    ),
+                    detail="Your fee and enrollment stay active. Class schedule for that batch is hidden until reassigned.",
+                    event_date=now.strftime("%Y-%m-%d"),
+                    severity="warning",
+                )
+            )
+
+
 async def _sync_batch_enrollments(
     db: AsyncSession,
     batch: TrainingPortalBatch,
@@ -345,15 +384,7 @@ async def _sync_batch_enrollments(
 
     to_remove = [enrollment for enrollment in current_rows if enrollment.id not in target_ids]
     if to_remove:
-        names = ", ".join(enrollment.candidate_name for enrollment in to_remove[:3])
-        extra = f" and {len(to_remove) - 3} more" if len(to_remove) > 3 else ""
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                f"Cannot remove enrolled students already assigned to this batch: {names}{extra}. "
-                "Reassign them to another batch first if needed."
-            ),
-        )
+        await _unassign_enrollments_from_batch(db, batch, to_remove, notify=True)
 
     to_add = [eid for eid in enrollment_ids if eid not in current_ids]
     if to_add:
@@ -517,10 +548,13 @@ async def _assign_enrollments_to_batch(
     for enrollment in selected:
         if enrollment.enrollment_type != "course" or enrollment.item_id != batch.course_id:
             raise HTTPException(status_code=400, detail="All students must be enrolled in the batch course")
-        if not _is_fee_complete(enrollment):
+        if not is_batch_assignable(enrollment):
             raise HTTPException(
                 status_code=400,
-                detail=f"Student {enrollment.candidate_email} has not completed fee payment",
+                detail=(
+                    f"Student {enrollment.candidate_email} cannot be assigned yet — "
+                    "record full fee or at least the first EMI / partial payment first"
+                ),
             )
         if enrollment.batch_id and enrollment.batch_id != batch.id:
             raise HTTPException(
@@ -606,6 +640,16 @@ async def _get_or_create_payment_settings(db: AsyncSession) -> TrainingPortalPay
     db.add(row)
     await db.commit()
     return row
+
+
+def _user_role_str(user: User) -> str:
+    role = getattr(user, "role", None)
+    return role.value if hasattr(role, "value") else str(role or "")
+
+
+def _has_admin_scope(user: User) -> bool:
+    """Super admins and supervisors see portal-wide records (supervisors are gated by permission deps)."""
+    return bool(getattr(user, "is_super_admin", False)) or _user_role_str(user) == "supervisor"
 
 
 async def _notify_admins(
@@ -1195,8 +1239,8 @@ async def generic_export_csv(
             ])
             
     elif entity == "attendance":
-        is_admin = getattr(current_user, "is_super_admin", False)
-        user_role = getattr(current_user, "role", None)
+        is_admin = _has_admin_scope(current_user)
+        user_role = _user_role_str(current_user)
         
         teacher_batch_ids = None
         if user_role == "teacher" and not is_admin:
@@ -1324,21 +1368,22 @@ async def create_enrollment(
     name = body.candidate_name or f"{current_user.first_name or ''} {current_user.last_name or ''}".strip() or email.split("@")[0]
     phone = body.candidate_phone or current_user.phone
 
-    # Delete any stale initiated enrollments that never completed payment.
-    # For course enrollments, keep separate batch registrations distinct so the
-    # same student can join more than one class for the same course.
+    # Delete abandoned Razorpay checkouts (payment_initiated, ₹0) so cancel/retry
+    # does not stack duplicate rows in Fee Ledger / Students.
+    # Match batch_id OR preferred_batch_id (seat often not assigned until pay succeeds).
     initiated_filters = [
         TrainingPortalEnrollment.candidate_email == email,
         TrainingPortalEnrollment.enrollment_type == body.enrollment_type,
         TrainingPortalEnrollment.status == "payment_initiated",
+        TrainingPortalEnrollment.item_id == body.item_id,
     ]
     if body.enrollment_type == "course" and body.batch_id:
-        initiated_filters.extend([
-            TrainingPortalEnrollment.item_id == body.item_id,
-            TrainingPortalEnrollment.batch_id == body.batch_id,
-        ])
-    else:
-        initiated_filters.append(TrainingPortalEnrollment.item_id == body.item_id)
+        initiated_filters.append(
+            or_(
+                TrainingPortalEnrollment.batch_id == body.batch_id,
+                TrainingPortalEnrollment.preferred_batch_id == body.batch_id,
+            )
+        )
     await db.execute(delete(TrainingPortalEnrollment).where(*initiated_filters))
     await db.commit()
 
@@ -1346,11 +1391,15 @@ async def create_enrollment(
         TrainingPortalEnrollment.candidate_email == email,
         TrainingPortalEnrollment.enrollment_type == body.enrollment_type,
         TrainingPortalEnrollment.status != "dropped",
+        TrainingPortalEnrollment.status != "payment_initiated",
     ]
     if body.enrollment_type == "course" and body.batch_id:
         duplicate_filters.extend([
             TrainingPortalEnrollment.item_id == body.item_id,
-            TrainingPortalEnrollment.batch_id == body.batch_id,
+            or_(
+                TrainingPortalEnrollment.batch_id == body.batch_id,
+                TrainingPortalEnrollment.preferred_batch_id == body.batch_id,
+            ),
         ])
     else:
         duplicate_filters.append(TrainingPortalEnrollment.item_id == body.item_id)
@@ -1516,6 +1565,41 @@ async def create_enrollment(
     await db.commit()
 
     return enrollment_to_out(enrollment)
+
+
+@router.delete("/enrollments/{enrollment_id}/abandon-checkout", status_code=status.HTTP_204_NO_CONTENT)
+async def abandon_checkout_enrollment(
+    enrollment_id: str,
+    current_user: User = Depends(require_training_portal_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Remove an unpaid checkout row after Razorpay cancel. Never deletes paid enrollments."""
+    result = await db.execute(
+        select(TrainingPortalEnrollment).where(TrainingPortalEnrollment.id == enrollment_id)
+    )
+    enrollment = result.scalar_one_or_none()
+    if not enrollment:
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    owner_email = (current_user.email or "").strip().lower()
+    if (enrollment.candidate_email or "").strip().lower() != owner_email and not getattr(
+        current_user, "is_super_admin", False
+    ):
+        raise HTTPException(status_code=403, detail="Not your enrollment")
+
+    if enrollment.status != "payment_initiated":
+        raise HTTPException(status_code=400, detail="Only unpaid checkouts can be abandoned")
+    if float(enrollment.paid_amount or 0) > 0.01:
+        raise HTTPException(status_code=400, detail="Cannot abandon an enrollment with payments")
+
+    await db.execute(
+        delete(TrainingPortalPaymentOrder).where(TrainingPortalPaymentOrder.enrollment_id == enrollment.id)
+    )
+    await db.execute(
+        delete(TrainingPortalEnrollment).where(TrainingPortalEnrollment.id == enrollment.id)
+    )
+    await db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/enrollments/{enrollment_id}/confirm-visit", response_model=PortalEnrollmentOut)
@@ -2176,7 +2260,31 @@ async def list_class_sessions(
     if batch_id:
         query = query.where(TrainingPortalClassSession.batch_id == batch_id)
     result = await db.execute(query)
-    return [session_to_out(row) for row in result.scalars().all()]
+    sessions = list(result.scalars().all())
+
+    # Admin/teacher keep full visibility. Students only see sessions for enrollments
+    # with learning access (fee paid / token / EMI) — not unpaid pending rows.
+    is_admin = _has_admin_scope(current_user)
+    user_role = _user_role_str(current_user)
+    if not is_admin and user_role != "teacher":
+        email = (current_user.email or "").strip().lower()
+        enroll_result = await db.execute(
+            select(TrainingPortalEnrollment).where(
+                func.lower(TrainingPortalEnrollment.candidate_email) == email
+            )
+        )
+        accessible = [e for e in enroll_result.scalars().all() if has_learning_access(e)]
+        allowed_batch_ids = {e.batch_id for e in accessible if e.batch_id}
+        allowed_internship_ids = {
+            e.item_id for e in accessible if (e.enrollment_type or "") != "course"
+        }
+        sessions = [
+            s for s in sessions
+            if (s.batch_id and s.batch_id in allowed_batch_ids)
+            or (not s.batch_id and s.item_id in allowed_internship_ids)
+        ]
+
+    return [session_to_out(row) for row in sessions]
 
 
 def _normalize_schedule_type(value: Optional[str]) -> str:
@@ -3085,9 +3193,11 @@ async def list_attendance_records(
     if class_session_id:
         query = query.where(TrainingPortalAttendanceRecord.class_session_id == class_session_id)
 
-    is_admin = getattr(current_user, "is_super_admin", False)
+    # Supervisors with training access share the admin scope; otherwise they would
+    # fall through to the candidate branch and be filtered by their own email (no rows).
+    is_admin = _has_admin_scope(current_user)
     user_email = (current_user.email or "").lower()
-    user_role = getattr(current_user, "role", None)
+    user_role = _user_role_str(current_user)
 
     teacher_batch_ids: Optional[list[str]] = None
     if user_role == "teacher" and not is_admin:
@@ -3113,12 +3223,31 @@ async def list_attendance_records(
     elif is_student:
         query = query.where(TrainingPortalAttendanceRecord.candidate_email == user_email)
 
+    # Students: hide class notes / attendance rows for enrollments without learning access
+    # (unpaid pending). Admin and teacher continue to see full batch records.
+    student_allowed_batch_ids: Optional[set[str]] = None
+    if is_student:
+        enroll_result = await db.execute(
+            select(TrainingPortalEnrollment).where(
+                func.lower(TrainingPortalEnrollment.candidate_email) == user_email
+            )
+        )
+        student_allowed_batch_ids = {
+            e.batch_id
+            for e in enroll_result.scalars().all()
+            if e.batch_id and has_learning_access(e)
+        }
+
     from app.modules.training_portal.services.occurrence_reports import get_occurrence_fields
 
     result = await db.execute(query)
     rows = result.all()
     out_rows: list[PortalAttendanceRecordOut] = []
     for record, session in rows:
+        if student_allowed_batch_ids is not None:
+            if not record.batch_id or record.batch_id not in student_allowed_batch_ids:
+                continue
+
         occ = (record.occurrence_date or None) or None
         occ_fields = get_occurrence_fields(session, occ)
         out_rows.append(
@@ -3131,6 +3260,8 @@ async def list_attendance_records(
                 candidate_name=record.candidate_name,
                 status=record.status,
                 marked_at=record.marked_at,
+                session_started_at=session.started_at,
+                session_ended_at=session.ended_at,
                 session_title=session.title,
                 session_date=occ or session.date,
                 session_start_time=session.start_time,

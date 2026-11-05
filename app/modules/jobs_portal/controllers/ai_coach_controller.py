@@ -10,6 +10,8 @@ from app.modules.jobs_portal.models.ai_coach import AICoachSession
 from app.shared.models.user import User
 from app.modules.jobs_portal.services.ai_coach_service import AICoachService
 from app.modules.jobs_portal.services.ai_coach_credits_service import AICoachCreditsService
+from app.modules.jobs_portal.services.ai_coach_service import INSUFFICIENT_GRADE_MESSAGE
+from app.shared.services.gemini_resilient import GeminiServiceUnavailable
 
 
 async def get_credit_balance(user: User, db: AsyncSession) -> dict:
@@ -52,6 +54,49 @@ async def start_coach_session(
             "feedback": first_res.get("feedback"),
             "credits_remaining": account.balance
         }
+    except GeminiServiceUnavailable as e:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+async def start_speak_coach_session(
+    target_role: str,
+    experience_level: str,
+    focus_area: str,
+    user: User,
+    db: AsyncSession,
+) -> dict:
+    """Turn-based interview with browser TTS/STT (mode=speak)."""
+    AICoachCreditsService.verify_seeker_role(user)
+
+    account = await AICoachCreditsService.get_or_create_account(db, user)
+    if account.balance < 1:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail="Insufficient credits. Minimum 1 credit required to start an interview practice session.",
+        )
+
+    try:
+        session = await AICoachService.initialize_session(
+            db=db,
+            seeker_id=user.id,
+            target_role=target_role,
+            experience_level=experience_level,
+            focus_area=focus_area,
+        )
+        session.mode = "speak"
+        await db.commit()
+        first_res = await AICoachService.get_next_question(db, session.id)
+        return {
+            "session_id": session.id,
+            "question": first_res["message"],
+            "rating": first_res.get("rating"),
+            "feedback": first_res.get("feedback"),
+            "credits_remaining": account.balance,
+        }
+    except GeminiServiceUnavailable as e:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -123,6 +168,8 @@ async def respond_to_coach(session_id: str, answer: str, user: User, db: AsyncSe
         }
     except HTTPException:
         raise
+    except GeminiServiceUnavailable as e:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -151,17 +198,41 @@ async def get_active_room_session(session_id: str, user: User, db: AsyncSession)
     return await AICoachService.get_active_room_session(db, session_id, user.id)
 
 
+async def expire_coach_session(session_id: str, user: User, db: AsyncSession) -> dict:
+    AICoachCreditsService.verify_seeker_role(user)
+    result = await db.execute(select(AICoachSession).where(AICoachSession.id == session_id))
+    session = result.scalar_one_or_none()
+    if not session or session.seeker_id != user.id:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.status == "expired":
+        return {"status": "expired", "session_id": session_id}
+    if session.status != "in_progress":
+        return {"status": session.status, "session_id": session_id}
+    await AICoachService.mark_session_expired(
+        db,
+        session_id,
+        "This practice session was ended before evaluation could complete.",
+    )
+    return {"status": "expired", "session_id": session_id}
+
+
 async def get_coach_result(session_id: str, user: User, db: AsyncSession) -> dict:
     AICoachCreditsService.verify_seeker_role(user)
     result = await db.execute(select(AICoachSession).where(AICoachSession.id == session_id))
     session = result.scalar_one_or_none()
     if not session or session.seeker_id != user.id:
         raise HTTPException(status_code=404, detail="Session not found")
+    insufficient = (
+        session.overall_score == 0
+        and (session.general_feedback or "").startswith("Not enough answers to grade")
+    )
     return {
         "id": session.id, "target_role": session.target_role,
         "experience_level": session.experience_level, "focus_area": session.focus_area,
         "mode": getattr(session, "mode", "text"),
         "status": session.status, "overall_score": session.overall_score,
+        "grade_status": "insufficient" if insufficient else "graded",
+        "insufficient_grade_message": INSUFFICIENT_GRADE_MESSAGE if insufficient else None,
         "content_score": session.content_score, "communication_score": session.communication_score,
         "general_feedback": session.general_feedback, "strengths": session.strengths,
         "gaps": session.gaps, "improvement_steps": session.improvement_steps,

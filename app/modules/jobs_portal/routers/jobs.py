@@ -6,6 +6,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.shared.models.user import User
 from app.modules.jobs_portal.schemas.jobs import (
+    ApplyInsightsRequest,
+    ApplyInsightsResponse,
+    EnhanceJobSectionRequest,
+    EnhanceJobSectionResponse,
     JobCreate, JobDescriptionOnlyResponse, JobDescriptionRequest,
     JobOut, JobSkillsResponse, JobTitleRequest, JobUpdate,
     VoiceJobParseRequest, VoiceJobParseResponse,
@@ -16,6 +20,7 @@ from app.modules.jobs_portal.controllers.jobs_controller import (
     list_jobs as ctrl_list_jobs,
     create_job as ctrl_create_job,
     get_job as ctrl_get_job,
+    apply_insights as ctrl_apply_insights,
     update_job_patch as ctrl_update_job_patch,
     update_job_put as ctrl_update_job_put,
     delete_job as ctrl_delete_job,
@@ -24,6 +29,7 @@ from app.modules.jobs_portal.controllers.jobs_controller import (
     get_job_stats as ctrl_get_job_stats,
     generate_description as ctrl_generate_description,
     generate_skills as ctrl_generate_skills,
+    enhance_section as ctrl_enhance_section,
     parse_voice_job as ctrl_parse_voice_job,
     get_distinct_industries as ctrl_get_distinct_industries,
     search_external_jobs as ctrl_search_external_jobs,
@@ -49,11 +55,22 @@ async def list_jobs(
     industry: Optional[str] = Query(None),
     sort_by: Optional[str] = Query(None),
     sort_order: Optional[str] = Query(None),
+    matched_only: bool = Query(False, description="Seekers only: return AI-matched jobs (score >= 40)"),
     user: User = Depends(require_verified),
     db: AsyncSession = Depends(get_db)
 ):
     return await ctrl_list_jobs(
-        user, db, page, page_size, search, job_type, salary_range, industry, sort_by, sort_order
+        user,
+        db,
+        page,
+        page_size,
+        search,
+        job_type,
+        salary_range,
+        industry,
+        sort_by,
+        sort_order,
+        matched_only,
     )
 
 
@@ -115,6 +132,16 @@ async def get_job(job_id: str, user: User = Depends(require_verified), db: Async
     return await ctrl_get_job(job_id, user, db)
 
 
+@router.post("/{job_id}/apply-insights", response_model=ApplyInsightsResponse)
+async def apply_insights(
+    job_id: str,
+    body: ApplyInsightsRequest,
+    user: User = Depends(require_verified),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_apply_insights(job_id, body, user, db)
+
+
 
 @router.patch("/{job_id}", response_model=JobOut)
 async def update_job_patch(job_id: str, body: JobUpdate, background_tasks: BackgroundTasks, user: User = Depends(require_provider), db: AsyncSession = Depends(get_db)):
@@ -142,18 +169,23 @@ async def activate_job(job_id: str, user: User = Depends(require_provider), db: 
 
 
 @router.post("/ai/generate-description", response_model=JobDescriptionOnlyResponse)
-async def generate_description(payload: JobDescriptionRequest, user: User = Depends(require_provider)):
+async def generate_description(payload: JobDescriptionRequest, user: User = Depends(require_provider_or_super_admin)):
     return await ctrl_generate_description(payload)
 
 
 @router.post("/ai/generate-skills", response_model=JobSkillsResponse)
-async def generate_skills(payload: JobTitleRequest, user: User = Depends(require_provider)):
+async def generate_skills(payload: JobTitleRequest, user: User = Depends(require_provider_or_super_admin)):
     return await ctrl_generate_skills(payload)
 
 
 @router.post("/ai/parse-voice", response_model=VoiceJobParseResponse)
 async def parse_voice(payload: VoiceJobParseRequest, user: User = Depends(require_provider_or_super_admin)):
     return await ctrl_parse_voice_job(payload)
+
+
+@router.post("/ai/enhance-section", response_model=EnhanceJobSectionResponse)
+async def enhance_section(payload: EnhanceJobSectionRequest, user: User = Depends(require_provider_or_super_admin)):
+    return await ctrl_enhance_section(payload)
 
 
 

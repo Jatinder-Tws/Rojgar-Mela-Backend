@@ -10,6 +10,7 @@ from app.modules.jobs_portal.schemas.portfolio import (
     PortfolioOut,
     PortfolioCompletionOut,
     CandidateSearchListResponse,
+    CertificationFileOut,
 )
 from app.core.dependencies import require_verified, require_seeker, require_provider
 from app.modules.jobs_portal.controllers.portfolio_controller import (
@@ -22,6 +23,7 @@ from app.modules.jobs_portal.controllers.portfolio_controller import (
     stream_media as ctrl_stream_media,
     stream_user_media as ctrl_stream_user_media,
     get_user_portfolio as ctrl_get_user_portfolio,
+    upload_certification_file as ctrl_upload_certification_file,
 )
 
 router = APIRouter(prefix="/portfolio", tags=["portfolio"])
@@ -58,6 +60,14 @@ async def search_candidates(
     return await ctrl_search_candidates(
         q, title, skills, status, gender, industry, page, page_size, provider, db
     )
+
+
+@router.post("/me/certification-file", response_model=CertificationFileOut)
+async def upload_certification_file(
+    file: UploadFile = File(...),
+    user: User = Depends(require_seeker),
+):
+    return await ctrl_upload_certification_file(file, user)
 
 
 @router.post("/me/media/{media_type}", response_model=PortfolioOut)

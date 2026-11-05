@@ -35,6 +35,8 @@ async def api_list_audit_logs(
     end_date: Optional[datetime] = Query(None, description="End ISO datetime"),
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=100),
+    sort_by: Optional[str] = Query(None, description="created_at | actor_name | actor_role | action | entity_type | description"),
+    sort_dir: Optional[str] = Query(None, description="asc | desc"),
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(require_super_admin),
 ):
@@ -52,6 +54,8 @@ async def api_list_audit_logs(
         end_date=end_date,
         page=page,
         page_size=page_size,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
     )
 
 

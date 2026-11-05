@@ -11,6 +11,21 @@ from app.modules.jobs_portal.services.ai_coach_redis_service import AICoachRedis
 
 logger = logging.getLogger(__name__)
 
+INSUFFICIENT_GRADE_MESSAGE = (
+    "Not enough answers to grade. Complete at least one full interview response to receive a score."
+)
+
+
+def count_substantive_user_answers(chat_history: Optional[List[Dict[str, Any]]]) -> int:
+    count = 0
+    for message in chat_history or []:
+        if message.get("role") != "user" or message.get("is_clarification"):
+            continue
+        text = (message.get("content") or "").strip()
+        if len(text) >= 3:
+            count += 1
+    return count
+
 
 class AICoachService:
 
@@ -412,7 +427,53 @@ class AICoachService:
         }
 
     @staticmethod
+    async def mark_session_expired(
+        db: AsyncSession,
+        session_id: str,
+        message: Optional[str] = None,
+    ) -> bool:
+        """Mark an in-progress session as expired (auth loss, abandon, or stale reconnect)."""
+        res = await db.execute(select(AICoachSession).where(AICoachSession.id == session_id))
+        session = res.scalar_one_or_none()
+        if not session or session.status != "in_progress":
+            return False
+
+        feedback = message or (
+            "This practice session expired before evaluation could complete. "
+            "Start a new interview when you are ready."
+        )
+        session.status = "expired"
+        session.general_feedback = feedback
+        await db.commit()
+
+        cached = await AICoachRedisService.get_session(session_id)
+        payload = cached or {
+            "id": session.id,
+            "seeker_id": session.seeker_id,
+            "target_role": session.target_role,
+            "experience_level": session.experience_level,
+            "focus_area": session.focus_area,
+            "chat_history": list(session.chat_history or []),
+        }
+        payload["status"] = "expired"
+        await AICoachRedisService.save_session(session_id, payload)
+        return True
+
+    @staticmethod
     async def evaluate_session(db: AsyncSession, session: AICoachSession):
+        if count_substantive_user_answers(session.chat_history) < 1:
+            session.overall_score = 0
+            session.content_score = 0
+            session.communication_score = 0
+            session.general_feedback = INSUFFICIENT_GRADE_MESSAGE
+            session.strengths = []
+            session.gaps = ["Complete at least one interview answer before requesting a score."]
+            session.improvement_steps = ["Start a new session and respond to each question before ending."]
+            session.video_feedback = None
+            session.status = "completed"
+            await db.commit()
+            return
+
         ai = get_ai()
         history_text = "\n".join([f"{m['role'].capitalize()}: {m['content']}" for m in session.chat_history])
         
@@ -476,12 +537,15 @@ class AICoachService:
             await db.commit()
         except Exception as e:
             logger.error(f"Failed to evaluate session: {e}")
-            session.overall_score = 82
-            session.content_score = 80
-            session.communication_score = 84
-            session.general_feedback = "Great effort practicing your interview skills!"
-            session.strengths = ["Solid communication", "Clear technical explanation"]
-            session.gaps = ["Add quantitative project impact metrics"]
-            session.improvement_steps = ["Practice STAR method problem-solving responses"]
+            session.overall_score = 0
+            session.content_score = 0
+            session.communication_score = 0
+            session.general_feedback = (
+                "We could not generate an AI scorecard right now. Please try again in a minute."
+            )
+            session.strengths = []
+            session.gaps = []
+            session.improvement_steps = ["Retry the session when the AI service is available."]
+            session.video_feedback = None
             session.status = "completed"
             await db.commit()

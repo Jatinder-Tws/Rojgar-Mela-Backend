@@ -145,6 +145,8 @@ class UnifiedEnquiryOut(BaseModel):
     photo_url: Optional[str] = None
     interests: Optional[str] = None
     visitor_query: Optional[str] = None
+    # True only when linked event registration completed email OTP verification
+    email_verified: bool = False
     created_at: datetime
     updated_at: Optional[datetime] = None
 

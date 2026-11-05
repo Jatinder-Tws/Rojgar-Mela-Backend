@@ -24,6 +24,8 @@ class Settings(BaseSettings):
 
     # Google Gemini
     GOOGLE_API_KEY: str = ""
+    GEMINI_API_KEYS: str = ""
+    GEMINI_CHAT_MODEL_FALLBACKS: str = "gemini-2.0-flash,gemini-2.5-flash"
 
     # Google Places / Maps (optional company autofill). Do not reuse GOOGLE_API_KEY.
     GOOGLE_PLACES_API_KEY: str = ""
@@ -118,6 +120,8 @@ class Settings(BaseSettings):
     LINKEDIN_CLIENT_SECRET: str = ""
     LINKEDIN_CALLBACK_URL: str = "http://localhost:8000/auth/linkedin/callback"
     BACKEND_PUBLIC_URL: str = "http://localhost:8000"
+    # Optional alias used when normalizing stored upload URLs (defaults to BACKEND_PUBLIC_URL).
+    PUBLIC_BASE_URL: str = ""
     TOKEN_ENCRYPTION_KEY: str = ""
     TURNSTILE_SECRET_KEY: str = ""
     TURNSTILE_SITE_KEY: str = ""

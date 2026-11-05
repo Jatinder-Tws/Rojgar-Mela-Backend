@@ -16,6 +16,16 @@ from app.modules.super_admin.schemas.audit_logs import (
 )
 
 
+_SORT_COLUMNS = {
+    "created_at": AuditLog.created_at,
+    "actor_name": AuditLog.actor_name,
+    "actor_role": AuditLog.actor_role,
+    "action": AuditLog.action,
+    "entity_type": AuditLog.entity_type,
+    "description": AuditLog.description,
+}
+
+
 async def list_audit_logs(
     db: AsyncSession,
     role: Optional[str] = None,
@@ -26,6 +36,8 @@ async def list_audit_logs(
     end_date: Optional[datetime] = None,
     page: int = 1,
     page_size: int = 25,
+    sort_by: Optional[str] = None,
+    sort_dir: Optional[str] = None,
 ) -> AuditLogListResponse:
     """Lists paginated audit logs with multi-filter search."""
     page = max(1, page)
@@ -63,9 +75,14 @@ async def list_audit_logs(
     count_query = select(func.count()).select_from(query.subquery())
     total = (await db.execute(count_query)).scalar() or 0
 
-    # Paginate and order by newest first
+    sort_key = (sort_by or "created_at").strip().lower()
+    sort_column = _SORT_COLUMNS.get(sort_key, AuditLog.created_at)
+    descending = (sort_dir or "desc").strip().lower() != "asc"
+    order_clause = sort_column.desc() if descending else sort_column.asc()
+
+    # Paginate with allow-listed sort (default: newest first)
     offset = (page - 1) * page_size
-    query = query.order_by(AuditLog.created_at.desc()).offset(offset).limit(page_size)
+    query = query.order_by(order_clause, AuditLog.id.desc()).offset(offset).limit(page_size)
 
     result = await db.execute(query)
     rows = result.scalars().all()

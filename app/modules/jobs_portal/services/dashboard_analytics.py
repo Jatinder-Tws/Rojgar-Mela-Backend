@@ -1,6 +1,6 @@
 """Comprehensive dashboard analytics for super admin."""
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Optional
 
 from sqlalchemy import and_, func, select, case
@@ -8,13 +8,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.modules.jobs_portal.models.application import Application, ApplicationStatus
-from app.modules.jobs_portal.models.ai_interview import AIInterviewSession
 from app.modules.jobs_portal.models.interview import Interview
 from app.modules.jobs_portal.models.job import JobPosting
 from app.modules.jobs_portal.models.match import Match
 from app.modules.jobs_portal.models.portfolio import Portfolio
 from app.shared.models.user import User, UserRole
 from app.modules.jobs_portal.services.portfolio_service import calculate_completion
+
+# Keep in sync with super_admin_controller._created_range_filters (IST calendar days → UTC-naive).
+_IST_OFFSET = timedelta(hours=5, minutes=30)
 
 
 def _pct_change(today: int, yesterday: int) -> float:
@@ -29,10 +31,18 @@ def _funnel_pct(count: int, base: int) -> float:
     return round(min((count / base) * 100, 100.0), 1)
 
 
+def _ist_day_bounds_utc(day: date) -> tuple[datetime, datetime]:
+    """Inclusive IST calendar day as [start, end) in naive UTC wall clock."""
+    start = datetime.combine(day, time.min) - _IST_OFFSET
+    end = datetime.combine(day + timedelta(days=1), time.min) - _IST_OFFSET
+    return start, end
+
+
 def _day_bounds(target: datetime):
-    start = target.replace(hour=0, minute=0, second=0, microsecond=0)
-    end = start + timedelta(days=1)
-    prev_start = start - timedelta(days=1)
+    """Single IST calendar day containing `target` (treated as UTC-naive instant)."""
+    ist_day = (target + _IST_OFFSET).date()
+    start, end = _ist_day_bounds_utc(ist_day)
+    prev_start, _ = _ist_day_bounds_utc(ist_day - timedelta(days=1))
     return start, end, prev_start, start
 
 
@@ -41,10 +51,20 @@ def _resolve_period_bounds(
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
 ):
+    """
+    Resolve reporting window as [start, end) in naive UTC.
+
+    Admin date pickers are IST calendar days — same semantics as list
+    `created_from` / `created_to` filters — so KPI drill-downs reconcile.
+    """
     if start_date and end_date:
-        period_start = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
-        period_end = end_date.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-        period_days = max((period_end - period_start).days, 1)
+        start_day = start_date.date()
+        end_day = end_date.date()
+        if end_day < start_day:
+            start_day, end_day = end_day, start_day
+        period_start, _ = _ist_day_bounds_utc(start_day)
+        _, period_end = _ist_day_bounds_utc(end_day)
+        period_days = max((end_day - start_day).days + 1, 1)
         prev_end = period_start
         prev_start = prev_end - timedelta(days=period_days)
         return period_start, period_end, prev_start, prev_end
@@ -54,12 +74,15 @@ def _resolve_period_bounds(
 
 def _kpi_labels(period_start: datetime, period_end: datetime) -> dict[str, str]:
     """Human-readable KPI labels based on selected reporting period."""
-    period_days = max((period_end - period_start).days, 1)
+    # Bounds are UTC-naive IST windows; convert back for calendar-day labels.
+    cal_start = (period_start + _IST_OFFSET).date()
+    cal_end = (period_end + _IST_OFFSET - timedelta(days=1)).date()
+    period_days = max((cal_end - cal_start).days + 1, 1)
     is_single_day = period_days == 1
     is_calendar_month = (
-        period_start.day == 1
-        and period_start.month == (period_end - timedelta(days=1)).month
-        and period_start.year == (period_end - timedelta(days=1)).year
+        cal_start.day == 1
+        and cal_start.month == cal_end.month
+        and cal_start.year == cal_end.year
     )
     if is_single_day:
         suffix = "Today"
@@ -76,7 +99,7 @@ def _kpi_labels(period_start: datetime, period_end: datetime) -> dict[str, str]:
         return f"{base} {suffix}"
 
     return {
-        "new_registrations": _period_label("New Registrations"),
+        "new_registrations": _period_label("New Seekers"),
         "active_jobs": "Active Jobs",
         "applications": _period_label("Applications"),
         "interviews": _period_label("Interviews"),
@@ -185,20 +208,23 @@ async def get_dashboard_analytics(
         select(func.count(JobPosting.id)).where(JobPosting.is_active.is_(True)).scalar_subquery().label("active_jobs"),
         select(func.count(Application.id)).scalar_subquery().label("total_applications"),
         select(func.count(Match.id)).scalar_subquery().label("total_matches"),
-        select(func.count(User.id)).where(User.role.in_([UserRole.seeker, UserRole.provider]), User.is_super_admin.is_(False), User.created_at >= day_start, User.created_at < day_end).scalar_subquery().label("new_regs_today"),
-        select(func.count(User.id)).where(User.role.in_([UserRole.seeker, UserRole.provider]), User.is_super_admin.is_(False), User.created_at >= yesterday_start, User.created_at < yesterday_end).scalar_subquery().label("new_regs_yesterday"),
+        # new_registrations KPI = seekers only so drill-down to /seekers matches the card.
+        select(func.count(User.id)).where(User.role == UserRole.seeker, User.is_super_admin.is_(False), User.created_at >= day_start, User.created_at < day_end).scalar_subquery().label("new_regs_today"),
+        select(func.count(User.id)).where(User.role == UserRole.seeker, User.is_super_admin.is_(False), User.created_at >= yesterday_start, User.created_at < yesterday_end).scalar_subquery().label("new_regs_yesterday"),
         select(func.count(User.id)).where(User.role == UserRole.seeker, User.is_super_admin.is_(False), User.created_at >= day_start, User.created_at < day_end).scalar_subquery().label("new_seekers_period"),
         select(func.count(User.id)).where(User.role == UserRole.seeker, User.is_super_admin.is_(False), User.created_at >= yesterday_start, User.created_at < yesterday_end).scalar_subquery().label("new_seekers_prev"),
         select(func.count(User.id)).where(User.role == UserRole.provider, User.is_super_admin.is_(False), User.created_at >= day_start, User.created_at < day_end).scalar_subquery().label("new_providers_period"),
         select(func.count(User.id)).where(User.role == UserRole.provider, User.is_super_admin.is_(False), User.created_at >= yesterday_start, User.created_at < yesterday_end).scalar_subquery().label("new_providers_prev"),
-        select(func.count(Application.id)).where(Application.applied_at >= day_start, Application.applied_at < day_end).scalar_subquery().label("apps_today"),
-        select(func.count(Application.id)).where(Application.applied_at >= yesterday_start, Application.applied_at < yesterday_end).scalar_subquery().label("apps_yesterday"),
-        select(func.count(Interview.id)).where(Interview.scheduled_at >= day_start, Interview.scheduled_at < day_end).scalar_subquery().label("interviews_today"),
-        select(func.count(Interview.id)).where(Interview.scheduled_at >= yesterday_start, Interview.scheduled_at < yesterday_end).scalar_subquery().label("interviews_yesterday"),
+        # Application KPIs join job+provider so counts match the admin applications list (inner joins).
+        select(func.count(Application.id)).select_from(Application).join(JobPosting, Application.job_id == JobPosting.id).join(User, JobPosting.provider_id == User.id).where(Application.applied_at >= day_start, Application.applied_at < day_end).scalar_subquery().label("apps_today"),
+        select(func.count(Application.id)).select_from(Application).join(JobPosting, Application.job_id == JobPosting.id).join(User, JobPosting.provider_id == User.id).where(Application.applied_at >= yesterday_start, Application.applied_at < yesterday_end).scalar_subquery().label("apps_yesterday"),
+        select(func.count(Interview.id)).select_from(Interview).join(Seeker, Interview.seeker_id == Seeker.id).join(Provider, Interview.provider_id == Provider.id).join(JobPosting, Interview.job_id == JobPosting.id).where(Interview.scheduled_at >= day_start, Interview.scheduled_at < day_end).scalar_subquery().label("interviews_today"),
+        select(func.count(Interview.id)).select_from(Interview).join(Seeker, Interview.seeker_id == Seeker.id).join(Provider, Interview.provider_id == Provider.id).join(JobPosting, Interview.job_id == JobPosting.id).where(Interview.scheduled_at >= yesterday_start, Interview.scheduled_at < yesterday_end).scalar_subquery().label("interviews_yesterday"),
         select(func.count(Match.id)).where(Match.created_at >= day_start, Match.created_at < day_end).scalar_subquery().label("matches_today"),
         select(func.count(Match.id)).where(Match.created_at >= yesterday_start, Match.created_at < yesterday_end).scalar_subquery().label("matches_yesterday"),
-        select(func.count(Application.id)).where(Application.status == ApplicationStatus.selected, Application.updated_at >= day_start, Application.updated_at < day_end).scalar_subquery().label("selections_today"),
-        select(func.count(Application.id)).where(Application.status == ApplicationStatus.selected, Application.updated_at >= yesterday_start, Application.updated_at < yesterday_end).scalar_subquery().label("selections_yesterday"),
+        # Selections = currently selected apps applied in period (matches funnel + list filters).
+        select(func.count(Application.id)).select_from(Application).join(JobPosting, Application.job_id == JobPosting.id).join(User, JobPosting.provider_id == User.id).where(Application.status == ApplicationStatus.selected, Application.applied_at >= day_start, Application.applied_at < day_end).scalar_subquery().label("selections_today"),
+        select(func.count(Application.id)).select_from(Application).join(JobPosting, Application.job_id == JobPosting.id).join(User, JobPosting.provider_id == User.id).where(Application.status == ApplicationStatus.selected, Application.applied_at >= yesterday_start, Application.applied_at < yesterday_end).scalar_subquery().label("selections_yesterday"),
         select(func.count(func.distinct(JobPosting.provider_id))).where(JobPosting.is_active.is_(True)).scalar_subquery().label("companies_active"),
         select(func.count(func.distinct(JobPosting.provider_id))).where(JobPosting.is_active.is_(True), JobPosting.created_at < day_start).scalar_subquery().label("companies_active_yesterday"),
         select(func.count(JobPosting.id)).where(JobPosting.is_active.is_(True), JobPosting.created_at < day_start).scalar_subquery().label("active_jobs_yesterday"),
@@ -227,14 +253,13 @@ async def get_dashboard_analytics(
         select(func.count(Application.id)).where(Application.applied_at >= prev_week_start, Application.applied_at < week_start).scalar_subquery().label("apps_prev_week"),
         select(func.count(Application.id)).where(Application.applied_at >= thirty_days_ago).scalar_subquery().label("apps_30d"),
         select(func.count(Application.id)).where(Application.applied_at >= sixty_days_ago, Application.applied_at < thirty_days_ago).scalar_subquery().label("apps_prev_30d"),
-        # Funnel stages — applications submitted in the selected reporting period
-        select(func.count(Application.id)).where(Application.applied_at >= day_start, Application.applied_at < day_end).scalar_subquery().label("period_applied"),
-        select(func.count(Application.id)).where(Application.applied_at >= day_start, Application.applied_at < day_end, Application.status == ApplicationStatus.shortlisted).scalar_subquery().label("period_shortlisted"),
-        select(func.count(Application.id)).where(Application.applied_at >= day_start, Application.applied_at < day_end, Application.status == ApplicationStatus.interviewing).scalar_subquery().label("period_interviewing"),
-        select(func.count(Application.id)).where(Application.applied_at >= day_start, Application.applied_at < day_end, Application.status == ApplicationStatus.selected).scalar_subquery().label("period_selected"),
+        # Funnel stages — same job+provider join as list_platform_applications
+        select(func.count(Application.id)).select_from(Application).join(JobPosting, Application.job_id == JobPosting.id).join(User, JobPosting.provider_id == User.id).where(Application.applied_at >= day_start, Application.applied_at < day_end).scalar_subquery().label("period_applied"),
+        select(func.count(Application.id)).select_from(Application).join(JobPosting, Application.job_id == JobPosting.id).join(User, JobPosting.provider_id == User.id).where(Application.applied_at >= day_start, Application.applied_at < day_end, Application.status == ApplicationStatus.shortlisted).scalar_subquery().label("period_shortlisted"),
+        select(func.count(Application.id)).select_from(Application).join(JobPosting, Application.job_id == JobPosting.id).join(User, JobPosting.provider_id == User.id).where(Application.applied_at >= day_start, Application.applied_at < day_end, Application.status == ApplicationStatus.interviewing).scalar_subquery().label("period_interviewing"),
+        select(func.count(Application.id)).select_from(Application).join(JobPosting, Application.job_id == JobPosting.id).join(User, JobPosting.provider_id == User.id).where(Application.applied_at >= day_start, Application.applied_at < day_end, Application.status == ApplicationStatus.selected).scalar_subquery().label("period_selected"),
         select(func.count(Application.id)).where(Application.status == ApplicationStatus.rejected).scalar_subquery().label("all_time_rejected"),
-        select(func.count(Interview.id)).where(Interview.scheduled_at >= day_start, Interview.scheduled_at < day_end).scalar_subquery().label("period_interviews"),
-        select(func.count(AIInterviewSession.id)).where(AIInterviewSession.status == "completed", AIInterviewSession.created_at >= day_start, AIInterviewSession.created_at < day_end).scalar_subquery().label("period_ai_interviews_done"),
+        select(func.count(Interview.id)).select_from(Interview).join(Seeker, Interview.seeker_id == Seeker.id).join(Provider, Interview.provider_id == Provider.id).join(JobPosting, Interview.job_id == JobPosting.id).where(Interview.scheduled_at >= day_start, Interview.scheduled_at < day_end).scalar_subquery().label("period_interviews"),
     )
 
     # Query 3: Score Distribution (5 counts in a single query)
@@ -517,7 +542,6 @@ async def get_dashboard_analytics(
     period_selected = sum_row.period_selected
     all_time_rejected = sum_row.all_time_rejected
     period_interviews = sum_row.period_interviews
-    period_ai_interviews_done = sum_row.period_ai_interviews_done
 
     # ── 4. Process Profile Completion (Once, No Heavy ORM objects) ────────────
     completion_pcts = []
@@ -636,7 +660,8 @@ async def get_dashboard_analytics(
     funnel_base = max(period_applied, 1)
     shortlisted_count = period_shortlisted
     scheduled_count = period_interviews
-    interview_count = max(period_interviewing, period_ai_interviews_done)
+    # Interview stage = apps currently interviewing (applied in period) — matches list drill-down.
+    interview_count = period_interviewing
     recruitment_funnel = [
         {"stage": "Applied", "count": period_applied, "pct": 100.0 if period_applied else 0.0},
         {"stage": "Shortlisted", "count": shortlisted_count, "pct": _funnel_pct(shortlisted_count, funnel_base)},

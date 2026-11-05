@@ -25,6 +25,7 @@ from app.core.dependencies import get_current_user_ws
 from app.modules.jobs_portal.models.ai_coach import AICoachSession
 from app.modules.jobs_portal.services.ai_coach_credits_service import AICoachCreditsService
 from app.modules.jobs_portal.services.ai_coach_live_service import run_live_session
+from app.modules.jobs_portal.services.ai_coach_service import AICoachService
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,11 @@ async def ai_coach_live_ws(websocket: WebSocket, session_id: str):
     async with AsyncSessionLocal() as db:
         user = await get_current_user_ws(websocket, db)
         if user is None:
+            await AICoachService.mark_session_expired(
+                db,
+                session_id,
+                "Your login session expired during the live interview. Please sign in and start a new practice session.",
+            )
             await websocket.close(code=WS_AUTH_FAILED)
             return
 

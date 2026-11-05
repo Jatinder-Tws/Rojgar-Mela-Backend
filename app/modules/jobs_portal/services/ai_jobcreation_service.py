@@ -258,7 +258,13 @@ def _loads_json(text: str) -> dict:
     if raw.startswith("```"):
         raw = re.sub(r"^```(?:json)?", "", raw).strip()
         raw = re.sub(r"```$", "", raw).strip()
-    data = json.loads(raw)
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        match = re.search(r"\{[\s\S]*\}", raw)
+        if not match:
+            return {}
+        data = json.loads(match.group(0))
     return data if isinstance(data, dict) else {}
 
 
@@ -511,7 +517,132 @@ async def parse_spoken_job(transcript: str, audio_base64: str | None = None, aud
         except Exception as exc:
             print(f"OpenAI failed for spoken job parse: {exc}")
 
-    parsed = fallback if parsed is None else _merge_spoken(parsed, fallback)
+    if parsed is None:
+        parsed = fallback
+    else:
+        parsed = {k: v for k, v in parsed.items() if v not in (None, "", [])}
     if not any(parsed.get(key) for key in ("title", "summary", "city", "required_skills", "sal_min_annual")):
         raise ValueError("Could not pick out job details. Try again with the role, location, and salary.")
     return parsed
+
+
+INTERVIEW_PROCESS_OPTIONS = [
+    "walk-in",
+    "phone screen",
+    "technical round",
+    "hr round",
+    "technical + hr",
+    "ai interview",
+]
+
+
+async def enhance_job_section(
+    section: str,
+    title: str,
+    current_text: Optional[str] = None,
+    location: Optional[str] = None,
+    job_type: Optional[str] = None,
+    employment_type: Optional[str] = None,
+    experience: Optional[str] = None,
+    required_skills: Optional[List[str]] = None,
+) -> dict:
+    """Rewrite or generate one job-form section while keeping the rest of the form intact."""
+    if not title or not str(title).strip():
+        raise ValueError("Job title is required to enhance a section")
+
+    section_key = (section or "").strip().lower()
+    allowed = {"summary", "responsibilities", "interview_process"}
+    if section_key not in allowed:
+        raise ValueError("section must be summary, responsibilities, or interview_process")
+
+    current = (current_text or "").strip()
+    skills_str = ", ".join(required_skills) if required_skills else "not specified"
+    context = f"""
+JOB_TITLE: {title.strip()}
+LOCATION: {location or "not specified"}
+WORK_MODE: {job_type or "not specified"}
+EMPLOYMENT_TYPE: {employment_type or "not specified"}
+EXPERIENCE: {experience or "not specified"}
+REQUIRED_SKILLS: {skills_str}
+CURRENT_TEXT: {current or "(empty — generate from scratch)"}
+""".strip()
+
+    if section_key == "summary":
+        rules = """
+Enhance or write the Job Summary only.
+- 2–4 sentences, professional, candidate-facing
+- Max 500 characters
+- Do not include responsibilities bullets or interview steps
+- Return JSON: {"text": "..."}
+"""
+    elif section_key == "responsibilities":
+        rules = """
+Enhance or write the Responsibilities section only.
+- Clear bullet-style lines separated by newlines (use "- " prefix)
+- 5–10 concrete duties for this role
+- Max 1000 characters
+- Do not include salary, perks, or interview process
+- Return JSON: {"text": "..."}
+"""
+    else:
+        options = ", ".join(INTERVIEW_PROCESS_OPTIONS)
+        rules = f"""
+Choose the best Interview Process for this role.
+- Return exactly one of these values: {options}
+- If CURRENT_TEXT already matches one option and still fits, keep it
+- Return JSON: {{"text": "<one allowed value>"}}
+"""
+
+    prompt = f"""You are a professional technical recruiter helping edit one field of a job posting.
+{context}
+
+{rules}
+"""
+
+    data = None
+    try:
+        client = get_gemini_client()
+        response = client.models.generate_content(
+            model=settings.GEMINI_CHAT_MODEL,
+            contents=["You enhance individual job posting fields.", prompt],
+            config={"temperature": 0.35, "response_mime_type": "application/json"},
+        )
+        data = json.loads(response.text or "{}")
+    except Exception as exc:
+        print(f"Gemini failed for enhance_job_section: {exc}")
+
+    if data is None:
+        try:
+            client = get_openai_client()
+            response = await client.chat.completions.create(
+                model=settings.OPENAI_CHAT_MODEL,
+                messages=[
+                    {"role": "system", "content": "You enhance individual job posting fields. Return JSON only."},
+                    {"role": "user", "content": prompt},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.35,
+            )
+            data = json.loads(response.choices[0].message.content or "{}")
+        except Exception as exc:
+            print(f"OpenAI failed for enhance_job_section: {exc}")
+            raise ValueError("Could not enhance this section. Please try again.") from exc
+
+    text = str((data or {}).get("text") or "").strip()
+    if not text:
+        raise ValueError("AI returned an empty enhancement")
+
+    if section_key == "summary":
+        text = text[:500]
+    elif section_key == "responsibilities":
+        text = text[:1000]
+    else:
+        normalized = text.lower().strip()
+        match = next((opt for opt in INTERVIEW_PROCESS_OPTIONS if opt == normalized), None)
+        if not match:
+            match = next((opt for opt in INTERVIEW_PROCESS_OPTIONS if opt in normalized or normalized in opt), None)
+        if not match:
+            raise ValueError("AI suggested an unsupported interview process")
+        text = match
+
+    return {"text": text, "section": section_key}

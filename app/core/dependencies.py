@@ -127,10 +127,13 @@ async def require_provider_or_super_admin(
         if not profile or not profile.is_active:
             raise HTTPException(status_code=403, detail="Supervisor account is inactive or disabled")
         perms = profile.permissions if isinstance(profile.permissions, list) else []
-        if any(p in perms for p in ("job_providers", "internships", "*")):
+        if any(p in perms for p in ("job_providers", "internships", "jobs", "*")):
             setattr(user, "_supervisor_profile", profile)
             return user
-        raise HTTPException(status_code=403, detail="Missing required supervisor permission: 'job_providers' or 'internships'")
+        raise HTTPException(
+            status_code=403,
+            detail="Missing required supervisor permission: 'jobs', 'job_providers', or 'internships'",
+        )
     if not user.is_verified:
         raise HTTPException(status_code=403, detail="Email not verified")
     if role_str != "provider":

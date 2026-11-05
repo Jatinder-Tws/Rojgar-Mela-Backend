@@ -2,6 +2,7 @@ import logging
 from typing import List
 from fastapi import BackgroundTasks, HTTPException
 from sqlalchemy import select, and_, or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.jobs_portal.models.application import Application, ApplicationStatus
@@ -20,16 +21,22 @@ from app.shared.services.audit_service import log_audit_event
 logger = logging.getLogger(__name__)
 
 
+def _provider_display_name(provider: User) -> str:
+    company = (provider.company_name or "").strip()
+    if company:
+        return company
+    person = f"{provider.first_name or ''} {provider.last_name or ''}".strip()
+    return person or "Employer"
+
+
 def _queue_notification_email(user: User | None, title: str, message: str) -> None:
-    if not user or not user.email:
+    if not user:
         return
-    try:
-        from app.shared.services.celery_tasks import send_notification_email_task
-        send_notification_email_task.delay(
-            user.email, title, message, user.first_name or "there"
-        )
-    except Exception:
-        logger.exception("Failed to queue notification email to %s", getattr(user, "email", None))
+    from app.shared.services.notification_service import queue_notification_email
+
+    queue_notification_email(
+        user.email, title, message, user.first_name or "there"
+    )
 
 
 async def apply_to_job(
@@ -59,8 +66,28 @@ async def apply_to_job(
 
     provider_result = await db.execute(select(User).where(User.id == job.provider_id))
     provider = provider_result.scalar_one_or_none()
+
+    await log_audit_event(
+        db,
+        user,
+        action="APPLICATION_SUBMIT",
+        entity_type="application",
+        entity_id=str(app.id),
+        entity_name=job.title,
+        description=f"Applied for job '{job.title}' at {provider.company_name if provider and provider.company_name else 'Company'}",
+        changes={"job_id": str(job.id), "job_title": job.title},
+    )
+
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="You have already applied to this job")
+    await db.refresh(app)
+
     if provider:
         from app.modules.jobs_portal.models.match import Match
+
         match_result = await db.execute(
             select(Match.id).where(and_(Match.seeker_id == user.id, Match.job_id == body.job_id))
         )
@@ -75,32 +102,19 @@ async def apply_to_job(
             message=notif_msg,
             related_job_id=body.job_id,
             related_user_id=match_id if match_id else user.id,
+            auto_commit=True,
         )
         _queue_notification_email(
             provider,
             "New Application",
             notif_msg,
         )
-
-    await log_audit_event(
-        db,
-        user,
-        action="APPLICATION_SUBMIT",
-        entity_type="application",
-        entity_id=str(app.id),
-        entity_name=job.title,
-        description=f"Applied for job '{job.title}' at {provider.company_name if provider and provider.company_name else 'Company'}",
-        changes={"job_id": str(job.id), "job_title": job.title},
-    )
-
-    await db.commit()
     if provider:
         try:
             await auto_schedule_for_application(db, app, provider, job)
             await db.commit()
         except Exception:
             await db.rollback()
-    await db.refresh(app)
     return ApplicationOut.model_validate(app)
 
 
@@ -112,8 +126,29 @@ async def get_my_applications(user: User, db: AsyncSession) -> List[ApplicationO
         .order_by(Application.applied_at.desc())
     )
     rows = result.all()
+    provider_ids = list({str(job.provider_id) for _, job in rows if getattr(job, "provider_id", None)})
+    logo_by_provider: dict[str, str | None] = {}
+    company_name_by_provider: dict[str, str | None] = {}
+    if provider_ids:
+        logo_result = await db.execute(
+            select(User.id, User.profile_pic_url, User.company_name).where(User.id.in_(provider_ids))
+        )
+        for row in logo_result.all():
+            pid = str(row.id)
+            logo_by_provider[pid] = row.profile_pic_url
+            company_name_by_provider[pid] = (row.company_name or "").strip() or None
+
     out = []
     for app, job in rows:
+        raw_provider_id = str(job.provider_id) if getattr(job, "provider_id", None) else ""
+        provider_available = bool(raw_provider_id and raw_provider_id in company_name_by_provider)
+        # Only expose provider_id when the provider account still exists (avoid orphan profile links).
+        provider_id = raw_provider_id if provider_available else None
+        company_name = (
+            company_name_by_provider.get(raw_provider_id)
+            if provider_available
+            else None
+        ) or job.posted_by_name
         out.append(ApplicationOut(
             id=str(app.id),
             seeker_id=str(app.seeker_id),
@@ -123,9 +158,12 @@ async def get_my_applications(user: User, db: AsyncSession) -> List[ApplicationO
             ai_feedback=app.ai_feedback,
             applied_at=app.applied_at,
             updated_at=app.updated_at,
+            provider_id=provider_id,
+            provider_available=provider_available if raw_provider_id else None,
             job_title=job.title,
             job_type=job.job_type,
-            company_name=job.posted_by_name,
+            company_name=company_name,
+            company_logo_url=logo_by_provider.get(raw_provider_id) if provider_available else None,
             experience_required=job.experience_required,
             salary_range=job.salary_range,
             job_description=job.description,
@@ -350,14 +388,16 @@ async def provider_shortlist_candidate(
     await db.commit()
     await db.refresh(app)
 
+    provider_label = _provider_display_name(user)
     await create_notification(
         db=db,
         user_id=seeker.id,
         type=NotificationType.shortlisted,
-        title="Resume Shortlisted",
-        message=f"Congratulations! {user.first_name} from {user.company_name or 'a company'} has shortlisted you for '{job.title}'. They may reach out soon.",
+        title=provider_label,
+        message=f"Congratulations! {user.first_name} from {provider_label} has shortlisted you for '{job.title}'. They may reach out soon.",
         related_job_id=str(job.id),
         related_user_id=str(user.id),
+        auto_commit=True,
     )
     _queue_notification_email(
         seeker,
@@ -399,25 +439,29 @@ async def shortlist_application(app_id: str, user: User, db: AsyncSession) -> Ap
     seeker_result = await db.execute(select(User).where(User.id == app.seeker_id))
     seeker = seeker_result.scalar_one_or_none()
     if seeker:
+        provider_label = _provider_display_name(user)
         await create_notification(
             db=db,
             user_id=seeker.id,
             type=NotificationType.shortlisted,
-            title="Resume Shortlisted",
-            message=f"Congratulations! {user.first_name} from {user.company_name or 'a company'} has shortlisted your application for '{job.title}'. They may reach out soon. Keep your profile updated!",
+            title=provider_label,
+            message=f"Congratulations! {user.first_name} from {provider_label} has shortlisted your application for '{job.title}'. They may reach out soon. Keep your profile updated!",
             related_job_id=str(job.id),
             related_user_id=str(user.id),
+            auto_commit=True,
         )
         _queue_notification_email(
             seeker,
             "Resume Shortlisted",
-            f"Congratulations! {user.first_name} from {user.company_name or 'a company'} has shortlisted your application for '{job.title}'. They may reach out soon. Keep your profile updated!",
+            f"Congratulations! {user.first_name} from {provider_label} has shortlisted your application for '{job.title}'. They may reach out soon. Keep your profile updated!",
         )
 
     try:
         await auto_schedule_for_application(db, app, user, job)
+        await db.commit()
     except Exception:
         logger.exception("Auto-schedule failed for application %s", app.id)
+        await db.rollback()
 
     await db.refresh(app)
     return ApplicationOut.model_validate(app)
@@ -537,24 +581,28 @@ async def update_application_status(
             seeker_result = await db.execute(select(User).where(User.id == app.seeker_id))
             seeker = seeker_result.scalar_one_or_none()
             if seeker:
+                provider_label = _provider_display_name(user)
                 await create_notification(
                     db=db,
                     user_id=seeker.id,
                     type=NotificationType.shortlisted,
-                    title="Resume Shortlisted",
-                    message=f"Congratulations! {user.first_name} from {user.company_name or 'a company'} has shortlisted your application for '{job.title}'. They may reach out soon. Keep your profile updated!",
+                    title=provider_label,
+                    message=f"Congratulations! {user.first_name} from {provider_label} has shortlisted your application for '{job.title}'. They may reach out soon. Keep your profile updated!",
                     related_job_id=str(job.id),
                     related_user_id=str(user.id),
+                    auto_commit=True,
                 )
                 _queue_notification_email(
                     seeker,
                     "Resume Shortlisted",
-                    f"Congratulations! {user.first_name} from {user.company_name or 'a company'} has shortlisted your application for '{job.title}'. They may reach out soon. Keep your profile updated!",
+                    f"Congratulations! {user.first_name} from {provider_label} has shortlisted your application for '{job.title}'. They may reach out soon. Keep your profile updated!",
                 )
             try:
                 await auto_schedule_for_application(db, app, user, job)
+                await db.commit()
             except Exception:
                 logger.exception("Auto-schedule failed for application %s", app.id)
+                await db.rollback()
 
         elif status == "rejected":
             app.status = ApplicationStatus.rejected
@@ -584,6 +632,27 @@ async def update_application_status(
                 changes={"new_status": status},
             )
             await db.commit()
+
+            if status == "selected":
+                seeker_result = await db.execute(select(User).where(User.id == app.seeker_id))
+                seeker = seeker_result.scalar_one_or_none()
+                if seeker:
+                    provider_label = _provider_display_name(user)
+                    selected_msg = (
+                        f"Congratulations! You have been selected for '{job.title}' "
+                        f"at {provider_label}."
+                    )
+                    await create_notification(
+                        db=db,
+                        user_id=seeker.id,
+                        type=NotificationType.shortlisted,
+                        title="Congratulations",
+                        message=selected_msg,
+                        related_job_id=str(job.id),
+                        related_user_id=str(user.id),
+                        auto_commit=True,
+                    )
+                    _queue_notification_email(seeker, "Congratulations — You're Selected", selected_msg)
 
         else:
             app.status = status

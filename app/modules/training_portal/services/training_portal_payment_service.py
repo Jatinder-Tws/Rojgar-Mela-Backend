@@ -23,6 +23,29 @@ def razorpay_configured() -> bool:
     return True
 
 
+def _deployment_looks_like_production() -> bool:
+    for raw in (settings.FRONTEND_URL, settings.BACKEND_PUBLIC_URL):
+        url = (raw or "").strip().lower()
+        if not url:
+            continue
+        if "localhost" in url or "127.0.0.1" in url:
+            return False
+        if url.startswith("https://"):
+            return True
+    return False
+
+
+def warn_if_razorpay_test_key_in_production() -> None:
+    """Log when live traffic likely uses Razorpay test keys."""
+    key = (settings.RAZORPAY_KEY_ID or "").strip()
+    if key.startswith("rzp_test_") and _deployment_looks_like_production():
+        logger.warning(
+            "RAZORPAY_KEY_ID is a test key (%s) but FRONTEND_URL/BACKEND_PUBLIC_URL look like production. "
+            "Set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET to live (rzp_live_*) keys.",
+            key[:16] + "…",
+        )
+
+
 async def create_razorpay_refund(
     payment_id: str,
     amount_paise: Optional[int] = None,
@@ -49,6 +72,7 @@ async def create_razorpay_refund(
 
 
 async def create_razorpay_order(amount_paise: int, receipt: str, notes: Optional[dict[str, str]] = None) -> dict[str, Any]:
+    warn_if_razorpay_test_key_in_production()
     if not razorpay_configured():
         return {
             "id": f"order_mock_{uuid.uuid4().hex[:12]}",

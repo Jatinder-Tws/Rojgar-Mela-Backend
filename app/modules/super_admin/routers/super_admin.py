@@ -4,14 +4,15 @@ Business logic lives in controllers/super_admin_controller.py
 """
 from datetime import datetime
 from typing import List, Optional
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.shared.models.user import User
 from app.modules.super_admin.schemas.super_admin import (
     AdminApplicationListItem, AdminApplicationListResponse, AdminAssessmentListResponse, AdminInterviewListResponse,
-    AdminJobListResponse, AdminMatchListResponse, AdminProviderCreate, AdminProviderUpdate,
+    AdminJobCreate, AdminJobDetailResponse, AdminJobListResponse, AdminJobProviderOptionsResponse,
+    AdminMatchListResponse, AdminProviderCreate, AdminProviderUpdate, AdminShortlistRequest,
     AdminSeekerCreate, AdminSeekerUpdate, AdminSetPasswordRequest, AdminUserExportRequest, AdminUserListResponse,
     AdminUserOut, BulkImportJobStarted, DashboardAnalyticsResponse, DetailedPlatformAnalytics,
     ImportJobStatus, PlatformStatsResponse, SuperAdminChangePasswordRequest, SuperAdminLoginRequest,
@@ -28,9 +29,13 @@ from app.modules.super_admin.controllers.super_admin_controller import (
     change_super_admin_password as ctrl_change_password,
     upload_super_admin_profile_pic as ctrl_upload_profile_pic,
     list_platform_jobs as ctrl_list_jobs,
+    get_platform_job as ctrl_get_job,
+    list_job_provider_options as ctrl_list_job_provider_options,
+    create_platform_job as ctrl_create_platform_job,
     list_platform_matches as ctrl_list_matches,
     list_platform_applications as ctrl_list_applications,
     update_platform_application_status as ctrl_update_application_status,
+    shortlist_platform_candidate as ctrl_shortlist_platform_candidate,
     list_platform_interviews as ctrl_list_interviews,
     list_platform_assessments as ctrl_list_assessments,
     platform_stats as ctrl_platform_stats,
@@ -53,9 +58,21 @@ from app.modules.super_admin.controllers.super_admin_controller import (
     update_provider as ctrl_update_provider,
     delete_provider as ctrl_delete_provider,
     set_provider_password as ctrl_set_provider_password,
+    upload_provider_profile_pic as ctrl_upload_provider_profile_pic,
+    get_provider_company_profile as ctrl_get_provider_company,
+    admin_lookup_company as ctrl_admin_lookup_company,
+    admin_apply_company_lookup as ctrl_admin_apply_company_lookup,
+    upload_provider_gallery_image as ctrl_upload_provider_gallery,
+    delete_provider_gallery_image as ctrl_delete_provider_gallery,
     bulk_import_providers as ctrl_bulk_import_providers,
     export_seekers as ctrl_export_seekers,
     export_providers as ctrl_export_providers,
+)
+from app.modules.jobs_portal.schemas.company_profile import (
+    CompanyApplyLookupRequest,
+    CompanyLookupRequest,
+    CompanyLookupResponse,
+    CompanyProfileOut,
 )
 
 router = APIRouter(prefix="/super-admin", tags=["super-admin"])
@@ -107,8 +124,43 @@ async def list_jobs(
     search: Optional[str] = None,
     industry: Optional[str] = Query(None),
     is_active: Optional[bool] = Query(None),
+    provider_id: Optional[str] = Query(None),
+    created_from: Optional[str] = Query(None, description="Posted from YYYY-MM-DD"),
+    created_to: Optional[str] = Query(None, description="Posted to YYYY-MM-DD"),
 ):
-    return await ctrl_list_jobs(db, page, page_size, search, industry, is_active)
+    return await ctrl_list_jobs(
+        db, page, page_size, search, industry, is_active, provider_id, created_from, created_to
+    )
+
+
+@router.get("/jobs/provider-options", response_model=AdminJobProviderOptionsResponse)
+async def list_job_provider_options(
+    admin: User = Depends(require_super_admin_or_permission("jobs")),
+    db: AsyncSession = Depends(get_db),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=50),
+    search: Optional[str] = None,
+):
+    return await ctrl_list_job_provider_options(db, page, page_size, search)
+
+
+@router.post("/jobs", response_model=AdminJobDetailResponse, status_code=201)
+async def create_job(
+    body: AdminJobCreate,
+    background_tasks: BackgroundTasks,
+    admin: User = Depends(require_super_admin_or_permission("jobs")),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_create_platform_job(db, body, admin, background_tasks)
+
+
+@router.get("/jobs/{job_id}", response_model=AdminJobDetailResponse)
+async def get_job(
+    job_id: str,
+    admin: User = Depends(require_super_admin_or_permission("jobs")),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_get_job(db, job_id)
 
 
 @router.get("/matches", response_model=AdminMatchListResponse)
@@ -118,8 +170,14 @@ async def list_matches(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     search: Optional[str] = None,
+    job_id: Optional[str] = Query(None),
+    provider_id: Optional[str] = Query(None),
+    created_from: Optional[str] = Query(None, description="Match created from YYYY-MM-DD"),
+    created_to: Optional[str] = Query(None, description="Match created to YYYY-MM-DD"),
 ):
-    return await ctrl_list_matches(db, page, page_size, search)
+    return await ctrl_list_matches(
+        db, page, page_size, search, job_id, provider_id, created_from, created_to
+    )
 
 
 @router.get("/applications", response_model=AdminApplicationListResponse)
@@ -130,8 +188,24 @@ async def list_applications(
     page_size: int = Query(20, ge=1, le=100),
     search: Optional[str] = None,
     status: Optional[str] = Query(None),
+    job_id: Optional[str] = Query(None),
+    provider_id: Optional[str] = Query(None),
+    created_from: Optional[str] = Query(None, description="Applied from YYYY-MM-DD"),
+    created_to: Optional[str] = Query(None, description="Applied to YYYY-MM-DD"),
 ):
-    return await ctrl_list_applications(db, page, page_size, search, status)
+    return await ctrl_list_applications(
+        db, page, page_size, search, status, job_id, provider_id, created_from, created_to
+    )
+
+
+@router.post("/applications/shortlist", response_model=AdminApplicationListItem, status_code=201)
+async def shortlist_candidate(
+    body: AdminShortlistRequest,
+    admin: User = Depends(require_super_admin_or_permission("applications")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Shortlist a matched seeker for a job on behalf of that job's provider."""
+    return await ctrl_shortlist_platform_candidate(db, body.seeker_id, body.job_id, admin)
 
 
 @router.patch("/applications/{app_id}/status", response_model=AdminApplicationListItem)
@@ -148,6 +222,7 @@ async def update_application_status(
         db,
         app_id,
         str(status),
+        admin,
         rejection_reason=body.get("rejection_reason"),
     )
 
@@ -159,8 +234,10 @@ async def list_interviews(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     search: Optional[str] = None,
+    created_from: Optional[str] = Query(None, description="Scheduled from YYYY-MM-DD"),
+    created_to: Optional[str] = Query(None, description="Scheduled to YYYY-MM-DD"),
 ):
-    return await ctrl_list_interviews(db, page, page_size, search)
+    return await ctrl_list_interviews(db, page, page_size, search, created_from, created_to)
 
 
 @router.get("/assessments", response_model=AdminAssessmentListResponse)
@@ -211,8 +288,13 @@ async def list_seekers(
     search: Optional[str] = None, industry: Optional[str] = Query(None),
     status: Optional[str] = Query(None), job_fair_id: Optional[str] = Query(None),
     sort_by: Optional[str] = Query(None), sort_dir: Optional[str] = Query(None),
+    created_from: Optional[str] = Query(None, description="Registered from YYYY-MM-DD"),
+    created_to: Optional[str] = Query(None, description="Registered to YYYY-MM-DD"),
 ):
-    return await ctrl_list_seekers(db, page, page_size, search, industry, status, job_fair_id, sort_by, sort_dir)
+    return await ctrl_list_seekers(
+        db, page, page_size, search, industry, status, job_fair_id, sort_by, sort_dir,
+        created_from, created_to,
+    )
 
 
 @router.get("/seekers/industries", response_model=List[str])
@@ -271,8 +353,13 @@ async def list_providers(
     page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
     search: Optional[str] = None, status: Optional[str] = Query(None),
     sort_by: Optional[str] = Query(None), sort_dir: Optional[str] = Query(None),
+    created_from: Optional[str] = Query(None, description="Registered from YYYY-MM-DD"),
+    created_to: Optional[str] = Query(None, description="Registered to YYYY-MM-DD"),
+    has_active_job: Optional[bool] = Query(None, description="Only providers with at least one active job"),
 ):
-    return await ctrl_list_providers(db, page, page_size, search, status, sort_by, sort_dir)
+    return await ctrl_list_providers(
+        db, page, page_size, search, status, sort_by, sort_dir, created_from, created_to, has_active_job
+    )
 
 
 @router.post("/providers", response_model=AdminUserOut, status_code=201)
@@ -293,6 +380,14 @@ async def export_providers(
 async def bulk_import_providers(admin: User = Depends(require_super_admin_or_permission("job_providers")), file: UploadFile = File(...)):
     content = await file.read()
     return await ctrl_bulk_import_providers(content, file.filename)
+
+
+@router.post("/providers/company-lookup", response_model=CompanyLookupResponse)
+async def lookup_provider_company(
+    body: CompanyLookupRequest,
+    admin: User = Depends(require_super_admin_or_permission("job_providers")),
+):
+    return await ctrl_admin_lookup_company(body)
 
 
 @router.get("/providers/{user_id}", response_model=AdminUserOut)
@@ -331,6 +426,56 @@ async def delete_provider(user_id: str, admin: User = Depends(require_super_admi
 @router.patch("/providers/{user_id}/password", response_model=AdminUserOut)
 async def set_provider_password(user_id: str, body: AdminSetPasswordRequest, admin: User = Depends(require_super_admin_or_permission("job_providers")), db: AsyncSession = Depends(get_db)):
     return await ctrl_set_provider_password(user_id, body, db)
+
+
+@router.post("/providers/{user_id}/profile-pic", response_model=AdminUserOut)
+async def upload_provider_logo(
+    user_id: str,
+    file: UploadFile = File(...),
+    admin: User = Depends(require_super_admin_or_permission("job_providers")),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_upload_provider_profile_pic(user_id, file, db)
+
+
+@router.get("/providers/{user_id}/company", response_model=CompanyProfileOut)
+async def get_provider_company(
+    user_id: str,
+    admin: User = Depends(require_super_admin_or_permission("job_providers")),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_get_provider_company(user_id, db)
+
+
+@router.post("/providers/{user_id}/company/apply-lookup", response_model=CompanyProfileOut)
+async def apply_provider_company_lookup(
+    user_id: str,
+    body: CompanyApplyLookupRequest,
+    admin: User = Depends(require_super_admin_or_permission("job_providers")),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_admin_apply_company_lookup(user_id, body, db)
+
+
+@router.post("/providers/{user_id}/company/gallery", response_model=CompanyProfileOut)
+async def upload_provider_gallery(
+    user_id: str,
+    file: UploadFile = File(...),
+    caption: Optional[str] = Form(None),
+    admin: User = Depends(require_super_admin_or_permission("job_providers")),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_upload_provider_gallery(user_id, file, db, caption)
+
+
+@router.delete("/providers/{user_id}/company/gallery/{image_id}", response_model=CompanyProfileOut)
+async def delete_provider_gallery(
+    user_id: str,
+    image_id: str,
+    admin: User = Depends(require_super_admin_or_permission("job_providers")),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_delete_provider_gallery(user_id, image_id, db)
 
 
 @router.get("/auth-settings")

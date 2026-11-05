@@ -25,7 +25,50 @@ from app.modules.jobs_portal.services.portfolio_service import calculate_complet
 
 ALLOWED_VIDEO_EXT = {".mp4", ".webm", ".mov", ".avi"}
 ALLOWED_AUDIO_EXT = {".mp3", ".wav", ".ogg", ".m4a", ".webm"}
+ALLOWED_VIDEO_MIME = {"video/webm", "video/mp4", "video/quicktime", "video/x-msvideo"}
+ALLOWED_AUDIO_MIME = {"audio/webm", "audio/mp4", "audio/mpeg", "audio/wav", "audio/x-wav", "audio/ogg"}
 MAX_MEDIA_MB = 50
+
+
+def _resolve_upload_ext(
+    media_type: str,
+    filename: Optional[str],
+    content_type: Optional[str],
+) -> str:
+    allowed = ALLOWED_VIDEO_EXT if media_type == "video" else ALLOWED_AUDIO_EXT
+    ext = Path(filename or "media").suffix.lower()
+    if ext in allowed:
+        return ext
+
+    mime = (content_type or "").split(";")[0].strip().lower()
+    mime_map = {
+        "video/webm": ".webm",
+        "video/mp4": ".mp4",
+        "video/quicktime": ".mov",
+        "video/x-msvideo": ".avi",
+        "audio/webm": ".webm",
+        "audio/mp4": ".m4a",
+        "audio/mpeg": ".mp3",
+        "audio/wav": ".wav",
+        "audio/x-wav": ".wav",
+        "audio/ogg": ".ogg",
+    }
+    mapped = mime_map.get(mime)
+    if mapped and mapped in allowed:
+        return mapped
+
+    allowed_mime = ALLOWED_VIDEO_MIME if media_type == "video" else ALLOWED_AUDIO_MIME
+    label = "MP4 or WebM" if media_type == "video" else "MP3, WebM, WAV, or OGG"
+    hint = ext or mime or "unknown type"
+    if mime and mime not in allowed_mime:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported {media_type} format ({hint}). Please upload or record {label}.",
+        )
+    raise HTTPException(
+        status_code=400,
+        detail=f"Could not detect {media_type} format ({hint}). Please use a file named .webm or .mp4, or record again.",
+    )
 
 
 def _calculate_completion(portfolio: Portfolio, user: User) -> tuple[int, list, list]:
@@ -137,8 +180,25 @@ async def get_my_portfolio(user: User, db: AsyncSession) -> dict:
 async def update_my_portfolio(body: PortfolioUpdate, background_tasks: BackgroundTasks, user: User, db: AsyncSession) -> dict:
     portfolio = await _get_or_create_portfolio(user, db)
     update_data = body.model_dump(exclude_unset=True)
+    # Email changes require a dedicated verified flow — never via portfolio autosave.
+    update_data.pop("email", None)
+
+    new_phone = update_data.pop("phone", None)
+    if new_phone is not None:
+        phone = str(new_phone).strip()
+        digits = "".join(ch for ch in phone if ch.isdigit())
+        if digits.startswith("91") and len(digits) > 10:
+            digits = digits[-10:]
+        if digits and (len(digits) != 10 or digits[0] not in "6789"):
+            raise HTTPException(status_code=400, detail="Enter a valid 10-digit mobile number")
+        if digits and digits != (user.phone or ""):
+            taken = await db.execute(select(User.id).where(User.phone == digits, User.id != user.id).limit(1))
+            if taken.scalar_one_or_none():
+                raise HTTPException(status_code=400, detail="This mobile number is already in use")
+            user.phone = digits
+
     for key, value in update_data.items():
-        if key in ("first_name", "last_name", "email", "industry", "job_role"):
+        if key in ("first_name", "last_name", "industry", "job_role"):
             setattr(user, key, value)
         elif key in ("skills", "work_experiences", "education", "certifications", "languages", "projects"):
             setattr(portfolio, key, [item.model_dump() if hasattr(item, "model_dump") else item for item in value] if value else value)
@@ -150,6 +210,55 @@ async def update_my_portfolio(body: PortfolioUpdate, background_tasks: Backgroun
     from app.shared.services.celery_tasks import invalidate_seeker_matches_task
     invalidate_seeker_matches_task.delay(str(user.id))
     return _portfolio_to_out(portfolio, user)
+
+
+ALLOWED_CERT_EXT = {".pdf", ".jpg", ".jpeg", ".png", ".webp"}
+ALLOWED_CERT_MIME = {
+    "application/pdf",
+    "image/jpeg",
+    "image/jpg",
+    "image/png",
+    "image/webp",
+}
+MAX_CERT_MB = 10
+
+
+async def upload_certification_file(file: UploadFile, user: User) -> dict:
+    """Store a certificate PDF/image under uploads and return a public /uploads/... URL."""
+    ext = Path(file.filename or "certificate").suffix.lower()
+    mime = (file.content_type or "").split(";")[0].strip().lower()
+    if ext not in ALLOWED_CERT_EXT and mime not in ALLOWED_CERT_MIME:
+        raise HTTPException(
+            status_code=400,
+            detail="Upload a PDF or image file (JPG, PNG, or WebP).",
+        )
+    if ext not in ALLOWED_CERT_EXT:
+        mime_ext = {
+            "application/pdf": ".pdf",
+            "image/jpeg": ".jpg",
+            "image/jpg": ".jpg",
+            "image/png": ".png",
+            "image/webp": ".webp",
+        }.get(mime, ".pdf")
+        ext = mime_ext
+
+    content = await file.read()
+    size_mb = len(content) / (1024 * 1024)
+    if size_mb > MAX_CERT_MB:
+        raise HTTPException(status_code=413, detail=f"File too large. Max {MAX_CERT_MB}MB.")
+
+    upload_dir = get_upload_dir()
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = f"cert_{user.id}_{uuid.uuid4().hex}{ext}"
+    file_path = upload_dir / safe_name
+    with open(file_path, "wb") as f:
+        f.write(content)
+
+    original = (file.filename or f"certificate{ext}").strip() or f"certificate{ext}"
+    return {
+        "file_url": f"/uploads/{safe_name}",
+        "file_name": Path(original).name[:200],
+    }
 
 
 async def get_completion(user: User, db: AsyncSession) -> dict:
@@ -462,10 +571,10 @@ async def search_candidates(
 async def upload_media(media_type: str, file: UploadFile, user: User, db: AsyncSession) -> dict:
     if media_type not in ("video", "audio"):
         raise HTTPException(status_code=400, detail="media_type must be 'video' or 'audio'")
-    ext = Path(file.filename or "media").suffix.lower()
-    allowed = ALLOWED_VIDEO_EXT if media_type == "video" else ALLOWED_AUDIO_EXT
-    if ext not in allowed:
-        raise HTTPException(status_code=400, detail=f"Unsupported {media_type} format. Allowed: {', '.join(allowed)}")
+    ext = _resolve_upload_ext(media_type, file.filename, file.content_type)
+    stored_filename = (file.filename or "").strip()
+    if not Path(stored_filename).suffix:
+        stored_filename = f"intro_{media_type}{ext}"
     content = await file.read()
     size_mb = len(content) / (1024 * 1024)
     if size_mb > MAX_MEDIA_MB:
@@ -480,12 +589,12 @@ async def upload_media(media_type: str, file: UploadFile, user: User, db: AsyncS
         if portfolio.intro_video_path and os.path.exists(portfolio.intro_video_path):
             os.remove(portfolio.intro_video_path)
         portfolio.intro_video_path = str(file_path)
-        portfolio.intro_video_filename = file.filename
+        portfolio.intro_video_filename = stored_filename
     else:
         if portfolio.intro_audio_path and os.path.exists(portfolio.intro_audio_path):
             os.remove(portfolio.intro_audio_path)
         portfolio.intro_audio_path = str(file_path)
-        portfolio.intro_audio_filename = file.filename
+        portfolio.intro_audio_filename = stored_filename
     await db.commit()
     await db.refresh(portfolio)
     return _portfolio_to_out(portfolio, user)

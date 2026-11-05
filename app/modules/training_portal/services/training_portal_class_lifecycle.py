@@ -27,12 +27,12 @@ from app.modules.training_portal.models.training_portal_course import TrainingPo
 from app.modules.training_portal.models.training_portal_enrollment import TrainingPortalEnrollment
 from app.modules.training_portal.models.training_portal_leave_request import TrainingPortalLeaveRequest
 from app.modules.training_portal.models.training_portal_teacher import TrainingPortalTeacher
+from app.modules.training_portal.services.enrollment_access import has_learning_access
 from app.modules.training_portal.services.training_portal_class_live import (
     effective_live_status,
     now_ist,
     pending_reminder_tier,
     session_end_datetime,
-    session_live_applies_to_date,
     session_occurs_on_date,
     today_ist,
 )
@@ -112,17 +112,9 @@ async def notify_class_reminder(
     target: date,
     tier: int = 30,
 ) -> None:
-    if tier == 30:
-        if session.reminder_sent:
-            return
-        session.reminder_sent = True
-    elif tier == 15:
-        if session.reminder_15_sent:
-            return
-        session.reminder_15_sent = True
-    else:
+    """Create in-app start reminders. Caller must claim reminder flags first."""
+    if tier not in (30, 15):
         return
-    session.updated_at = datetime.utcnow()
 
     time_label = f"{session.start_time} – {session.end_time}"
     venue = session.venue or (batch.venue if batch else "TBA")
@@ -149,10 +141,14 @@ async def notify_class_reminder(
         enrollments_result = await db.execute(
             select(TrainingPortalEnrollment).where(
                 TrainingPortalEnrollment.batch_id == batch.id,
-                TrainingPortalEnrollment.status != "dropped",
+                TrainingPortalEnrollment.status.notin_(["dropped", "absconded"]),
             )
         )
         for enrollment in enrollments_result.scalars().all():
+            # Only students who have unlocked learning access (paid / EMI / free)
+            # and are on this batch schedule — not token-only or unpaid pending.
+            if not enrollment.batch_id or not has_learning_access(enrollment):
+                continue
             db.add(
                 TrainingPortalCandidateNotification(
                     id=str(uuid.uuid4()),
@@ -403,22 +399,48 @@ async def process_session_start_reminders(
     session: TrainingPortalClassSession,
     target: date,
     now: Optional[datetime] = None,
-) -> None:
+) -> Optional[int]:
+    """Send at most one 30-min and one 15-min start reminder per scheduled day.
+
+    Flags are day-scoped via start_reminder_for_date (see sync_start_reminder_day).
+    Do NOT reset flags based on live_occurrence_date — that caused duplicate
+    notifications every Celery /today poll before the class started.
+
+    Returns the tier that was sent (30 or 15), or None.
+    """
     now = now or now_ist()
     if not session_occurs_on_date(session, target):
-        return
-    if not session_live_applies_to_date(session, target):
-        if session.reminder_sent or session.reminder_15_sent or getattr(session, "end_reminder_sent", False):
-            session.reminder_sent = False
-            session.reminder_15_sent = False
-            session.end_reminder_sent = False
-            session.updated_at = now
+        return None
 
-    tier = pending_reminder_tier(session, now, target)
+    # Lock the row so Celery Beat + GET /class-sessions/today cannot double-send.
+    locked = await db.execute(
+        select(TrainingPortalClassSession)
+        .where(TrainingPortalClassSession.id == session.id)
+        .with_for_update()
+    )
+    locked_session = locked.scalar_one_or_none() or session
+
+    tier = pending_reminder_tier(locked_session, now, target)
     if not tier:
-        return
-    batch = await _load_batch(db, session.batch_id)
-    await notify_class_reminder(db, session, batch, target, tier)
+        return None
+
+    # Claim the tier before writing notifications (idempotent within the lock).
+    if tier == 30:
+        if locked_session.reminder_sent:
+            return None
+        locked_session.reminder_sent = True
+    elif tier == 15:
+        if locked_session.reminder_15_sent:
+            return None
+        locked_session.reminder_15_sent = True
+    else:
+        return None
+    locked_session.updated_at = datetime.utcnow()
+    await db.flush()
+
+    batch = await _load_batch(db, locked_session.batch_id)
+    await notify_class_reminder(db, locked_session, batch, target, tier)
+    return tier
 
 
 async def process_todays_session_lifecycle(
@@ -473,10 +495,8 @@ async def process_all_class_lifecycles(db: AsyncSession) -> dict[str, int]:
     for session in today_result.scalars().all():
         if not session_occurs_on_date(session, today):
             continue
-        before_30 = bool(session.reminder_sent)
-        before_15 = bool(session.reminder_15_sent)
-        await process_session_start_reminders(db, session, today, now)
-        if (not before_30 and session.reminder_sent) or (not before_15 and session.reminder_15_sent):
+        sent_tier = await process_session_start_reminders(db, session, today, now)
+        if sent_tier:
             start_reminders += 1
 
     await db.flush()
@@ -512,8 +532,15 @@ async def process_expired_token_visits(db: AsyncSession) -> dict[str, int]:
     expired = list(result.scalars().all())
 
     for enrollment in expired:
+        # Free seat capacity without deleting fee/token payment history.
+        # Inline (not a separate module import) so app boot never depends on a new file.
         enrollment.token_expired = True
         enrollment.updated_at = now
+        if enrollment.batch_id:
+            note = "Seat released after venue-visit deadline expiry (fee/token history retained)."
+            existing = (enrollment.notes or "").strip()
+            enrollment.notes = f"{existing} | {note}".strip(" |") if existing else note
+            enrollment.batch_id = None
         db.add(
             TrainingPortalCandidateNotification(
                 id=str(uuid.uuid4()),

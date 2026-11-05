@@ -311,6 +311,30 @@ async def resend_otp(
     return {"message": "OTP resent successfully. Code is valid for 5 minutes."}
 
 
+def _utc_now_naive() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _normalize_db_datetime(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
+
+
+async def _clear_expired_login_lock(db: AsyncSession, user: User) -> None:
+    """Drop stale lockout after TTL; avoids naive/aware datetime comparison bugs."""
+    locked_until = _normalize_db_datetime(getattr(user, "locked_until", None))
+    if not locked_until:
+        return
+    now = _utc_now_naive()
+    if locked_until <= now:
+        user.locked_until = None
+        user.failed_login_attempts = 0
+        await db.flush()
+
+
 async def login(
     body: LoginRequest,
     background_tasks: BackgroundTasks,
@@ -344,9 +368,11 @@ async def login(
                 status_code=400, detail={"email": "No account found with this email or username"}
             )
 
-        locked_until = getattr(user, "locked_until", None)
-        if locked_until and locked_until > datetime.utcnow():
-            minutes = max(1, int((locked_until - datetime.utcnow()).total_seconds() // 60))
+        await _clear_expired_login_lock(db, user)
+        locked_until = _normalize_db_datetime(getattr(user, "locked_until", None))
+        now = _utc_now_naive()
+        if locked_until and locked_until > now:
+            minutes = max(1, int((locked_until - now).total_seconds() // 60) + 1)
             raise HTTPException(
                 status_code=400,
                 detail={"general": f"Too many attempts, try again in {minutes} minutes"},
@@ -410,7 +436,7 @@ async def login(
             user.failed_login_attempts = attempts
             status = "failed"
             if attempts >= 5:
-                user.locked_until = datetime.utcnow() + timedelta(minutes=15)
+                user.locked_until = _utc_now_naive() + timedelta(minutes=15)
                 status = "blocked"
             from app.shared.services.auth_session_service import log_login_attempt
 

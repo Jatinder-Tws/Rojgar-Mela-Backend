@@ -40,6 +40,9 @@ class TrainingPortalClassSession(Base):
     attachment_filename = Column(String(255), nullable=True)
     reminder_sent = Column(Boolean, nullable=False, default=False)
     reminder_15_sent = Column(Boolean, nullable=False, default=False)
+    # Calendar day (YYYY-MM-DD, IST) that reminder_sent / reminder_15_sent apply to.
+    # Recurring sessions reset flags when this date rolls forward — never mid-day.
+    start_reminder_for_date = Column(String(50), nullable=True)
     late_start_reason = Column(Text, nullable=True)
     early_end_reason = Column(Text, nullable=True)
     attendance_marked = Column(Boolean, nullable=False, default=False)

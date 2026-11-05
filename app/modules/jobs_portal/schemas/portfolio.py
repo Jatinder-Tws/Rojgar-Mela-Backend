@@ -30,6 +30,13 @@ class CertificationItem(BaseModel):
     issuer: Optional[str] = None
     date: Optional[str] = None
     url: Optional[str] = None
+    file_url: Optional[str] = None
+    file_name: Optional[str] = None
+
+
+class CertificationFileOut(BaseModel):
+    file_url: str
+    file_name: str
 
 
 class LanguageItem(BaseModel):
@@ -63,6 +70,7 @@ class PortfolioUpdate(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     email: Optional[str] = None
+    phone: Optional[str] = None
     industry: Optional[str] = None
     job_role: Optional[str] = None
 

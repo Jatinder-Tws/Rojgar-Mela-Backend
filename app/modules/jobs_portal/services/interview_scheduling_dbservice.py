@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Tuple
 from sqlalchemy import delete, select, or_
@@ -17,6 +18,8 @@ from app.shared.models.notification import NotificationType
 from app.shared.services.notification_service import create_notification
 from app.modules.jobs_portal.schemas.interviews import InterviewCreate, InterviewOut, InterviewOutcomeUpdate
 from app.modules.jobs_portal.schemas.interview_scheduling import ProviderInterviewSettingsUpdate
+
+logger = logging.getLogger(__name__)
 
 
 def _utc_now_naive() -> datetime:
@@ -184,44 +187,55 @@ async def create_interview(
         if application:
             application.status = ApplicationStatus.interviewing
     
-    # Notify seeker
+    await db.commit()
+    await db.refresh(interview)
+
     await create_notification(
         db=db,
         user_id=body.seeker_id,
         type=NotificationType.match,
         title="Interview Scheduled",
-        message=f"{provider.first_name} has scheduled an interview for '{job.title}'. Open your dashboard to see the date and time in your timezone.",
+        message=(
+            f"{provider.first_name} has scheduled an interview for '{job.title}'. "
+            "Open your dashboard to see the date and time in your timezone."
+        ),
         related_job_id=body.job_id,
-        related_user_id=str(provider.id)
+        related_user_id=str(provider.id),
+        auto_commit=True,
     )
 
-    await db.commit()
-    await db.refresh(interview)
-    
-    # Enrichment for response
-    seeker_result = await db.execute(select(User.first_name, User.last_name, User.email).where(User.id == body.seeker_id))
+    seeker_result = await db.execute(
+        select(User.first_name, User.last_name, User.email).where(User.id == body.seeker_id)
+    )
     seeker_data = seeker_result.first()
-    s_fn, s_ln, s_email = (seeker_data.first_name, seeker_data.last_name, seeker_data.email) if seeker_data else ("Unknown", "User", None)
-    
-    # Send email notification to seeker
+    s_fn, s_ln, s_email = (
+        (seeker_data.first_name, seeker_data.last_name, seeker_data.email)
+        if seeker_data
+        else ("Unknown", "User", None)
+    )
+
     if s_email:
         try:
             from app.shared.services.celery_tasks import queue_interview_scheduled_email
+
             queue_interview_scheduled_email(
                 to_email=s_email,
                 seeker_name=s_fn or "there",
                 job_title=job.title,
-                company_name=provider.company_name or f"{provider.first_name or ''} {provider.last_name or ''}".strip(),
-                scheduled_at=scheduled_at.isoformat() if hasattr(scheduled_at, "isoformat") else str(scheduled_at),
-                interview_type=body.interview_type,
+                company_name=provider.company_name
+                or f"{provider.first_name or ''} {provider.last_name or ''}".strip(),
+                scheduled_at=scheduled_at.isoformat()
+                if hasattr(scheduled_at, "isoformat")
+                else str(scheduled_at),
+                interview_type=body.interview_type or "video",
                 meeting_link=body.meeting_link,
                 location=body.location,
                 agenda=body.agenda,
                 scheduled_period=body.scheduled_period,
                 interviewer_name=body.interviewer_name,
             )
-        except Exception as exc:
-            logger.warning(f"Failed to queue interview email: {exc}")
+        except Exception:
+            logger.exception("Failed to queue interview scheduled email to %s", s_email)
 
     res = InterviewOut.model_validate(interview)
     res.job_title = job.title
@@ -289,12 +303,14 @@ async def record_interview_outcome(
                 outcome_title = "Congratulations:"
                 outcome_msg = f"You have been selected after your interview for '{interview.title}'."
                 notif_type = NotificationType.shortlisted
+                outcome_email_title = "Congratulations — You're Selected"
             else:
                 application.status = ApplicationStatus.rejected
                 application.rejection_reason = body.notes or "Not selected after interview"
                 outcome_title = "Interview Outcome Update:"
                 outcome_msg = f"Thank you for interviewing. Unfortunately you were not selected for '{interview.title}'."
                 notif_type = NotificationType.rejected
+                outcome_email_title = "Interview Outcome Update"
 
             await create_notification(
                 db=db,
@@ -305,6 +321,19 @@ async def record_interview_outcome(
                 related_job_id=str(interview.job_id),
                 related_user_id=str(provider.id),
             )
+            seeker_email_res = await db.execute(
+                select(User.email, User.first_name).where(User.id == interview.seeker_id)
+            )
+            seeker_email_row = seeker_email_res.first()
+            if seeker_email_row and seeker_email_row.email:
+                from app.shared.services.notification_service import queue_notification_email
+
+                queue_notification_email(
+                    seeker_email_row.email,
+                    outcome_email_title,
+                    outcome_msg,
+                    seeker_email_row.first_name or "there",
+                )
 
     await db.commit()
     await db.refresh(interview)

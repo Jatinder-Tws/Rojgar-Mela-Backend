@@ -8,6 +8,7 @@ from app.core.dependencies import require_seeker
 from app.modules.jobs_portal.controllers.ai_coach_controller import (
     start_coach_session as ctrl_start_coach_session,
     start_live_coach_session as ctrl_start_live_coach_session,
+    start_speak_coach_session as ctrl_start_speak_coach_session,
     respond_to_coach as ctrl_respond_to_coach,
     get_coach_result as ctrl_get_coach_result,
     get_my_coach_sessions as ctrl_get_my_coach_sessions,
@@ -16,6 +17,7 @@ from app.modules.jobs_portal.controllers.ai_coach_controller import (
     create_credit_order as ctrl_create_credit_order,
     verify_credit_order as ctrl_verify_credit_order,
     get_active_room_session as ctrl_get_active_room_session,
+    expire_coach_session as ctrl_expire_coach_session,
 )
 
 router = APIRouter(prefix="/ai-coach", tags=["AI Coach"])
@@ -78,6 +80,17 @@ async def start_coach_session(
     return await ctrl_start_coach_session(target_role, experience_level, focus_area, user, db)
 
 
+@router.post("/start-speak")
+async def start_speak_coach_session(
+    target_role: str = Body(...),
+    experience_level: str = Body(...),
+    focus_area: str = Body("General"),
+    user: User = Depends(require_seeker),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_start_speak_coach_session(target_role, experience_level, focus_area, user, db)
+
+
 @router.post("/start-live")
 async def start_live_coach_session(
     target_role: str = Body(...),
@@ -123,4 +136,13 @@ async def get_active_room_session(
     db: AsyncSession = Depends(get_db),
 ):
     return await ctrl_get_active_room_session(session_id, user, db)
+
+
+@router.post("/session/expire")
+async def expire_coach_session(
+    session_id: str = Body(..., embed=True),
+    user: User = Depends(require_seeker),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_expire_coach_session(session_id, user, db)
 

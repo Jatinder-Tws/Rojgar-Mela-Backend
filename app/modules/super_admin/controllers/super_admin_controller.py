@@ -4,11 +4,38 @@ Super Admin controller – business logic from routers/super_admin.py
 import asyncio
 import csv
 import io
+import logging
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Optional, List, Tuple
 
-from fastapi import HTTPException
+logger = logging.getLogger(__name__)
+
+# Calendar-day filters from the admin UI are IST; stored timestamps are naive UTC.
+_IST_OFFSET = timedelta(hours=5, minutes=30)
+
+
+def _parse_ymd(value: Optional[str]) -> Optional[date]:
+    if not value or not str(value).strip():
+        return None
+    try:
+        return datetime.strptime(str(value).strip()[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _created_range_filters(column, created_from: Optional[str], created_to: Optional[str]) -> list:
+    """Inclusive calendar-day range on a UTC-naive timestamp column (IST picker days)."""
+    filters = []
+    start_day = _parse_ymd(created_from)
+    end_day = _parse_ymd(created_to)
+    if start_day:
+        filters.append(column >= datetime.combine(start_day, time.min) - _IST_OFFSET)
+    if end_day:
+        filters.append(column <= datetime.combine(end_day, time.max) - _IST_OFFSET)
+    return filters
+
+from fastapi import BackgroundTasks, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy import and_, delete as sql_delete, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,10 +54,15 @@ from app.modules.jobs_portal.models.portfolio import Portfolio
 from app.modules.jobs_portal.models.resume import Resume
 from app.modules.jobs_portal.models.roadmap import Milestone, Resource, Roadmap
 from app.shared.models.user import CompanyType, JobType, User, UserRole
+from app.modules.jobs_portal.controllers.jobs_controller import create_job_for_provider
+from app.modules.jobs_portal.schemas.jobs import JobCreate
 from app.modules.super_admin.schemas.super_admin import (
+    AdminJobCreate,
+    AdminJobProviderOption,
+    AdminJobProviderOptionsResponse,
     AdminApplicationListItem, AdminApplicationListResponse, AdminAssessmentListItem,
     AdminAssessmentListResponse, AdminInterviewListItem, AdminInterviewListResponse,
-    AdminJobListItem, AdminJobListResponse, AdminMatchListItem, AdminMatchListResponse,
+    AdminJobDetailResponse, AdminJobListItem, AdminJobListResponse, AdminMatchListItem, AdminMatchListResponse,
     AdminProviderCreate, AdminProviderUpdate, AdminSeekerCreate, AdminSeekerUpdate,
     AdminSetPasswordRequest, AdminUserExportRequest, AdminUserListResponse, AdminUserOut,
     BulkImportJobStarted, DashboardAnalyticsResponse, DetailedPlatformAnalytics, ImportJobStatus,
@@ -39,7 +71,7 @@ from app.modules.super_admin.schemas.super_admin import (
 )
 from app.modules.super_admin.schemas.super_admin_detail import (
     AdminProviderDetailResponse, AdminSeekerDetailResponse,
-    ProviderJobItem, SeekerApplicationItem,
+    ProviderApplicationItem, ProviderJobItem, SeekerApplicationItem,
     ProviderInterviewItem, SeekerInterviewItem,
 )
 from app.core.dependencies import create_access_token, create_refresh_token, hash_password, verify_password, async_hash_password, async_verify_password
@@ -243,7 +275,17 @@ def _user_to_admin_out(
         job_role=user.job_role,
         job_type=job_type, salary_range=user.salary_range, experience=user.experience,
         company_name=user.company_name, company_type=company_type, company_location=user.company_location,
-        company_size=user.company_size, profile_completion_percentage=profile_completion_percentage,
+        company_size=user.company_size,
+        company_address=user.company_address,
+        company_website=user.company_website,
+        company_about=user.company_about,
+        company_rating=user.company_rating,
+        company_review_count=user.company_review_count,
+        company_reviews=user.company_reviews if isinstance(user.company_reviews, list) else None,
+        company_rating_source=user.company_rating_source,
+        google_place_id=user.google_place_id,
+        google_maps_url=user.google_maps_url,
+        profile_completion_percentage=profile_completion_percentage,
         welcome_email_status=user.welcome_email_status, welcome_email_error=user.welcome_email_error,
         has_resume=has_resume, created_at=user.created_at,
         last_active_at=resolved_last_active,
@@ -353,14 +395,30 @@ async def _apply_user_update(db: AsyncSession, user: User, body):
         user.onboarding_complete = data["onboarding_complete"]
 
 
-def _start_background_import(job_id: str, content: bytes, role: UserRole) -> None:
+def _start_background_import(
+    job_id: str, content: bytes, role: UserRole, filename: str = ""
+) -> None:
     import os
     from app.core.config import get_upload_dir
+    from app.modules.super_admin.services.import_job_store import update_job
     from app.shared.services.celery_tasks import process_bulk_candidate_import_task
+
+    original_name = (filename or "import.csv").strip() or "import.csv"
+    ext = os.path.splitext(original_name)[1].lower()
+    if ext not in {".csv", ".xlsx", ".xls", ".txt"}:
+        # Detect Excel by magic bytes when the browser omitted a useful extension.
+        if content[:8] == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":
+            ext = ".xls"
+        elif len(content) > 4 and content[:2] == b"PK":
+            ext = ".xlsx"
+        else:
+            ext = ".csv"
+
+    update_job(job_id, filename=original_name)
 
     temp_dir = get_upload_dir() / "temp_imports"
     os.makedirs(temp_dir, exist_ok=True)
-    tmp_path = str(temp_dir / f"import_{job_id}.csv")
+    tmp_path = str(temp_dir / f"import_{job_id}{ext}")
     with open(tmp_path, "wb") as f:
         f.write(content)
 
@@ -450,6 +508,9 @@ async def list_platform_jobs(
     search: Optional[str] = None,
     industry: Optional[str] = None,
     is_active: Optional[bool] = None,
+    provider_id: Optional[str] = None,
+    created_from: Optional[str] = None,
+    created_to: Optional[str] = None,
 ) -> AdminJobListResponse:
     base = (
         select(JobPosting, User)
@@ -465,6 +526,9 @@ async def list_platform_jobs(
         filters.append(JobPosting.industry.ilike(f"%{industry.strip()}%"))
     if is_active is not None:
         filters.append(JobPosting.is_active.is_(is_active))
+    if provider_id and provider_id.strip():
+        filters.append(JobPosting.provider_id == provider_id.strip())
+    filters.extend(_created_range_filters(JobPosting.created_at, created_from, created_to))
 
     if filters:
         base = base.where(and_(*filters))
@@ -473,6 +537,17 @@ async def list_platform_jobs(
     total = await db.scalar(count_q) or 0
     offset = (page - 1) * page_size
     rows = (await db.execute(base.order_by(JobPosting.created_at.desc()).offset(offset).limit(page_size))).all()
+    job_ids = [job.id for job, _ in rows]
+    application_counts: dict = {}
+    if job_ids:
+        app_count_rows = (
+            await db.execute(
+                select(Application.job_id, func.count(Application.id))
+                .where(Application.job_id.in_(job_ids))
+                .group_by(Application.job_id)
+            )
+        ).all()
+        application_counts = {job_id: int(count or 0) for job_id, count in app_count_rows}
     items = [
         AdminJobListItem(
             id=str(job.id),
@@ -480,6 +555,8 @@ async def list_platform_jobs(
             company=user.company_name or _user_display_name(user, "Provider"),
             industry=job.industry,
             location=job.location,
+            post_count=int(job.post_count or 0),
+            application_count=int(application_counts.get(job.id, 0)),
             is_active=bool(job.is_active),
             created_at=job.created_at,
         )
@@ -488,8 +565,170 @@ async def list_platform_jobs(
     return AdminJobListResponse(items=items, total=int(total), page=page, page_size=page_size)
 
 
+async def get_platform_job(db: AsyncSession, job_id: str) -> AdminJobDetailResponse:
+    result = await db.execute(
+        select(JobPosting, User)
+        .join(User, JobPosting.provider_id == User.id)
+        .where(JobPosting.id == job_id)
+    )
+    row = result.first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job, provider = row
+
+    status_rows = (
+        await db.execute(
+            select(Application.status, func.count(Application.id))
+            .where(Application.job_id == job.id)
+            .group_by(Application.status)
+        )
+    ).all()
+    applications_by_status: dict = {}
+    application_count = 0
+    for status, count in status_rows:
+        key = str(status.value if hasattr(status, "value") else status)
+        n = int(count or 0)
+        applications_by_status[key] = n
+        application_count += n
+
+    match_count = int(
+        await db.scalar(select(func.count(Match.id)).where(Match.job_id == job.id)) or 0
+    )
+
+    job_type = job.job_type.value if job.job_type and hasattr(job.job_type, "value") else job.job_type
+    required_skills = job.required_skills if isinstance(job.required_skills, list) else []
+    perks = job.perks if isinstance(job.perks, list) else []
+    posting_details = job.posting_details if isinstance(job.posting_details, dict) else None
+
+    return AdminJobDetailResponse(
+        id=str(job.id),
+        provider_id=str(job.provider_id),
+        title=job.title,
+        description=job.description or "",
+        required_skills=required_skills,
+        experience_required=job.experience_required,
+        job_type=job_type,
+        salary_range=job.salary_range,
+        industry=job.industry,
+        posted_by_name=job.posted_by_name,
+        location=job.location,
+        is_active=bool(job.is_active),
+        post_count=int(job.post_count or 0),
+        ai_interview_enabled=bool(job.ai_interview_enabled),
+        selection_threshold=int(job.selection_threshold or 70),
+        shift=job.shift,
+        employment_type=job.employment_type,
+        perks=perks,
+        posting_details=posting_details,
+        source_platform=job.source_platform,
+        external_apply_url=job.external_apply_url,
+        created_at=job.created_at,
+        updated_at=job.updated_at,
+        company=provider.company_name or _user_display_name(provider, "Provider"),
+        provider_email=provider.email,
+        provider_phone=provider.phone,
+        company_location=provider.company_location,
+        company_address=provider.company_address,
+        company_size=provider.company_size,
+        company_website=provider.company_website,
+        company_logo_url=provider.profile_pic_url,
+        application_count=application_count,
+        applications_by_status=applications_by_status,
+        match_count=match_count,
+    )
+
+
+async def list_job_provider_options(
+    db: AsyncSession,
+    page: int,
+    page_size: int,
+    search: Optional[str] = None,
+) -> AdminJobProviderOptionsResponse:
+    """Lightweight provider picker for admin/supervisor job creation (jobs permission)."""
+    filters = [User.role == UserRole.provider, User.is_super_admin.is_(False)]
+    if search and search.strip():
+        filters.append(_build_user_search_filter(search.strip(), include_company=True))
+
+    total = await db.scalar(select(func.count(User.id)).where(*filters)) or 0
+    result = await db.execute(
+        select(User)
+        .where(*filters)
+        .order_by(User.company_name.asc().nulls_last(), User.created_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    users = result.scalars().all()
+    items = [
+        AdminJobProviderOption(
+            id=str(u.id),
+            company_name=u.company_name,
+            first_name=u.first_name,
+            last_name=u.last_name,
+            email=u.email,
+            industry=u.industry,
+            company_location=u.company_location,
+        )
+        for u in users
+    ]
+    return AdminJobProviderOptionsResponse(
+        items=items,
+        total=int(total),
+        page=page,
+        page_size=page_size,
+    )
+
+
+async def create_platform_job(
+    db: AsyncSession,
+    body: AdminJobCreate,
+    admin: User,
+    background_tasks: BackgroundTasks,
+) -> AdminJobDetailResponse:
+    provider = await _get_role_user(db, body.provider_id, UserRole.provider)
+    job_body = JobCreate(
+        title=body.title,
+        description=body.description,
+        required_skills=body.required_skills or [],
+        experience_required=body.experience_required,
+        job_type=body.job_type,
+        salary_range=body.salary_range,
+        industry=body.industry,
+        posted_by_name=body.posted_by_name,
+        location=body.location,
+        post_count=body.post_count,
+        ai_interview_enabled=body.ai_interview_enabled,
+        selection_threshold=body.selection_threshold,
+        shift=body.shift,
+        employment_type=body.employment_type,
+        perks=body.perks or [],
+        posting_details=body.posting_details,
+        is_active=body.is_active,
+    )
+    actor_label = f"{(admin.first_name or '').strip()} {(admin.last_name or '').strip()}".strip() or admin.email
+    company_label = provider.company_name or _user_display_name(provider, "Provider")
+    created = await create_job_for_provider(
+        job_body,
+        background_tasks,
+        provider,
+        admin,
+        db,
+        audit_description=(
+            f"Admin/supervisor ({actor_label}) created job '{body.title.strip()}' "
+            f"for provider '{company_label}'"
+        ),
+    )
+    return await get_platform_job(db, str(created.id))
+
+
 async def list_platform_matches(
-    db: AsyncSession, page: int, page_size: int, search: Optional[str] = None
+    db: AsyncSession,
+    page: int,
+    page_size: int,
+    search: Optional[str] = None,
+    job_id: Optional[str] = None,
+    provider_id: Optional[str] = None,
+    created_from: Optional[str] = None,
+    created_to: Optional[str] = None,
 ) -> AdminMatchListResponse:
     from sqlalchemy.orm import aliased
     Seeker = aliased(User)
@@ -500,33 +739,84 @@ async def list_platform_matches(
         .join(JobPosting, Match.job_id == JobPosting.id)
         .join(Provider, JobPosting.provider_id == Provider.id)
     )
-    if search:
+    count_q = (
+        select(func.count(Match.id))
+        .select_from(Match)
+        .join(Seeker, Match.seeker_id == Seeker.id)
+        .join(JobPosting, Match.job_id == JobPosting.id)
+        .join(Provider, JobPosting.provider_id == Provider.id)
+    )
+
+    filters = []
+    if job_id and job_id.strip():
+        filters.append(Match.job_id == job_id.strip())
+    if provider_id and provider_id.strip():
+        filters.append(JobPosting.provider_id == provider_id.strip())
+    if search and search.strip():
         term = f"%{search.strip()}%"
-        base = base.where(or_(Seeker.first_name.ilike(term), Seeker.last_name.ilike(term), JobPosting.title.ilike(term)))
-    count_q = select(func.count(Match.id)).select_from(Match).join(Seeker, Match.seeker_id == Seeker.id).join(JobPosting, Match.job_id == JobPosting.id)
-    if search:
-        term = f"%{search.strip()}%"
-        count_q = count_q.where(or_(Seeker.first_name.ilike(term), Seeker.last_name.ilike(term), JobPosting.title.ilike(term)))
+        filters.append(
+            or_(
+                Seeker.first_name.ilike(term),
+                Seeker.last_name.ilike(term),
+                Seeker.email.ilike(term),
+                JobPosting.title.ilike(term),
+                Provider.company_name.ilike(term),
+            )
+        )
+    filters.extend(_created_range_filters(Match.created_at, created_from, created_to))
+    if filters:
+        base = base.where(*filters)
+        count_q = count_q.where(*filters)
+
     total = await db.scalar(count_q) or 0
     offset = (page - 1) * page_size
-    rows = (await db.execute(base.order_by(Match.created_at.desc()).offset(offset).limit(page_size))).all()
-    items = [
-        AdminMatchListItem(
-            id=str(match.id),
-            seeker_name=_user_display_name(seeker),
-            seeker_email=seeker.email,
-            job_title=job.title,
-            company=provider.company_name or _user_display_name(provider, "Provider"),
-            score=float(match.score or 0),
-            created_at=match.created_at,
+    rows = (await db.execute(base.order_by(Match.score.desc(), Match.created_at.desc()).offset(offset).limit(page_size))).all()
+
+    app_by_pair: dict[tuple[str, str], Application] = {}
+    if rows:
+        pair_filters = [
+            and_(Application.seeker_id == match.seeker_id, Application.job_id == match.job_id)
+            for match, *_ in rows
+        ]
+        apps_res = await db.execute(select(Application).where(or_(*pair_filters)))
+        for app in apps_res.scalars().all():
+            if app.seeker_id:
+                app_by_pair[(str(app.seeker_id), str(app.job_id))] = app
+
+    items = []
+    for match, seeker, job, provider in rows:
+        app = app_by_pair.get((str(seeker.id), str(job.id)))
+        items.append(
+            AdminMatchListItem(
+                id=str(match.id),
+                seeker_name=_user_display_name(seeker),
+                seeker_email=seeker.email,
+                seeker_id=str(seeker.id),
+                job_id=str(job.id),
+                provider_id=str(job.provider_id),
+                job_title=job.title,
+                company=provider.company_name or _user_display_name(provider, "Provider"),
+                score=float(match.score or 0),
+                created_at=match.created_at,
+                application_id=str(app.id) if app else None,
+                application_status=(
+                    str(app.status.value if hasattr(app.status, "value") else app.status) if app else None
+                ),
+            )
         )
-        for match, seeker, job, provider in rows
-    ]
     return AdminMatchListResponse(items=items, total=int(total), page=page, page_size=page_size)
 
 
 async def list_platform_applications(
-    db: AsyncSession, page: int, page_size: int, search: Optional[str] = None, status: Optional[str] = None
+    db: AsyncSession,
+    page: int,
+    page_size: int,
+    search: Optional[str] = None,
+    status: Optional[str] = None,
+    job_id: Optional[str] = None,
+    provider_id: Optional[str] = None,
+    created_from: Optional[str] = None,
+    created_to: Optional[str] = None,
 ) -> AdminApplicationListResponse:
     from sqlalchemy.orm import aliased
     Seeker = aliased(User)
@@ -537,9 +827,22 @@ async def list_platform_applications(
         .join(Provider, JobPosting.provider_id == Provider.id)
         .outerjoin(Seeker, Application.seeker_id == Seeker.id)
     )
-    if search:
+    count_q = (
+        select(func.count(Application.id))
+        .select_from(Application)
+        .join(JobPosting, Application.job_id == JobPosting.id)
+        .join(Provider, JobPosting.provider_id == Provider.id)
+        .outerjoin(Seeker, Application.seeker_id == Seeker.id)
+    )
+
+    filters = []
+    if job_id and job_id.strip():
+        filters.append(Application.job_id == job_id.strip())
+    if provider_id and provider_id.strip():
+        filters.append(JobPosting.provider_id == provider_id.strip())
+    if search and search.strip():
         term = f"%{search.strip()}%"
-        base = base.where(
+        filters.append(
             or_(
                 Application.candidate_name.ilike(term),
                 Application.candidate_email.ilike(term),
@@ -547,29 +850,18 @@ async def list_platform_applications(
                 Provider.company_name.ilike(term),
                 Seeker.first_name.ilike(term),
                 Seeker.last_name.ilike(term),
-                func.concat(Seeker.first_name, ' ', Seeker.last_name).ilike(term),
+                func.concat(Seeker.first_name, " ", Seeker.last_name).ilike(term),
                 Seeker.email.ilike(term),
             )
         )
     if status and status != "all":
-        base = base.where(Application.status == status)
-    count_q = select(func.count(Application.id)).select_from(Application).join(JobPosting, Application.job_id == JobPosting.id).join(Provider, JobPosting.provider_id == Provider.id).outerjoin(Seeker, Application.seeker_id == Seeker.id)
-    if search:
-        term = f"%{search.strip()}%"
-        count_q = count_q.where(
-            or_(
-                Application.candidate_name.ilike(term),
-                Application.candidate_email.ilike(term),
-                JobPosting.title.ilike(term),
-                Provider.company_name.ilike(term),
-                Seeker.first_name.ilike(term),
-                Seeker.last_name.ilike(term),
-                func.concat(Seeker.first_name, ' ', Seeker.last_name).ilike(term),
-                Seeker.email.ilike(term),
-            )
-        )
-    if status and status != "all":
-        count_q = count_q.where(Application.status == status)
+        filters.append(Application.status == status)
+    # Funnel / application KPIs are period-scoped on applied_at
+    filters.extend(_created_range_filters(Application.applied_at, created_from, created_to))
+    if filters:
+        base = base.where(*filters)
+        count_q = count_q.where(*filters)
+
     total = await db.scalar(count_q) or 0
     offset = (page - 1) * page_size
     rows = (await db.execute(base.order_by(Application.applied_at.desc()).offset(offset).limit(page_size))).all()
@@ -584,6 +876,7 @@ async def list_platform_applications(
                 candidate_phone=app.candidate_phone or (seeker.phone if seeker else None),
                 seeker_id=str(app.seeker_id) if app.seeker_id else None,
                 job_id=str(job.id),
+                provider_id=str(job.provider_id),
                 job_title=job.title,
                 company=provider.company_name or _user_display_name(provider, "Provider"),
                 status=str(app.status.value if hasattr(app.status, "value") else app.status),
@@ -594,12 +887,59 @@ async def list_platform_applications(
     return AdminApplicationListResponse(items=items, total=int(total), page=page, page_size=page_size)
 
 
+def _admin_actor_label(admin: User) -> str:
+    return f"{(admin.first_name or '').strip()} {(admin.last_name or '').strip()}".strip() or admin.email or "Admin"
+
+
+def _provider_company_label(provider: Optional[User]) -> str:
+    if not provider:
+        return "Provider"
+    return provider.company_name or _user_display_name(provider, "Provider")
+
+
+async def _application_list_item(
+    db: AsyncSession,
+    app: Application,
+) -> AdminApplicationListItem:
+    job_result = await db.execute(select(JobPosting).where(JobPosting.id == app.job_id))
+    job = job_result.scalar_one_or_none()
+    provider = None
+    if job:
+        provider_result = await db.execute(select(User).where(User.id == job.provider_id))
+        provider = provider_result.scalar_one_or_none()
+    seeker = None
+    if app.seeker_id:
+        seeker_result = await db.execute(select(User).where(User.id == app.seeker_id))
+        seeker = seeker_result.scalar_one_or_none()
+    candidate = app.candidate_name or _user_display_name(seeker, "Candidate")
+    return AdminApplicationListItem(
+        id=str(app.id),
+        candidate_name=candidate,
+        candidate_email=app.candidate_email or (seeker.email if seeker else None),
+        candidate_phone=app.candidate_phone or (seeker.phone if seeker else None),
+        seeker_id=str(app.seeker_id) if app.seeker_id else None,
+        job_id=str(app.job_id),
+        provider_id=str(job.provider_id) if job else None,
+        job_title=job.title if job else "—",
+        company=_provider_company_label(provider),
+        status=str(app.status.value if hasattr(app.status, "value") else app.status),
+        applied_at=app.applied_at,
+        updated_at=app.updated_at,
+    )
+
+
 async def update_platform_application_status(
     db: AsyncSession,
     app_id: str,
     status: str,
+    admin: User,
     rejection_reason: Optional[str] = None,
 ) -> AdminApplicationListItem:
+    from app.shared.models.notification import NotificationType
+    from app.shared.services.audit_service import log_audit_event
+    from app.shared.services.notification_service import create_notification
+    from app.modules.jobs_portal.services.auto_interview_service import auto_schedule_for_application
+
     result = await db.execute(select(Application).where(Application.id == app_id))
     app = result.scalar_one_or_none()
     if not app:
@@ -609,14 +949,12 @@ async def update_platform_application_status(
     if status not in allowed:
         raise HTTPException(status_code=400, detail=f"Invalid status. Allowed: {', '.join(sorted(allowed))}")
 
+    previous_status = str(app.status.value if hasattr(app.status, "value") else app.status)
     app.status = ApplicationStatus(status)
     if status == "rejected":
         app.rejection_reason = rejection_reason or "Not specified"
     elif status != "rejected":
         app.rejection_reason = None
-
-    await db.commit()
-    await db.refresh(app)
 
     job_result = await db.execute(select(JobPosting).where(JobPosting.id == app.job_id))
     job = job_result.scalar_one_or_none()
@@ -624,41 +962,262 @@ async def update_platform_application_status(
     if job:
         provider_result = await db.execute(select(User).where(User.id == job.provider_id))
         provider = provider_result.scalar_one_or_none()
-    seeker_result = await db.execute(select(User).where(User.id == app.seeker_id)) if app.seeker_id else None
-    seeker = seeker_result.scalar_one_or_none() if app.seeker_id else None
-    candidate = app.candidate_name or _user_display_name(seeker, "Candidate")
+    seeker = None
+    if app.seeker_id:
+        seeker_result = await db.execute(select(User).where(User.id == app.seeker_id))
+        seeker = seeker_result.scalar_one_or_none()
 
-    return AdminApplicationListItem(
-        id=str(app.id),
-        candidate_name=candidate,
-        candidate_email=app.candidate_email or (seeker.email if seeker else None),
-        candidate_phone=app.candidate_phone or (seeker.phone if seeker else None),
-        seeker_id=str(app.seeker_id) if app.seeker_id else None,
-        job_id=str(app.job_id),
-        job_title=job.title if job else "—",
-        company=provider.company_name or _user_display_name(provider, "Provider") if provider else "—",
-        status=str(app.status.value if hasattr(app.status, "value") else app.status),
-        applied_at=app.applied_at,
-        updated_at=app.updated_at,
+    company = _provider_company_label(provider)
+    actor_label = _admin_actor_label(admin)
+    job_title = job.title if job else "job"
+
+    await log_audit_event(
+        db,
+        admin,
+        action="STATUS_CHANGE",
+        entity_type="application",
+        entity_id=str(app.id),
+        entity_name=job_title,
+        description=(
+            f"Admin/supervisor ({actor_label}) set application status to '{status}' "
+            f"for '{job_title}' on behalf of provider '{company}'"
+        ),
+        changes={
+            "from": previous_status,
+            "to": status,
+            "rejection_reason": rejection_reason if status == "rejected" else None,
+            "provider_id": str(job.provider_id) if job else None,
+            "acted_for_provider": True,
+        },
+        force=True,
     )
+
+    await db.commit()
+    await db.refresh(app)
+
+    if seeker and job and status == "shortlisted":
+        shortlist_msg = (
+            f"Congratulations! You have been shortlisted for '{job.title}' at {company}. "
+            f"They may reach out soon."
+        )
+        await create_notification(
+            db=db,
+            user_id=seeker.id,
+            type=NotificationType.shortlisted,
+            title=company,
+            message=shortlist_msg,
+            related_job_id=str(job.id),
+            related_user_id=str(job.provider_id),
+            auto_commit=True,
+        )
+        from app.shared.services.notification_service import queue_notification_email
+
+        queue_notification_email(
+            seeker.email, "Resume Shortlisted", shortlist_msg, seeker.first_name or "there"
+        )
+        if provider:
+            try:
+                await auto_schedule_for_application(db, app, provider, job)
+                await db.commit()
+            except Exception:
+                logger.exception("Auto-schedule failed for admin shortlist on application %s", app.id)
+
+    if seeker and job and status == "rejected":
+        rejected_msg = (
+            f"Your application for '{job.title}' was not selected this time. "
+            f"Keep applying — better opportunities are ahead."
+        )
+        await create_notification(
+            db=db,
+            user_id=seeker.id,
+            type=NotificationType.rejected,
+            title="Application Update",
+            message=rejected_msg,
+            related_job_id=str(job.id),
+            auto_commit=True,
+        )
+        from app.shared.services.notification_service import queue_notification_email
+
+        queue_notification_email(
+            seeker.email, "Application Update", rejected_msg, seeker.first_name or "there"
+        )
+
+    if seeker and job and status == "selected":
+        selected_msg = (
+            f"Congratulations! You have been selected for '{job.title}' at {company}."
+        )
+        await create_notification(
+            db=db,
+            user_id=seeker.id,
+            type=NotificationType.shortlisted,
+            title="Congratulations",
+            message=selected_msg,
+            related_job_id=str(job.id),
+            related_user_id=str(job.provider_id),
+            auto_commit=True,
+        )
+        from app.shared.services.notification_service import queue_notification_email
+
+        queue_notification_email(
+            seeker.email,
+            "Congratulations — You're Selected",
+            selected_msg,
+            seeker.first_name or "there",
+        )
+
+    return await _application_list_item(db, app)
+
+
+async def shortlist_platform_candidate(
+    db: AsyncSession,
+    seeker_id: str,
+    job_id: str,
+    admin: User,
+) -> AdminApplicationListItem:
+    """Create or promote an application to shortlisted on behalf of the job's provider."""
+    from app.shared.models.notification import NotificationType
+    from app.shared.services.audit_service import log_audit_event
+    from app.shared.services.notification_service import create_notification
+    from app.modules.jobs_portal.services.auto_interview_service import auto_schedule_for_application
+
+    job_result = await db.execute(select(JobPosting).where(JobPosting.id == job_id))
+    job = job_result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    provider_result = await db.execute(select(User).where(User.id == job.provider_id))
+    provider = provider_result.scalar_one_or_none()
+    if not provider:
+        raise HTTPException(status_code=404, detail="Provider not found")
+
+    seeker_result = await db.execute(select(User).where(User.id == seeker_id))
+    seeker = seeker_result.scalar_one_or_none()
+    if not seeker:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    existing = await db.execute(
+        select(Application).where(
+            and_(Application.seeker_id == seeker_id, Application.job_id == job_id)
+        )
+    )
+    app = existing.scalar_one_or_none()
+    created = False
+
+    if app:
+        current = str(app.status.value if hasattr(app.status, "value") else app.status)
+        if app.status in (
+            ApplicationStatus.shortlisted,
+            ApplicationStatus.interviewing,
+            ApplicationStatus.selected,
+        ):
+            raise HTTPException(status_code=409, detail="Candidate is already shortlisted for this job")
+        if app.status == ApplicationStatus.rejected:
+            raise HTTPException(status_code=409, detail="Candidate was rejected for this job")
+        previous_status = current
+        app.status = ApplicationStatus.shortlisted
+        app.rejection_reason = None
+    else:
+        previous_status = None
+        created = True
+        app = Application(
+            seeker_id=seeker_id,
+            job_id=job_id,
+            status=ApplicationStatus.shortlisted,
+        )
+        db.add(app)
+
+    company = _provider_company_label(provider)
+    actor_label = _admin_actor_label(admin)
+
+    await db.flush()
+    await log_audit_event(
+        db,
+        admin,
+        action="SHORTLIST",
+        entity_type="application",
+        entity_id=str(app.id),
+        entity_name=job.title,
+        description=(
+            f"Admin/supervisor ({actor_label}) shortlisted candidate "
+            f"'{_user_display_name(seeker)}' for '{job.title}' on behalf of provider '{company}'"
+        ),
+        changes={
+            "from": previous_status,
+            "to": "shortlisted",
+            "created_application": created,
+            "seeker_id": str(seeker_id),
+            "job_id": str(job_id),
+            "provider_id": str(job.provider_id),
+            "acted_for_provider": True,
+        },
+        force=True,
+    )
+
+    await db.commit()
+    await db.refresh(app)
+
+    shortlist_msg = (
+        f"Congratulations! You have been shortlisted for '{job.title}' at {company}. "
+        f"They may reach out soon."
+    )
+    await create_notification(
+        db=db,
+        user_id=seeker.id,
+        type=NotificationType.shortlisted,
+        title=company,
+        message=shortlist_msg,
+        related_job_id=str(job.id),
+        related_user_id=str(job.provider_id),
+        auto_commit=True,
+    )
+    from app.shared.services.notification_service import queue_notification_email
+
+    queue_notification_email(
+        seeker.email, "Resume Shortlisted", shortlist_msg, seeker.first_name or "there"
+    )
+
+    try:
+        await auto_schedule_for_application(db, app, provider, job)
+        await db.commit()
+    except Exception:
+        logger.exception("Auto-schedule failed for admin shortlist on application %s", app.id)
+
+    return await _application_list_item(db, app)
 
 
 async def list_platform_interviews(
-    db: AsyncSession, page: int, page_size: int, search: Optional[str] = None
+    db: AsyncSession,
+    page: int,
+    page_size: int,
+    search: Optional[str] = None,
+    created_from: Optional[str] = None,
+    created_to: Optional[str] = None,
 ) -> AdminInterviewListResponse:
     from sqlalchemy.orm import aliased
     Seeker = aliased(User)
     Provider = aliased(User)
+    schedule_filters = _created_range_filters(Interview.scheduled_at, created_from, created_to)
     base = (
         select(Interview, Seeker, Provider, JobPosting)
         .join(Seeker, Interview.seeker_id == Seeker.id)
         .join(Provider, Interview.provider_id == Provider.id)
         .join(JobPosting, Interview.job_id == JobPosting.id)
     )
+    if schedule_filters:
+        base = base.where(*schedule_filters)
     if search:
         term = f"%{search.strip()}%"
         base = base.where(or_(Interview.title.ilike(term), JobPosting.title.ilike(term)))
-    count_q = select(func.count(Interview.id)).select_from(Interview).join(JobPosting, Interview.job_id == JobPosting.id)
+    # Count uses the same joins as the list so totals match visible rows.
+    count_q = (
+        select(func.count(Interview.id))
+        .select_from(Interview)
+        .join(Seeker, Interview.seeker_id == Seeker.id)
+        .join(Provider, Interview.provider_id == Provider.id)
+        .join(JobPosting, Interview.job_id == JobPosting.id)
+    )
+    if schedule_filters:
+        count_q = count_q.where(*schedule_filters)
     if search:
         term = f"%{search.strip()}%"
         count_q = count_q.where(or_(Interview.title.ilike(term), JobPosting.title.ilike(term)))
@@ -765,6 +1324,7 @@ async def list_seekers(
     db: AsyncSession, page: int, page_size: int, search: Optional[str],
     industry: Optional[str], status: Optional[str] = None, job_fair_id: Optional[str] = None,
     sort_by: Optional[str] = None, sort_dir: Optional[str] = None,
+    created_from: Optional[str] = None, created_to: Optional[str] = None,
 ) -> AdminUserListResponse:
     from app.modules.jobs_portal.models.job_fair import JobFairSeeker
     seeker_filters = [User.role == UserRole.seeker, User.is_super_admin.is_(False)]
@@ -784,6 +1344,8 @@ async def list_seekers(
             seeker_filters.append(User.is_verified.is_(True))
         elif status in {"pending", "onboarded", "no_password"}:
             seeker_filters.append(User.is_verified.is_(False))
+
+    seeker_filters.extend(_created_range_filters(User.created_at, created_from, created_to))
 
     count_q = select(func.count(User.id)).where(*seeker_filters)
     select_q = select(User, Portfolio).outerjoin(Portfolio, Portfolio.user_id == User.id).where(*seeker_filters)
@@ -929,8 +1491,10 @@ async def get_seeker_detail(user_id: str, db: AsyncSession) -> AdminSeekerDetail
             selected_count += 1
         app_items.append(SeekerApplicationItem(
             id=str(app.id),
+            job_id=str(job.id),
+            provider_id=str(provider.id) if provider else None,
             job_title=job.title,
-            company_name=provider.company_name,
+            company_name=provider.company_name or _user_display_name(provider, "Provider"),
             company_location=job.location,
             industry=job.industry,
             status=status_str,
@@ -951,6 +1515,8 @@ async def get_seeker_detail(user_id: str, db: AsyncSession) -> AdminSeekerDetail
         SeekerInterviewItem(
             id=str(iv.id),
             title=iv.title,
+            job_id=str(job.id) if job else None,
+            provider_id=str(provider.id) if provider else None,
             job_title=job.title,
             provider_name=provider.company_name or _user_display_name(provider, "Provider"),
             interview_type=iv.interview_type.value if iv.interview_type and hasattr(iv.interview_type, "value") else None,
@@ -1054,13 +1620,15 @@ async def bulk_import_seekers(content: bytes, filename: str) -> BulkImportJobSta
     import uuid
     job_id = str(uuid.uuid4())
     _create_job(job_id, total=0, role="seeker")
-    _start_background_import(job_id, content, UserRole.seeker)
+    _start_background_import(job_id, content, UserRole.seeker, filename=filename or "")
     return BulkImportJobStarted(job_id=job_id)
 
 
 async def list_providers(
     db: AsyncSession, page: int, page_size: int, search: Optional[str], status: Optional[str] = None,
     sort_by: Optional[str] = None, sort_dir: Optional[str] = None,
+    created_from: Optional[str] = None, created_to: Optional[str] = None,
+    has_active_job: Optional[bool] = None,
 ) -> AdminUserListResponse:
     provider_filters = [User.role == UserRole.provider, User.is_super_admin.is_(False)]
     if search:
@@ -1075,6 +1643,16 @@ async def list_providers(
             provider_filters.append(User.is_verified.is_(True))
         elif status in {"pending", "onboarded", "no_password"}:
             provider_filters.append(User.is_verified.is_(False))
+
+    if has_active_job:
+        active_provider_ids = (
+            select(JobPosting.provider_id)
+            .where(JobPosting.is_active.is_(True))
+            .distinct()
+        )
+        provider_filters.append(User.id.in_(active_provider_ids))
+
+    provider_filters.extend(_created_range_filters(User.created_at, created_from, created_to))
 
     total = await db.scalar(select(func.count(User.id)).where(*provider_filters))
     result = await db.execute(
@@ -1095,6 +1673,34 @@ async def list_providers(
     )
 
 
+def _apply_provider_company_fields(user: User, body) -> None:
+    """Apply optional company-profile fields shared by create/update."""
+    mapping = (
+        "company_name",
+        "company_location",
+        "company_size",
+        "company_address",
+        "company_website",
+        "company_about",
+        "industry",
+        "job_role",
+        "company_rating",
+        "company_review_count",
+        "company_rating_source",
+        "google_place_id",
+        "google_maps_url",
+    )
+    for field in mapping:
+        val = getattr(body, field, None)
+        if val is not None:
+            if isinstance(val, str):
+                val = val.strip() or None
+            setattr(user, field, val)
+    reviews = getattr(body, "company_reviews", None)
+    if reviews is not None:
+        user.company_reviews = reviews
+
+
 async def create_provider(body: AdminProviderCreate, db: AsyncSession) -> AdminUserOut:
     phone = _normalize_phone(body.phone)
     if len(phone) != 10:
@@ -1102,11 +1708,17 @@ async def create_provider(body: AdminProviderCreate, db: AsyncSession) -> AdminU
     await _check_duplicate(db, body.email, phone)
     pwd = body.password or _temp_password()
     user = User(
-        first_name=body.first_name.strip(), last_name=body.last_name.strip(), email=body.email, phone=phone,
-        hashed_password=hash_password(pwd), role=UserRole.provider, is_verified=True, onboarding_complete=True,
-        company_name=body.company_name, company_type=CompanyType(body.company_type) if body.company_type else None,
-        company_location=body.company_location, company_size=body.company_size,
+        first_name=body.first_name.strip(),
+        last_name=body.last_name.strip(),
+        email=body.email,
+        phone=phone,
+        hashed_password=hash_password(pwd),
+        role=UserRole.provider,
+        is_verified=True,
+        onboarding_complete=True,
+        company_type=CompanyType(body.company_type) if body.company_type else None,
     )
+    _apply_provider_company_fields(user, body)
     db.add(user)
     await db.commit()
     await db.refresh(user)
@@ -1165,6 +1777,42 @@ async def get_provider_detail(user_id: str, db: AsyncSession) -> AdminProviderDe
             updated_at=job.updated_at,
         ))
 
+    # Applications across this provider's jobs (read-only enrichment for CRM detail)
+    apps_q = (
+        select(Application, JobPosting, User)
+        .join(JobPosting, Application.job_id == JobPosting.id)
+        .outerjoin(User, Application.seeker_id == User.id)
+        .where(JobPosting.provider_id == user.id)
+        .order_by(Application.applied_at.desc())
+    )
+    app_rows = (await db.execute(apps_q)).all()
+    app_items: list[ProviderApplicationItem] = []
+    shortlisted_count = 0
+    interviewing_count = 0
+    selected_count = 0
+    for app, job, seeker in app_rows:
+        status_str = str(app.status.value if hasattr(app.status, "value") else app.status)
+        if status_str == "shortlisted":
+            shortlisted_count += 1
+        elif status_str == "interviewing":
+            interviewing_count += 1
+        elif status_str == "selected":
+            selected_count += 1
+        app_items.append(
+            ProviderApplicationItem(
+                id=str(app.id),
+                candidate_name=app.candidate_name or _user_display_name(seeker, "Candidate"),
+                candidate_email=app.candidate_email or (seeker.email if seeker else None),
+                candidate_phone=app.candidate_phone or (seeker.phone if seeker else None),
+                seeker_id=str(app.seeker_id) if app.seeker_id else None,
+                job_id=str(job.id),
+                job_title=job.title,
+                status=status_str,
+                applied_at=app.applied_at,
+                updated_at=app.updated_at,
+            )
+        )
+
     # Fetch interviews for this provider
     interviews_q = (
         select(Interview, JobPosting, User)
@@ -1178,7 +1826,9 @@ async def get_provider_detail(user_id: str, db: AsyncSession) -> AdminProviderDe
         ProviderInterviewItem(
             id=str(iv.id),
             title=iv.title,
+            seeker_id=str(seeker.id) if seeker else None,
             seeker_name=_user_display_name(seeker),
+            job_id=str(job.id) if job else None,
             job_title=job.title,
             interview_type=iv.interview_type.value if iv.interview_type and hasattr(iv.interview_type, "value") else None,
             status=str(iv.status.value if hasattr(iv.status, "value") else iv.status),
@@ -1217,6 +1867,10 @@ async def get_provider_detail(user_id: str, db: AsyncSession) -> AdminProviderDe
         total_jobs=len(job_items),
         active_jobs=active_count,
         total_applications_received=total_apps_received,
+        applications=app_items,
+        shortlisted_count=shortlisted_count,
+        interviewing_count=interviewing_count,
+        selected_count=selected_count,
         interviews=interview_items,
     )
 
@@ -1226,13 +1880,65 @@ async def update_provider(user_id: str, body: AdminProviderUpdate, db: AsyncSess
     await _apply_user_update(db, user, body)
     if body.company_type is not None:
         user.company_type = CompanyType(body.company_type) if body.company_type else None
-    for field in ("company_name", "company_location", "company_size"):
-        val = getattr(body, field, None)
-        if val is not None:
-            setattr(user, field, val)
+    _apply_provider_company_fields(user, body)
     await db.commit()
     await db.refresh(user)
     return _user_to_admin_out(user, "provider")
+
+
+async def upload_provider_profile_pic(user_id: str, file: UploadFile, db: AsyncSession) -> AdminUserOut:
+    user = await _get_role_user(db, user_id, UserRole.provider)
+    content_type = (file.content_type or "").lower()
+    if content_type not in {"image/jpeg", "image/png", "image/webp", "image/gif"}:
+        raise HTTPException(status_code=400, detail="Upload a JPG, PNG, WEBP, or GIF image")
+    content = await file.read()
+    if len(content) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Logo must be 5 MB or smaller")
+    ext = os.path.splitext(file.filename or "")[1].lower() or ".jpg"
+    if ext not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+        ext = ".jpg"
+    upload_dir = get_upload_dir()
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"provider_{user.id}_{uuid_lib.uuid4().hex}{ext}"
+    (upload_dir / filename).write_bytes(content)
+    user.profile_pic_url = f"/uploads/{filename}"
+    await db.commit()
+    await db.refresh(user)
+    return _user_to_admin_out(user, "provider")
+
+
+async def get_provider_company_profile(user_id: str, db: AsyncSession):
+    from app.modules.jobs_portal.services import company_profile_service as company_svc
+
+    user = await _get_role_user(db, user_id, UserRole.provider)
+    return await company_svc.get_company_profile(user, db)
+
+
+async def admin_lookup_company(body):
+    from app.modules.jobs_portal.services import company_profile_service as company_svc
+
+    return await company_svc.lookup_company(body)
+
+
+async def admin_apply_company_lookup(user_id: str, body, db: AsyncSession):
+    from app.modules.jobs_portal.services import company_profile_service as company_svc
+
+    user = await _get_role_user(db, user_id, UserRole.provider)
+    return await company_svc.apply_lookup(user, body, db)
+
+
+async def upload_provider_gallery_image(user_id: str, file: UploadFile, db: AsyncSession, caption: Optional[str] = None):
+    from app.modules.jobs_portal.services import company_profile_service as company_svc
+
+    user = await _get_role_user(db, user_id, UserRole.provider)
+    return await company_svc.upload_gallery_image(user, file, db, caption)
+
+
+async def delete_provider_gallery_image(user_id: str, image_id: str, db: AsyncSession):
+    from app.modules.jobs_portal.services import company_profile_service as company_svc
+
+    user = await _get_role_user(db, user_id, UserRole.provider)
+    return await company_svc.delete_gallery_image(user, image_id, db)
 
 
 async def delete_provider(user_id: str, db: AsyncSession) -> None:
@@ -1252,7 +1958,7 @@ async def bulk_import_providers(content: bytes, filename: str) -> BulkImportJobS
     import uuid
     job_id = str(uuid.uuid4())
     _create_job(job_id, total=0, role="provider")
-    _start_background_import(job_id, content, UserRole.provider)
+    _start_background_import(job_id, content, UserRole.provider, filename=filename or "")
     return BulkImportJobStarted(job_id=job_id)
 
 

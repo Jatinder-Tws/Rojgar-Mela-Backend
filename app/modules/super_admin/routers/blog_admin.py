@@ -6,7 +6,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import get_upload_dir, settings
+from app.core.config import get_upload_dir
 from app.core.database import get_db
 from app.core.dependencies import require_super_admin_or_permission
 from app.shared.models.user import User
@@ -180,5 +180,7 @@ async def upload_blog_image(
     with open(filepath, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    url = f"{settings.BACKEND_PUBLIC_URL.rstrip('/')}/uploads/blog_images/{filename}"
+    # Relative path: the frontend resolves it against the live API base, so the
+    # same stored value works in dev (localhost:8000) and prod (nginx /api/uploads).
+    url = f"/uploads/blog_images/{filename}"
     return {"url": url, "filename": filename}

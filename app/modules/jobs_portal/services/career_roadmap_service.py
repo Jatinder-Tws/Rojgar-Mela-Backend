@@ -290,7 +290,8 @@ def _to_out(row: Roadmap | CareerRoadmap) -> CareerRoadmapOut:
             salary_raw = mbs.get("average") or mbs.get("formatted") or "Market-based"
     salary = salary_raw or "Market-based"
 
-    milestones = getattr(row, "milestones", None) or []
+    # Use __dict__ so we never trigger async lazy-loads (MissingGreenlet).
+    milestones = row.__dict__.get("milestones") if "milestones" in row.__dict__ else []
     if milestones:
         stages_order: list[str] = []
         stages_map: dict[str, list[Milestone]] = {}
@@ -309,7 +310,8 @@ def _to_out(row: Roadmap | CareerRoadmap) -> CareerRoadmapOut:
             sub_steps: list[RoadmapSubStepOut] = []
             for m_idx, m in enumerate(s_milestones, start=1):
                 sub_res: list[RoadmapResourceOut] = []
-                for r in (getattr(m, "resources", None) or []):
+                raw_resources = m.__dict__.get("resources") if "resources" in m.__dict__ else []
+                for r in raw_resources or []:
                     res_out = RoadmapResourceOut(
                         id=str(r.id),
                         title=r.title or "Learning Resource",
@@ -350,7 +352,8 @@ def _to_out(row: Roadmap | CareerRoadmap) -> CareerRoadmapOut:
             )
     else:
         steps = []
-        for step in (getattr(row, "steps", None) or []):
+        steps_raw = row.__dict__.get("steps") if "steps" in row.__dict__ else []
+        for step in steps_raw or []:
             lessons = [
                 RoadmapLessonOut(id=str(lesson.get("id") or uuid.uuid4()), title=str(lesson.get("title") or ""))
                 for lesson in (step.get("lessons") or [])
@@ -390,6 +393,7 @@ def _to_out(row: Roadmap | CareerRoadmap) -> CareerRoadmapOut:
                     sub_steps=sub_steps,
                 )
             )
+        resources_raw = row.__dict__.get("resources") if "resources" in row.__dict__ else []
         all_resources = [
             RoadmapResourceOut(
                 id=str(item.get("id") or uuid.uuid4()),
@@ -399,19 +403,22 @@ def _to_out(row: Roadmap | CareerRoadmap) -> CareerRoadmapOut:
                 platform=(str(item.get("platform")).strip() if item.get("platform") else None),
                 is_free=bool(item.get("is_free", True)),
             )
-            for item in (getattr(row, "resources", None) or [])
+            for item in resources_raw or []
         ]
 
-    insights_raw = getattr(row, "career_insights", None) or {}
+    insights_raw = row.__dict__.get("career_insights") if "career_insights" in row.__dict__ else {}
+    if insights_raw is None:
+        insights_raw = {}
     if not isinstance(insights_raw, dict):
         insights_raw = {}
+    faqs_raw = row.__dict__.get("faqs") if "faqs" in row.__dict__ else []
     faqs = [
         RoadmapFaqOut(
             id=str(item.get("id") or uuid.uuid4()),
             question=str(item.get("question") or ""),
             answer=str(item.get("answer") or ""),
         )
-        for item in (getattr(row, "faqs", None) or [])
+        for item in faqs_raw or []
     ]
     return CareerRoadmapOut(
         id=str(row.id),
@@ -510,7 +517,11 @@ async def list_roadmaps(
     category: Optional[str] = None,
     published_only: bool = False,
 ) -> tuple[list[Roadmap], int]:
-    q = select(Roadmap).options(selectinload(Roadmap.milestones))
+    # Eager-load milestone resources: _to_out reads them; lazy IO under AsyncSession
+    # raises MissingGreenlet (public /career-roadmaps list was 500).
+    q = select(Roadmap).options(
+        selectinload(Roadmap.milestones).selectinload(Milestone.resources)
+    )
     if published_only:
         q = q.where(Roadmap.is_published.is_(True))
     if search and search.strip():
@@ -560,30 +571,91 @@ async def get_by_id(db: AsyncSession, roadmap_id: str) -> Roadmap:
     return row
 
 
+def _roadmap_slug_candidates(row: Roadmap | CareerRoadmap) -> set[str]:
+    """Slugs the public UI may use for this row (stored slug and/or slugified title)."""
+    title = getattr(row, "target_role", None) or getattr(row, "title", None) or ""
+    stored = (getattr(row, "slug", None) or "").strip()
+    out = {slugify(title)}
+    if stored:
+        out.add(stored)
+        out.add(slugify(stored))
+    return {s for s in out if s}
+
+
+def _pick_roadmap_by_slug(rows: list, *, clean_slug: str, slug: str):
+    """Prefer exact stored slug, then slugified title. Avoids MultipleResultsFound 500s."""
+    if not rows:
+        return None
+    wanted = {clean_slug, slugify(slug), (slug or "").strip()}
+    wanted = {w for w in wanted if w}
+
+    for row in rows:
+        stored = (getattr(row, "slug", None) or "").strip()
+        if stored in wanted:
+            return row
+    for row in rows:
+        if _roadmap_slug_candidates(row) & wanted:
+            return row
+    return None
+
+
 async def get_by_slug(db: AsyncSession, slug: str, *, published_only: bool = True) -> Roadmap:
     clean_slug = slugify(slug)
-    q = (
+    load_opts = selectinload(Roadmap.milestones).selectinload(Milestone.resources)
+
+    # 1) Exact slug first (unique intent for public URLs).
+    exact_q = (
         select(Roadmap)
-        .options(selectinload(Roadmap.milestones).selectinload(Milestone.resources))
-        .where(
-            or_(
-                Roadmap.slug == clean_slug,
-                Roadmap.slug == slug,
-                func.lower(Roadmap.target_role) == func.lower(slug.replace("-", " ")),
-                func.lower(Roadmap.target_role) == func.lower(slug),
-            )
-        )
+        .options(load_opts)
+        .where(or_(Roadmap.slug == clean_slug, Roadmap.slug == slug))
+        .order_by(Roadmap.is_featured.desc(), Roadmap.updated_at.desc())
     )
     if published_only:
-        q = q.where(Roadmap.is_published.is_(True))
-    row = (await db.execute(q)).scalar_one_or_none()
+        exact_q = exact_q.where(Roadmap.is_published.is_(True))
+    exact_rows = list((await db.execute(exact_q)).scalars().all())
+    row = _pick_roadmap_by_slug(exact_rows, clean_slug=clean_slug, slug=slug)
+
+    # 2) Legacy rows: slug column NULL/empty, but list API exposes slugify(title).
     if not row:
-        cr_q = select(CareerRoadmap).where(CareerRoadmap.slug == clean_slug)
+        null_slug_q = (
+            select(Roadmap)
+            .options(load_opts)
+            .where(or_(Roadmap.slug.is_(None), Roadmap.slug == ""))
+            .order_by(Roadmap.is_featured.desc(), Roadmap.updated_at.desc())
+        )
+        if published_only:
+            null_slug_q = null_slug_q.where(Roadmap.is_published.is_(True))
+        null_rows = list((await db.execute(null_slug_q)).scalars().all())
+        row = _pick_roadmap_by_slug(null_rows, clean_slug=clean_slug, slug=slug)
+
+    # 3) Title / stored-slug normalization fallback (punctuation differences).
+    if not row:
+        broad_q = select(Roadmap).options(load_opts).order_by(
+            Roadmap.is_featured.desc(), Roadmap.updated_at.desc()
+        )
+        if published_only:
+            broad_q = broad_q.where(Roadmap.is_published.is_(True))
+        broad_rows = list((await db.execute(broad_q)).scalars().all())
+        row = _pick_roadmap_by_slug(broad_rows, clean_slug=clean_slug, slug=slug)
+
+    if not row:
+        cr_q = select(CareerRoadmap).order_by(CareerRoadmap.updated_at.desc())
         if published_only:
             cr_q = cr_q.where(CareerRoadmap.is_published.is_(True))
-        row = (await db.execute(cr_q)).scalar_one_or_none()
+        cr_rows = list((await db.execute(cr_q)).scalars().all())
+        row = _pick_roadmap_by_slug(cr_rows, clean_slug=clean_slug, slug=slug)
+
     if not row:
         raise HTTPException(status_code=404, detail="Roadmap not found")
+
+    # Persist synthesized slug so future lookups hit the indexed column.
+    if isinstance(row, Roadmap) and not (row.slug or "").strip():
+        try:
+            row.slug = await _ensure_unique_slug(db, row.target_role or clean_slug)
+            await db.commit()
+        except Exception:
+            await db.rollback()
+
     return row
 
 

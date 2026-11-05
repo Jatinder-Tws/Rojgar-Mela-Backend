@@ -186,6 +186,12 @@ class JobOut(BaseModel):
     company_logo_url: Optional[str] = None
     company_gallery: Optional[List[dict]] = None
 
+    # Present for seekers when an AI Match row exists for this job.
+    match_score: Optional[float] = None
+    fit_reason: Optional[str] = None
+    highlights: Optional[List[str]] = None
+    gaps: Optional[List[str]] = None
+
     @field_validator("perks", "required_skills", mode="before")
     @classmethod
     def parse_json(cls, v):
@@ -202,10 +208,7 @@ class JobOut(BaseModel):
 
 
 class JobWithMatch(JobOut):
-    match_score: Optional[float] = None
-    fit_reason: Optional[str] = None
-    highlights: Optional[List[str]] = None
-    gaps: Optional[List[str]] = None
+    pass
 
 
 class ResumeOut(BaseModel):
@@ -269,9 +272,13 @@ class ApplicationOut(BaseModel):
     applied_at: datetime
     updated_at: datetime
     # Flattened job details for ease of use in frontend
+    provider_id: Optional[str] = None
+    # False when job.provider_id points at a deleted/missing user account
+    provider_available: Optional[bool] = None
     job_title: Optional[str] = None
     job_type: Optional[str] = None
     company_name: Optional[str] = None
+    company_logo_url: Optional[str] = None
     experience_required: Optional[str] = None
     salary_range: Optional[str] = None
     job_description: Optional[str] = None
@@ -427,6 +434,38 @@ class JobSkillsResponse(BaseModel):
     skills: List[str]
 
 
+class EnhanceJobSectionRequest(BaseModel):
+    section: str  # summary | responsibilities | interview_process
+    title: str
+    current_text: Optional[str] = None
+    location: Optional[str] = None
+    job_type: Optional[str] = None
+    employment_type: Optional[str] = None
+    experience: Optional[str] = None
+    required_skills: Optional[List[str]] = []
+
+    @field_validator("section")
+    @classmethod
+    def validate_section(cls, v: str) -> str:
+        key = (v or "").strip().lower()
+        allowed = {"summary", "responsibilities", "interview_process"}
+        if key not in allowed:
+            raise ValueError("section must be summary, responsibilities, or interview_process")
+        return key
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, v: str) -> str:
+        if not v or not str(v).strip():
+            raise ValueError("title is required")
+        return str(v).strip()
+
+
+class EnhanceJobSectionResponse(BaseModel):
+    text: str
+    section: str
+
+
 class VoiceJobParseRequest(BaseModel):
     transcript: str = ""
     audio_base64: Optional[str] = None
@@ -472,3 +511,30 @@ class JobListResponse(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class ApplyInsightWarningIn(BaseModel):
+    id: str
+    title: str
+    detail: str
+    meaning: Optional[str] = None
+
+
+class ApplyInsightsRequest(BaseModel):
+    warnings: List[ApplyInsightWarningIn] = []
+    seeker_job_role: Optional[str] = None
+    seeker_industry: Optional[str] = None
+    seeker_skills: List[str] = []
+    expected_salary: Optional[str] = None
+
+
+class ApplyInsightWarningOut(BaseModel):
+    id: str
+    title: str
+    detail: str
+    meaning: Optional[str] = None
+
+
+class ApplyInsightsResponse(BaseModel):
+    warnings: List[ApplyInsightWarningOut]
+    source: str = "heuristic"

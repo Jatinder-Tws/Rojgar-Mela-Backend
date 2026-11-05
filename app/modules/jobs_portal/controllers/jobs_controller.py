@@ -9,6 +9,11 @@ from app.core.database import get_db
 from app.modules.jobs_portal.models.job import JobPosting, JobType
 from app.shared.models.user import User
 from app.modules.jobs_portal.schemas.jobs import (
+    ApplyInsightsRequest,
+    ApplyInsightsResponse,
+    ApplyInsightWarningOut,
+    EnhanceJobSectionRequest,
+    EnhanceJobSectionResponse,
     JobCreate,
     JobDescriptionOnlyResponse,
     JobDescriptionRequest,
@@ -20,6 +25,7 @@ from app.modules.jobs_portal.schemas.jobs import (
     VoiceJobParseResponse,
 )
 from app.modules.jobs_portal.services.ai_jobcreation_service import (
+    enhance_job_section,
     generate_job_descriptions,
     generate_job_skills,
     parse_spoken_job,
@@ -72,12 +78,16 @@ def _queue_job_processing(background_tasks: BackgroundTasks, job_id: str) -> Non
     background_tasks.add_task(_process_job, job_id)
 
 
-async def create_job(
+async def create_job_for_provider(
     body: JobCreate,
     background_tasks: BackgroundTasks,
-    user: User,
+    provider: User,
+    actor: User,
     db: AsyncSession,
+    *,
+    audit_description: Optional[str] = None,
 ) -> JobOut:
+    """Create a job owned by ``provider``; ``actor`` is recorded on the audit log."""
     job_type = None
     if body.job_type:
         try:
@@ -86,8 +96,8 @@ async def create_job(
             pass
 
     location = body.location
-    if not location and user.company_location:
-        location = user.company_location
+    if not location and provider.company_location:
+        location = provider.company_location
 
     post_count = 0
     if body.post_count:
@@ -96,16 +106,21 @@ async def create_job(
         except (ValueError, TypeError):
             post_count = 0
 
+    company_label = (
+        provider.company_name
+        or f"{(provider.first_name or '').strip()} {(provider.last_name or '').strip()}".strip()
+        or "Provider"
+    )
     job = JobPosting(
-        provider_id=user.id,
+        provider_id=provider.id,
         title=body.title,
         description=body.description,
         required_skills=body.required_skills or [],
         experience_required=body.experience_required,
         job_type=job_type,
         salary_range=body.salary_range,
-        industry=body.industry or user.industry,
-        posted_by_name=body.posted_by_name or f"{user.first_name} {user.last_name}",
+        industry=body.industry or provider.industry,
+        posted_by_name=body.posted_by_name or company_label,
         location=location,
         post_count=post_count,
         ai_interview_enabled=body.ai_interview_enabled or False,
@@ -119,13 +134,19 @@ async def create_job(
     db.add(job)
     await log_audit_event(
         db,
-        user,
+        actor,
         action="CREATE",
         entity_type="job",
         entity_id=str(job.id),
         entity_name=job.title,
-        description=f"Created job posting: '{job.title}' ({job.location or 'Remote'})",
-        changes={"title": job.title, "location": job.location, "job_type": str(job_type) if job_type else None},
+        description=audit_description
+        or f"Created job posting: '{job.title}' ({job.location or 'Remote'})",
+        changes={
+            "title": job.title,
+            "location": job.location,
+            "job_type": str(job_type) if job_type else None,
+            "provider_id": str(provider.id),
+        },
     )
     await db.commit()
     await db.refresh(job)
@@ -135,6 +156,15 @@ async def create_job(
     return JobOut.model_validate(job)
 
 
+async def create_job(
+    body: JobCreate,
+    background_tasks: BackgroundTasks,
+    user: User,
+    db: AsyncSession,
+) -> JobOut:
+    return await create_job_for_provider(body, background_tasks, user, user, db)
+
+
 JOB_SORTABLE_COLUMNS = {
     "title": JobPosting.title,
     "posted_by_name": JobPosting.posted_by_name,
@@ -142,6 +172,71 @@ JOB_SORTABLE_COLUMNS = {
     "job_type": JobPosting.job_type,
     "created_at": JobPosting.created_at,
 }
+
+# Minimum AI match score to treat a job as "matched" in browse filters/badges.
+MATCHED_SCORE_FLOOR = 40.0
+
+
+async def _provider_company_fields_by_id(
+    db: AsyncSession,
+    provider_ids: list[str],
+) -> dict[str, dict]:
+    """Map provider id -> company_logo_url / company_name for list enrichment."""
+    if not provider_ids:
+        return {}
+    result = await db.execute(
+        select(User.id, User.profile_pic_url, User.company_name).where(User.id.in_(provider_ids))
+    )
+    out: dict[str, dict] = {}
+    for row in result.all():
+        out[str(row.id)] = {
+            "company_logo_url": row.profile_pic_url,
+            "company_name": row.company_name,
+        }
+    return out
+
+
+async def _enrich_jobs_with_seeker_matches(
+    db: AsyncSession,
+    user: User,
+    jobs: list,
+) -> list[JobOut]:
+    """Attach Match score/highlights/gaps and provider logo/name onto JobOut rows."""
+    from app.shared.models.user import UserRole
+    from app.modules.jobs_portal.models.match import Match
+
+    if not jobs:
+        return []
+
+    provider_fields = await _provider_company_fields_by_id(
+        db,
+        list({str(j.provider_id) for j in jobs if getattr(j, "provider_id", None)}),
+    )
+
+    by_job: dict = {}
+    if user.role == UserRole.seeker:
+        job_ids = [j.id for j in jobs]
+        match_result = await db.execute(
+            select(Match).where(Match.seeker_id == user.id, Match.job_id.in_(job_ids))
+        )
+        by_job = {str(m.job_id): m for m in match_result.scalars().all()}
+
+    enriched: list[JobOut] = []
+    for job in jobs:
+        payload = JobOut.model_validate(job).model_dump()
+        company = provider_fields.get(str(job.provider_id)) or {}
+        if company.get("company_logo_url"):
+            payload["company_logo_url"] = company["company_logo_url"]
+        if company.get("company_name") and not payload.get("company_name"):
+            payload["company_name"] = company["company_name"]
+        match = by_job.get(str(job.id))
+        if match:
+            payload["match_score"] = match.score
+            payload["fit_reason"] = match.fit_reason
+            payload["highlights"] = match.highlights or []
+            payload["gaps"] = match.gaps or []
+        enriched.append(JobOut.model_validate(payload))
+    return enriched
 
 
 async def list_jobs(
@@ -155,26 +250,37 @@ async def list_jobs(
     industry: Optional[str] = None,
     sort_by: Optional[str] = None,
     sort_order: Optional[str] = None,
+    matched_only: bool = False,
 ):
     from app.shared.models.user import UserRole
     from app.modules.jobs_portal.models.job import JobType as ModelJobType
+    from app.modules.jobs_portal.models.match import Match
     from sqlalchemy import func, and_, or_
 
-    sort_column = JOB_SORTABLE_COLUMNS.get(sort_by or "created_at", JobPosting.created_at)
-    order_fn = sort_column.asc() if sort_order == "asc" else sort_column.desc()
+    sort_key = sort_by or "created_at"
+    sort_by_match = sort_key == "match_score" and user.role == UserRole.seeker
+    use_match_join = (matched_only or sort_by_match) and user.role == UserRole.seeker
 
     if user.role == UserRole.provider:
-        base_query = (
-            select(JobPosting)
-            .where(JobPosting.provider_id == user.id)
-            .order_by(order_fn)
-        )
+        base_query = select(JobPosting).where(JobPosting.provider_id == user.id)
     else:
-        base_query = (
-            select(JobPosting)
-            .where(JobPosting.is_active == True)  # noqa
-            .order_by(order_fn)
-        )
+        base_query = select(JobPosting).where(JobPosting.is_active == True)  # noqa
+
+    if use_match_join:
+        join_on = and_(Match.job_id == JobPosting.id, Match.seeker_id == user.id)
+        if matched_only:
+            base_query = base_query.join(Match, join_on).where(Match.score >= MATCHED_SCORE_FLOOR)
+        else:
+            base_query = base_query.outerjoin(Match, join_on)
+
+    if sort_by_match:
+        order_fn = Match.score.asc().nullsfirst() if sort_order == "asc" else Match.score.desc().nullslast()
+        # Stable tie-breaker so pages do not shuffle.
+        base_query = base_query.order_by(order_fn, JobPosting.created_at.desc())
+    else:
+        sort_column = JOB_SORTABLE_COLUMNS.get(sort_key, JobPosting.created_at)
+        order_fn = sort_column.asc() if sort_order == "asc" else sort_column.desc()
+        base_query = base_query.order_by(order_fn)
 
     # Apply search and filters
     filters = []
@@ -210,10 +316,10 @@ async def list_jobs(
         offset = (page - 1) * page_size
         query = base_query.offset(offset).limit(page_size)
         result = await db.execute(query)
-        jobs = result.scalars().all()
+        jobs = result.scalars().unique().all()
 
         return {
-            "items": [JobOut.model_validate(j) for j in jobs],
+            "items": await _enrich_jobs_with_seeker_matches(db, user, jobs),
             "total": int(total),
             "page": page,
             "page_size": page_size,
@@ -222,8 +328,8 @@ async def list_jobs(
         if user.role != UserRole.provider:
             base_query = base_query.limit(100)
         result = await db.execute(base_query)
-        jobs = result.scalars().all()
-        return [JobOut.model_validate(j) for j in jobs]
+        jobs = result.scalars().unique().all()
+        return await _enrich_jobs_with_seeker_matches(db, user, jobs)
 
 
 async def get_distinct_industries(db: AsyncSession) -> List[str]:
@@ -251,7 +357,47 @@ async def get_job(job_id: str, user: User, db: AsyncSession) -> JobOut:
 
     payload = JobOut.model_validate(job).model_dump()
     payload.update(public_company_payload(job.provider))
+    enriched = await _enrich_jobs_with_seeker_matches(db, user, [job])
+    if enriched:
+        merged = enriched[0].model_dump()
+        # Keep company profile fields from public_company_payload.
+        for key, value in payload.items():
+            if key not in ("match_score", "fit_reason", "highlights", "gaps"):
+                merged[key] = value
+        return JobOut.model_validate(merged)
     return JobOut.model_validate(payload)
+
+
+async def apply_insights(
+    job_id: str,
+    body: ApplyInsightsRequest,
+    user: User,
+    db: AsyncSession,
+) -> ApplyInsightsResponse:
+    """Polish apply soft-warnings with AI when available; otherwise return heuristics unchanged."""
+    result = await db.execute(select(JobPosting).where(JobPosting.id == job_id))
+    job = result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    from app.modules.jobs_portal.services.apply_insights_service import polish_apply_warnings
+
+    required = job.required_skills if isinstance(job.required_skills, list) else []
+    polished, source = await polish_apply_warnings(
+        job_title=job.title or "this role",
+        job_description=job.description,
+        job_salary=job.salary_range,
+        required_skills=[str(s) for s in required if s],
+        seeker_job_role=body.seeker_job_role or getattr(user, "job_role", None),
+        seeker_industry=body.seeker_industry or getattr(user, "industry", None),
+        seeker_skills=body.seeker_skills or [],
+        expected_salary=body.expected_salary or getattr(user, "salary_range", None),
+        warnings=[w.model_dump() for w in (body.warnings or [])],
+    )
+    return ApplyInsightsResponse(
+        warnings=[ApplyInsightWarningOut.model_validate(w) for w in polished],
+        source=source,
+    )
 
 
 async def update_job_patch(
@@ -431,6 +577,26 @@ async def generate_skills(payload: JobTitleRequest) -> JobSkillsResponse:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception:
         raise HTTPException(status_code=500, detail="Something went wrong")
+
+
+async def enhance_section(payload: EnhanceJobSectionRequest) -> EnhanceJobSectionResponse:
+    try:
+        result = await enhance_job_section(
+            section=payload.section,
+            title=payload.title,
+            current_text=payload.current_text,
+            location=payload.location,
+            job_type=payload.job_type,
+            employment_type=payload.employment_type,
+            experience=payload.experience,
+            required_skills=payload.required_skills or [],
+        )
+        return EnhanceJobSectionResponse.model_validate(result)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        print(f"Error enhancing job section: {e}")
+        raise HTTPException(status_code=500, detail="Could not enhance this section")
 
 
 async def search_external_jobs(

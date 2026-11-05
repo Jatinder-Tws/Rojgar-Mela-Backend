@@ -312,6 +312,8 @@ class PortalAttendanceRecordOut(BaseModel):
     candidate_name: str
     status: str
     marked_at: datetime
+    session_started_at: Optional[datetime] = None
+    session_ended_at: Optional[datetime] = None
     session_title: Optional[str] = None
     session_date: Optional[str] = None
     session_start_time: Optional[str] = None
@@ -577,6 +579,7 @@ class PortalWeeklyFeePoint(BaseModel):
     label: str
     collected: float
     pending: float
+    expected: float = 0
 
 
 class PortalTeacherWorkloadPoint(BaseModel):
@@ -599,6 +602,8 @@ class PortalBatchPerformancePoint(BaseModel):
     avg_attendance: int
     avg_completion: int
     utilization: int
+    attendance_compliant_count: int = 0
+    completion_target_count: int = 0
 
 
 class PortalEnrollmentStatusCounts(BaseModel):

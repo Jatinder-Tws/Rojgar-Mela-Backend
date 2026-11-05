@@ -1,12 +1,8 @@
 import json
 import asyncio
 from app.core.config import settings
-import google.genai as genai
 from app.modules.jobs_portal.schemas.resume import ResumeResponse
-
-
-def get_gemini_client():
-    return genai.Client(api_key=settings.GOOGLE_API_KEY)
+from app.shared.services.gemini_resilient import GeminiServiceUnavailable, generate_content_resilient
 
 
 def build_prompt(job_title, job_description, technologies, resume_text):
@@ -48,18 +44,14 @@ async def analyze_resume_multi(data, resume_text):
 
     system_instruction = "You are a professional resume reviewer."
 
-    client =  get_gemini_client()
-
-    # return
-    response =  client.models.generate_content(
-        model=settings.GEMINI_CHAT_MODEL,
-        contents=[system_instruction, prompt],
+    response = await generate_content_resilient(
+        [system_instruction, prompt],
         config={
             "response_mime_type": "application/json",
             "response_schema": ResumeResponse,
         },
     )
-    return json.loads(response.text)
+    return json.loads(response.text or "{}")
 
 
 def merge_results(results):

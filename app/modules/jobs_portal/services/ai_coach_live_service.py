@@ -440,21 +440,37 @@ async def run_live_session(
 
     # --- finalize: Gemini session is fully closed at this point. Opens its own
     # short-lived DB session rather than reusing one held across the whole call. ---
+    ended_expired = False
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(AICoachSession).where(AICoachSession.id == session_id))
         session = result.scalar_one_or_none()
         if session:
-            session.chat_history = transcript.to_chat_history()
-            session.status = "completed"
-            await db.commit()
-
-            try:
-                await AICoachService.evaluate_session(db, session)  # reused unchanged from text mode
-            except Exception as e:
-                logger.error("AI Coach live evaluate_session failed (session_id=%s): %s", session_id, e)
+            history = transcript.to_chat_history()
+            session.chat_history = history
+            user_turns = sum(1 for m in history if m.get("role") == "user")
+            if user_turns == 0 and session.status == "in_progress":
+                ended_expired = await AICoachService.mark_session_expired(
+                    db,
+                    session_id,
+                    "The live interview ended before any answers were recorded.",
+                )
+            else:
+                session.status = "completed"
+                await db.commit()
+                try:
+                    await AICoachService.evaluate_session(db, session)  # reused unchanged from text mode
+                except Exception as e:
+                    logger.error("AI Coach live evaluate_session failed (session_id=%s): %s", session_id, e)
 
     try:
-        await websocket.send_json({"type": "evaluation_ready", "session_id": session_id})
+        if ended_expired:
+            await websocket.send_json({
+                "type": "session_expired",
+                "message": "The live interview ended before any answers were recorded.",
+                "session_id": session_id,
+            })
+        else:
+            await websocket.send_json({"type": "evaluation_ready", "session_id": session_id})
         await websocket.close()
     except Exception:
         pass

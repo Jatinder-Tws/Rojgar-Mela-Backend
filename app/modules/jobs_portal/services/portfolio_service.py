@@ -56,9 +56,14 @@ def normalize_education(items: Any) -> List[dict]:
 
 
 def normalize_certifications(items: Any) -> List[dict]:
+    """Keep certs that have a name or an uploaded file (file can exist before name is typed)."""
     out: List[dict] = []
     for item in _coerce_json_list(items):
-        if isinstance(item, dict) and str(item.get("name") or "").strip():
+        if not isinstance(item, dict):
+            continue
+        has_name = bool(str(item.get("name") or "").strip())
+        has_file = bool(str(item.get("file_url") or "").strip() or str(item.get("file_name") or "").strip())
+        if has_name or has_file:
             out.append(item)
     return out
 

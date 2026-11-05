@@ -167,9 +167,29 @@ def is_early_end(session: TrainingPortalClassSession, now: datetime, target: dat
     return now < end - timedelta(minutes=EARLY_END_GRACE_MINUTES)
 
 
+def sync_start_reminder_day(session: TrainingPortalClassSession, target: date) -> None:
+    """Keep 30/15 flags scoped to one calendar day (IST).
+
+    When the day rolls forward (recurring class next occurrence), clear the flags
+    once. Never clear them mid-window — that caused duplicate notifications.
+    """
+    key = target.isoformat()
+    current = (getattr(session, "start_reminder_for_date", None) or "").strip()
+    if current == key:
+        return
+    session.reminder_sent = False
+    session.reminder_15_sent = False
+    session.start_reminder_for_date = key
+
+
 def pending_reminder_tier(session: TrainingPortalClassSession, now: datetime, target: date) -> Optional[ReminderTier]:
-    if effective_live_status(session, now, target) in {"completed", "missed"}:
+    """Return 30 or 15 if a start reminder is due once for this occurrence day."""
+    if not session_occurs_on_date(session, target):
         return None
+    if effective_live_status(session, now, target) in {"completed", "missed", "live"}:
+        # Class already live / done — start reminders are only pre-start.
+        return None
+    sync_start_reminder_day(session, target)
     mins = minutes_until_start(session, now, target)
     if mins is None or mins <= 0:
         return None

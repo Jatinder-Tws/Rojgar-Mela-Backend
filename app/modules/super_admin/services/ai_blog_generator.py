@@ -30,15 +30,16 @@ def slugify(text: str) -> str:
 
 
 def _save_blog_image_bytes(image_bytes: bytes, ext: str = ".png") -> str:
-    """Save binary image data to uploads/blog_images directory and return public URL."""
+    """Save binary image data to uploads/blog_images and return a relative /uploads path."""
     upload_dir = get_upload_dir() / "blog_images"
     upload_dir.mkdir(parents=True, exist_ok=True)
     filename = f"blog_ai_{uuid.uuid4().hex}{ext}"
     filepath = upload_dir / filename
     with open(filepath, "wb") as f:
         f.write(image_bytes)
-    public_base = settings.BACKEND_PUBLIC_URL.rstrip("/")
-    return f"{public_base}/uploads/blog_images/{filename}"
+    # Relative on purpose: absolute BACKEND_PUBLIC_URL defaults to localhost and
+    # breaks in production. The frontend resolves /uploads/... via getFileUrl().
+    return f"/uploads/blog_images/{filename}"
 
 
 async def generate_blog_image_with_ai(title: str, subtitle: Optional[str] = None, category: Optional[str] = None) -> Optional[str]:

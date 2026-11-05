@@ -86,6 +86,17 @@ class AdminProviderCreate(AdminUserBase):
     company_type: Optional[str] = None
     company_location: Optional[str] = None
     company_size: Optional[str] = None
+    company_address: Optional[str] = None
+    company_website: Optional[str] = None
+    company_about: Optional[str] = None
+    industry: Optional[str] = None
+    job_role: Optional[str] = None
+    company_rating: Optional[float] = None
+    company_review_count: Optional[int] = None
+    company_reviews: Optional[list] = None
+    company_rating_source: Optional[str] = None
+    google_place_id: Optional[str] = None
+    google_maps_url: Optional[str] = None
 
 
 class AdminProviderUpdate(BaseModel):
@@ -98,6 +109,17 @@ class AdminProviderUpdate(BaseModel):
     company_type: Optional[str] = None
     company_location: Optional[str] = None
     company_size: Optional[str] = None
+    company_address: Optional[str] = None
+    company_website: Optional[str] = None
+    company_about: Optional[str] = None
+    industry: Optional[str] = None
+    job_role: Optional[str] = None
+    company_rating: Optional[float] = None
+    company_review_count: Optional[int] = None
+    company_reviews: Optional[list] = None
+    company_rating_source: Optional[str] = None
+    google_place_id: Optional[str] = None
+    google_maps_url: Optional[str] = None
     is_verified: Optional[bool] = None
     onboarding_complete: Optional[bool] = None
 
@@ -127,6 +149,15 @@ class AdminUserOut(BaseModel):
     company_type: Optional[str] = None
     company_location: Optional[str] = None
     company_size: Optional[str] = None
+    company_address: Optional[str] = None
+    company_website: Optional[str] = None
+    company_about: Optional[str] = None
+    company_rating: Optional[float] = None
+    company_review_count: Optional[int] = None
+    company_reviews: Optional[list] = None
+    company_rating_source: Optional[str] = None
+    google_place_id: Optional[str] = None
+    google_maps_url: Optional[str] = None
     profile_completion_percentage: Optional[int] = None
     welcome_email_status: Optional[str] = None
     welcome_email_error: Optional[str] = None
@@ -377,24 +408,126 @@ class SuperAdminChangePasswordRequest(BaseModel):
     new_password: str = Field(..., min_length=8)
 
 
+class AdminJobProviderOption(BaseModel):
+    id: str
+    company_name: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    email: Optional[str] = None
+    industry: Optional[str] = None
+    company_location: Optional[str] = None
+
+
+class AdminJobProviderOptionsResponse(BaseModel):
+    items: List[AdminJobProviderOption]
+    total: int
+    page: int
+    page_size: int
+
+
+class AdminJobCreate(BaseModel):
+    """Create a job posting on behalf of an existing provider account."""
+
+    provider_id: str = Field(..., min_length=1)
+    title: str = Field(..., min_length=1, max_length=200)
+    description: str = Field(..., min_length=1)
+    required_skills: Optional[List[str]] = None
+    experience_required: Optional[str] = None
+    job_type: Optional[str] = None
+    salary_range: Optional[str] = None
+    industry: Optional[str] = None
+    posted_by_name: Optional[str] = None
+    location: Optional[str] = None
+    post_count: Optional[str] = None
+    ai_interview_enabled: Optional[bool] = False
+    selection_threshold: Optional[int] = 70
+    shift: Optional[str] = None
+    employment_type: Optional[str] = None
+    perks: Optional[List[str]] = None
+    posting_details: Optional[dict] = None
+    is_active: Optional[bool] = True
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Job title is required")
+        return v
+
+    @field_validator("provider_id")
+    @classmethod
+    def validate_provider_id(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Provider is required")
+        return v
+
+
 class AdminJobListItem(BaseModel):
     id: str
     title: str
     company: str
     industry: Optional[str] = None
     location: Optional[str] = None
+    post_count: int = 0
+    application_count: int = 0
     is_active: bool
     created_at: datetime
+
+
+class AdminJobDetailResponse(BaseModel):
+    id: str
+    provider_id: str
+    title: str
+    description: str
+    required_skills: Optional[List[str]] = []
+    experience_required: Optional[str] = None
+    job_type: Optional[str] = None
+    salary_range: Optional[str] = None
+    industry: Optional[str] = None
+    posted_by_name: Optional[str] = None
+    location: Optional[str] = None
+    is_active: bool
+    post_count: int = 0
+    ai_interview_enabled: bool = False
+    selection_threshold: int = 70
+    shift: Optional[str] = None
+    employment_type: Optional[str] = None
+    perks: Optional[List[str]] = []
+    posting_details: Optional[dict] = None
+    source_platform: Optional[str] = None
+    external_apply_url: Optional[str] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    # Provider / company
+    company: str
+    provider_email: Optional[str] = None
+    provider_phone: Optional[str] = None
+    company_location: Optional[str] = None
+    company_address: Optional[str] = None
+    company_size: Optional[str] = None
+    company_website: Optional[str] = None
+    company_logo_url: Optional[str] = None
+    # Application funnel
+    application_count: int = 0
+    applications_by_status: dict[str, int] = Field(default_factory=dict)
+    match_count: int = 0
 
 
 class AdminMatchListItem(BaseModel):
     id: str
     seeker_name: str
     seeker_email: Optional[str] = None
+    seeker_id: Optional[str] = None
+    job_id: Optional[str] = None
+    provider_id: Optional[str] = None
     job_title: str
     company: str
     score: float
     created_at: datetime
+    application_id: Optional[str] = None
+    application_status: Optional[str] = None
 
 
 class AdminApplicationListItem(BaseModel):
@@ -404,11 +537,18 @@ class AdminApplicationListItem(BaseModel):
     candidate_phone: Optional[str] = None
     seeker_id: Optional[str] = None
     job_id: str
+    provider_id: Optional[str] = None
     job_title: str
     company: str
     status: str
     applied_at: datetime
     updated_at: datetime
+
+
+class AdminShortlistRequest(BaseModel):
+    """Admin/supervisor shortlists a seeker for a provider job (on behalf of provider)."""
+    seeker_id: str = Field(..., min_length=1)
+    job_id: str = Field(..., min_length=1)
 
 
 class AdminInterviewListItem(BaseModel):

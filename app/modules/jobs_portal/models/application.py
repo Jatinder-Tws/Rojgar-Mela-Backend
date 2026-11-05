@@ -1,7 +1,7 @@
 import uuid
 import enum
 from datetime import datetime
-from sqlalchemy import Column, DateTime, Enum, ForeignKey, JSON, String, Text
+from sqlalchemy import Column, DateTime, Enum, ForeignKey, Index, JSON, String, Text, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from app.core.database import Base
@@ -22,6 +22,15 @@ def _uuid():
 
 class Application(Base):
     __tablename__ = "applications"
+    __table_args__ = (
+        Index(
+            "uq_applications_seeker_job",
+            "seeker_id",
+            "job_id",
+            unique=True,
+            postgresql_where=text("seeker_id IS NOT NULL"),
+        ),
+    )
 
     id = Column(UUID(as_uuid=False), primary_key=True, default=_uuid)
     seeker_id = Column(UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)

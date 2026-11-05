@@ -126,10 +126,16 @@ async def build_dashboard_summary(
     ).all()
     seats_by_batch = {bid: int(cnt) for bid, cnt in seats_rows if bid}
 
-    filtered = [
+    dated = [
         e
         for e in enrollments
         if (not from_d and not to_d) or _in_range(_parse_iso_date(e.enrollment_date), from_d, to_d)
+    ]
+    # Exclude abandoned checkouts from KPIs (same as student directory / fee ledger).
+    filtered = [
+        e
+        for e in dated
+        if (e.status or "") != "payment_initiated" and (e.payment_status or "") != "initiated"
     ]
 
     unique_students = {
@@ -148,7 +154,7 @@ async def build_dashboard_summary(
     }
     attendance_sum = 0
     completion_sum = 0
-    at_risk = 0
+    at_risk_emails: set[str] = set()
     attendance_compliant = 0
     attendance_below = 0
     outstanding = 0.0
@@ -179,8 +185,17 @@ async def build_dashboard_summary(
             paid_status += 1
         elif e.payment_status == "pending":
             pending_status += 1
-        if e.attendance_percentage < 85 or e.payment_status == "overdue" or e.status in ("dropped", "absconded"):
-            at_risk += 1
+
+        # At-risk: unique trainees needing intervention (not dropped/absconded buckets).
+        # Low attendance only after started (batch seat, fee paid, or active).
+        email_key = (e.candidate_email or "").strip().lower()
+        if e.status not in ("dropped", "absconded") and email_key:
+            overdue = e.payment_status == "overdue"
+            started = bool(e.batch_id) or float(e.paid_amount or 0) > 0.01 or e.status == "active"
+            low_att = started and int(e.attendance_percentage or 0) < 85
+            if overdue or low_att:
+                at_risk_emails.add(email_key)
+
         if e.attendance_percentage >= 85:
             attendance_compliant += 1
         else:
@@ -191,6 +206,7 @@ async def build_dashboard_summary(
             cert_eligible += 1
 
     total_filtered = len(filtered)
+    at_risk = len(at_risk_emails)
     avg_attendance = round(attendance_sum / total_filtered) if total_filtered else 0
     avg_completion = round(completion_sum / total_filtered) if total_filtered else 0
 
@@ -293,6 +309,7 @@ async def build_dashboard_summary(
             "label": b["label"],
             "collected": round(b["collected"], 2),
             "pending": round(b["pending"], 2),
+            "expected": round(b["collected"] + b["pending"], 2),
         }
         for b in weeks
     ]
@@ -347,6 +364,8 @@ async def build_dashboard_summary(
         n = len(students)
         avg_att = round(sum(int(s.attendance_percentage or 0) for s in students) / n) if n else 0
         avg_comp = round(sum(int(s.completion_percentage or 0) for s in students) / n) if n else 0
+        att_compliant = sum(1 for s in students if int(s.attendance_percentage or 0) >= 85)
+        comp_target = sum(1 for s in students if int(s.completion_percentage or 0) >= 100)
         filled = seats_by_batch.get(b.id, 0)
         util = round((filled / b.max_seats) * 100) if b.max_seats else 0
         batch_performance.append(
@@ -357,6 +376,8 @@ async def build_dashboard_summary(
                 "avg_attendance": avg_att,
                 "avg_completion": avg_comp,
                 "utilization": util,
+                "attendance_compliant_count": att_compliant,
+                "completion_target_count": comp_target,
             }
         )
     batch_performance.sort(key=lambda x: (-x["student_count"], x["batch_name"].lower()))

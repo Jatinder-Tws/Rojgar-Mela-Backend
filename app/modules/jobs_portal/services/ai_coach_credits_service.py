@@ -15,6 +15,29 @@ from app.modules.training_portal.services.training_portal_payment_service import
 
 logger = logging.getLogger(__name__)
 
+
+def _checkout_key_id(is_mock: bool) -> Optional[str]:
+    """Key id for Razorpay Checkout — must match the key that created the order."""
+    if is_mock:
+        return None
+    key = (settings.RAZORPAY_KEY_ID or "").strip()
+    return key or None
+
+
+def _order_response_payload(order: CreditPurchaseOrder, *, is_mock: bool) -> Dict[str, Any]:
+    pkg = CREDIT_PACKAGES.get(order.package_id, {})
+    return {
+        "order_id": order.id,
+        "provider_order_id": order.provider_order_id,
+        "amount_rupees": order.amount_rupees,
+        "credits": order.credits,
+        "package_name": pkg.get("name", order.package_id),
+        "razorpay_key_id": _checkout_key_id(is_mock),
+        "is_mock": is_mock,
+        "status": order.status,
+    }
+
+
 # Credit top-up packages configuration
 CREDIT_PACKAGES = {
     "starter_15": {"credits": 15, "amount_rupees": 49.0, "name": "Starter Pack (15 Credits)"},
@@ -117,16 +140,7 @@ class AICoachCreditsService:
                     if existing_order.provider_order_id
                     else True
                 )
-                return {
-                    "order_id": existing_order.id,
-                    "provider_order_id": existing_order.provider_order_id,
-                    "amount_rupees": existing_order.amount_rupees,
-                    "credits": existing_order.credits,
-                    "package_name": CREDIT_PACKAGES.get(existing_order.package_id, {}).get("name", existing_order.package_id),
-                    "razorpay_key_id": settings.RAZORPAY_KEY_ID if not is_mock else "rzp_test_mock",
-                    "is_mock": is_mock,
-                    "status": existing_order.status,
-                }
+                return _order_response_payload(existing_order, is_mock=is_mock)
         
         # Call Razorpay helper
         rz_order = await create_razorpay_order(
@@ -153,16 +167,7 @@ class AICoachCreditsService:
         await db.refresh(order)
         
         is_mock = bool(rz_order.get("mock", True))
-        return {
-            "order_id": order.id,
-            "provider_order_id": rz_order["id"],
-            "amount_rupees": pkg["amount_rupees"],
-            "credits": pkg["credits"],
-            "package_name": pkg["name"],
-            "razorpay_key_id": settings.RAZORPAY_KEY_ID if not is_mock else "rzp_test_mock",
-            "is_mock": is_mock,
-            "status": "pending",
-        }
+        return _order_response_payload(order, is_mock=is_mock)
 
     @classmethod
     async def verify_and_fulfill_order(

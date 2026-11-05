@@ -46,7 +46,7 @@ async def create_notification(
     if auto_commit:
         await db.commit()
 
-    # Stream event via SSE (wrapped in type: NOTIFICATION so frontend notification handlers catch it)
+    # Stream after commit when auto_commit so unread-count APIs see the row immediately.
     payload = {
         "id": str(notif.id),
         "user_id": str(notif.user_id),
@@ -64,6 +64,25 @@ async def create_notification(
     })
 
     return notif
+
+
+def queue_notification_email(
+    to_email: str | None,
+    title: str,
+    message: str,
+    first_name: str = "there",
+) -> None:
+    """Queue a branded notification email. Never raises; failures are logged only."""
+    if not to_email:
+        return
+    try:
+        from app.shared.services.celery_tasks import send_notification_email_task
+
+        send_notification_email_task.delay(
+            to_email, title, message, first_name or "there"
+        )
+    except Exception:
+        logger.exception("Failed to queue notification email to %s", to_email)
 
 
 async def notify_super_admins(

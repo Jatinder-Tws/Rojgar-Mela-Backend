@@ -66,15 +66,17 @@ async def log_audit_event(
     actor_name_override: Optional[str] = None,
     actor_role_override: Optional[str] = None,
     actor_email_override: Optional[str] = None,
+    force: bool = False,
 ) -> Optional[AuditLog]:
     """
     Records an operational action in the audit_logs table.
     
     IMPORTANT:
     Super-Admin actions (is_super_admin == True or role == 'superadmin')
-    are EXCLUDED and will never be logged.
+    are EXCLUDED by default. Pass force=True for high-risk hiring actions
+    where an audit trail is required even when a super-admin acts.
     """
-    if actor is not None:
+    if actor is not None and not force:
         # Strict Super-Admin exclusion check
         if getattr(actor, "is_super_admin", False):
             return None

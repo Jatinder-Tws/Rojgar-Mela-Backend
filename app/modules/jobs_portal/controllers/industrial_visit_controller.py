@@ -8,7 +8,7 @@ from typing import Optional
 
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -55,6 +55,23 @@ logger = logging.getLogger(__name__)
 
 IST_TZ = timezone(timedelta(hours=5, minutes=30))
 INDIAN_MOBILE_RE = re.compile(r"^[6-9]\d{9}$")
+
+
+def _visit_not_deleted():
+    """Treat NULL is_deleted as live (legacy rows before soft-delete backfill)."""
+    return IndustrialVisit.is_deleted.is_not(True)
+
+
+async def _backfill_null_is_deleted(db: AsyncSession) -> None:
+    """Legacy industrial_visits rows may have is_deleted=NULL; normalize to False."""
+    result = await db.execute(
+        update(IndustrialVisit)
+        .where(IndustrialVisit.is_deleted.is_(None))
+        .values(is_deleted=False)
+    )
+    if result.rowcount:
+        await db.commit()
+        logger.info("Backfilled is_deleted=False on %s industrial visits", result.rowcount)
 
 
 def _normalize_phone(phone: str) -> str:
@@ -205,7 +222,7 @@ async def ensure_default_visit(db: AsyncSession) -> IndustrialVisit:
         select(IndustrialVisit)
         .where(
             IndustrialVisit.is_active.is_(True),
-            IndustrialVisit.is_deleted.is_(False),
+            _visit_not_deleted(),
         )
         .order_by(IndustrialVisit.created_at.asc())
         .limit(1)
@@ -219,6 +236,8 @@ async def ensure_default_visit(db: AsyncSession) -> IndustrialVisit:
     )
     existing = named.scalar_one_or_none()
     if existing:
+        if existing.is_deleted is None:
+            existing.is_deleted = False
         existing.is_active = True
         existing.updated_at = datetime.utcnow()
         await db.commit()
@@ -251,7 +270,7 @@ async def get_public_visit(slug: str, db: AsyncSession) -> IndustrialVisitPublic
     result = await db.execute(
         select(IndustrialVisit).where(
             IndustrialVisit.slug == key,
-            IndustrialVisit.is_deleted.is_(False),
+            _visit_not_deleted(),
         )
     )
     visit = result.scalar_one_or_none()
@@ -264,7 +283,7 @@ async def get_check_in_visit(check_in_slug: str, db: AsyncSession) -> Industrial
     result = await db.execute(
         select(IndustrialVisit).where(
             IndustrialVisit.check_in_slug == (check_in_slug or "").strip(),
-            IndustrialVisit.is_deleted.is_(False),
+            _visit_not_deleted(),
         )
     )
     visit = result.scalar_one_or_none()
@@ -285,7 +304,7 @@ async def register_student(
         result = await db.execute(
             select(IndustrialVisit).where(
                 IndustrialVisit.slug == key,
-                IndustrialVisit.is_deleted.is_(False),
+                _visit_not_deleted(),
             )
         )
         visit = result.scalar_one_or_none()
@@ -455,8 +474,9 @@ async def admin_list_visits(
     sort_order: Optional[str] = None,
     is_active: Optional[bool] = None,
 ) -> IndustrialVisitAdminListResponse:
+    await _backfill_null_is_deleted(db)
     await ensure_default_visit(db)
-    filters = [IndustrialVisit.is_deleted.is_(False)]
+    filters = [_visit_not_deleted()]
     if is_active is not None:
         filters.append(IndustrialVisit.is_active.is_(is_active))
     if search and search.strip():
@@ -510,7 +530,7 @@ async def admin_get_visit(visit_id: str, db: AsyncSession) -> IndustrialVisitAdm
     result = await db.execute(
         select(IndustrialVisit).where(
             IndustrialVisit.id == visit_id,
-            IndustrialVisit.is_deleted.is_(False),
+            _visit_not_deleted(),
         )
     )
     visit = result.scalar_one_or_none()
@@ -569,7 +589,7 @@ async def admin_delete_visit(visit_id: str, db: AsyncSession) -> None:
     result = await db.execute(
         select(IndustrialVisit).where(
             IndustrialVisit.id == visit_id,
-            IndustrialVisit.is_deleted.is_(False),
+            _visit_not_deleted(),
         )
     )
     visit = result.scalar_one_or_none()

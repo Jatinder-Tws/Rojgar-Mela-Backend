@@ -12,6 +12,7 @@ from typing import List, Optional, Protocol, runtime_checkable
 from openai import AsyncOpenAI
 import google.genai as genai
 from app.core.config import settings
+from app.shared.services.gemini_resilient import GeminiServiceUnavailable, generate_content_resilient
 
 
 @runtime_checkable
@@ -37,52 +38,30 @@ class GeminiAdapter:
 
     async def chat_completion(self, system: str, user: str) -> str:
         combined_prompt = f"{system}\n\n{user}"
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                response = await asyncio.to_thread(
-                    self._client.models.generate_content,
-                    model=settings.GEMINI_CHAT_MODEL,
-                    contents=[combined_prompt],
-                    config={
-                        "temperature": 0.2,
-                        "max_output_tokens": 8192,
-                        "response_mime_type": "application/json",
-                    },
-                )
-                return response.text or ""
-            except Exception as e:
-                print(f"Gemini API Error (Attempt {attempt+1}): {e}")
-                if attempt < max_retries - 1 and ("503" in str(e) or "quota" in str(e).lower()):
-                    await asyncio.sleep(2)
-                    continue
-                raise
+        response = await generate_content_resilient(
+            [combined_prompt],
+            config={
+                "temperature": 0.2,
+                "max_output_tokens": 8192,
+                "response_mime_type": "application/json",
+            },
+        )
+        return response.text or ""
 
     async def chat_completion_with_usage(self, system: str, user: str) -> tuple[str, int]:
         combined_prompt = f"{system}\n\n{user}"
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                response = await asyncio.to_thread(
-                    self._client.models.generate_content,
-                    model=settings.GEMINI_CHAT_MODEL,
-                    contents=[combined_prompt],
-                    config={
-                        "temperature": 0.2,
-                        "max_output_tokens": 8192,
-                        "response_mime_type": "application/json",
-                    },
-                )
-                tokens = 0
-                if response.usage_metadata:
-                    tokens = response.usage_metadata.total_token_count
-                return (response.text or ""), tokens
-            except Exception as e:
-                print(f"Gemini API Error (Attempt {attempt+1}): {e}")
-                if attempt < max_retries - 1 and ("503" in str(e) or "quota" in str(e).lower()):
-                    await asyncio.sleep(2)
-                    continue
-                raise
+        response = await generate_content_resilient(
+            [combined_prompt],
+            config={
+                "temperature": 0.2,
+                "max_output_tokens": 8192,
+                "response_mime_type": "application/json",
+            },
+        )
+        tokens = 0
+        if response.usage_metadata:
+            tokens = response.usage_metadata.total_token_count
+        return (response.text or ""), tokens
 
 
 class OpenAIAdapter:

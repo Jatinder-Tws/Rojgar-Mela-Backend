@@ -1,6 +1,52 @@
+import re
 from typing import Any, Dict, List, Optional
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+# Legacy rows were stored with an absolute dev-host URL
+# (http://localhost:8000/uploads/blog_images/x.jpg), which never loads in production.
+# Strip any "<scheme>://<host>[:port]" prefix that points at an /uploads path so
+# the frontend can resolve it against the live API base.
+_LOCAL_UPLOAD_PREFIX = re.compile(
+    r"^https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3})"
+    r"(?::\d+)?(?=/(?:api/)?uploads/)",
+    re.IGNORECASE,
+)
+
+
+def _own_host_prefixes() -> tuple[str, ...]:
+    """Absolute origins this deployment may have stamped on stored upload URLs."""
+    from app.core.config import settings
+
+    out: list[str] = []
+    for raw in (
+        settings.PUBLIC_BASE_URL or settings.BACKEND_PUBLIC_URL,
+        settings.BACKEND_PUBLIC_URL,
+        settings.FRONTEND_URL,
+    ):
+        origin = (raw or "").strip().rstrip("/")
+        if origin:
+            out.append(origin)
+    return tuple(out)
+
+
+def normalize_blog_media_url(value: Optional[str]) -> Optional[str]:
+    """Turn stored upload URLs into a relative `/uploads/...` path; leave external URLs alone."""
+    if value is None:
+        return None
+    url = value.strip()
+    if not url:
+        return None
+    url = _LOCAL_UPLOAD_PREFIX.sub("", url, count=1)
+    if url.startswith(("http://", "https://")):
+        for origin in _own_host_prefixes():
+            if url.startswith(origin + "/uploads/") or url.startswith(origin + "/api/uploads/"):
+                url = url[len(origin):]
+                break
+    if url.startswith("/api/uploads/"):
+        url = url[len("/api"):]
+    return url
 
 
 class FAQItem(BaseModel):
@@ -63,6 +109,11 @@ class BlogPostBase(BaseModel):
     sections: Optional[List[Dict[str, Any]]] = []
     faqs: Optional[List[FAQItem]] = []
 
+    @field_validator("author_avatar", "cover_image", mode="before")
+    @classmethod
+    def _normalize_media(cls, v: Any) -> Any:
+        return normalize_blog_media_url(v) if isinstance(v, str) else v
+
 
 class BlogPostCreate(BlogPostBase):
     pass
@@ -87,6 +138,11 @@ class BlogPostUpdate(BaseModel):
     content_markdown: Optional[str] = None
     sections: Optional[List[Dict[str, Any]]] = None
     faqs: Optional[List[FAQItem]] = None
+
+    @field_validator("author_avatar", "cover_image", mode="before")
+    @classmethod
+    def _normalize_media(cls, v: Any) -> Any:
+        return normalize_blog_media_url(v) if isinstance(v, str) else v
 
 
 class BlogPostOut(BlogPostBase):

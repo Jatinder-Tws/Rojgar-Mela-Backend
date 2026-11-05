@@ -13,6 +13,14 @@ from app.modules.jobs_portal.schemas.jobs import JobWithMatch, MatchedCandidateO
 from app.shared.services.notification_service import create_notification
 
 
+def _provider_display_name(provider: User) -> str:
+    company = (provider.company_name or "").strip()
+    if company:
+        return company
+    person = f"{provider.first_name or ''} {provider.last_name or ''}".strip()
+    return person or "Employer"
+
+
 async def get_matched_jobs(user: User, db: AsyncSession) -> List[JobWithMatch]:
     query = (
         select(JobPosting, Match.score, Match.fit_reason, Match.highlights, Match.gaps)
@@ -24,8 +32,19 @@ async def get_matched_jobs(user: User, db: AsyncSession) -> List[JobWithMatch]:
     result = await db.execute(query)
     rows = result.all()
 
+    provider_ids = list({str(job.provider_id) for job, *_ in rows if job.provider_id})
+    company_by_provider: dict[str, dict] = {}
+    if provider_ids:
+        providers_res = await db.execute(select(User).where(User.id.in_(provider_ids)))
+        for provider in providers_res.scalars().all():
+            company_by_provider[str(provider.id)] = {
+                "company_name": _provider_display_name(provider),
+                "company_logo_url": provider.profile_pic_url,
+            }
+
     results = []
     for job, score, fit_reason, highlights, gaps in rows:
+        company = company_by_provider.get(str(job.provider_id), {})
         results.append(JobWithMatch(
             id=str(job.id),
             provider_id=str(job.provider_id),
@@ -49,6 +68,8 @@ async def get_matched_jobs(user: User, db: AsyncSession) -> List[JobWithMatch]:
             selection_threshold=job.selection_threshold,
             source_platform=job.source_platform,
             external_apply_url=job.external_apply_url,
+            company_name=company.get("company_name"),
+            company_logo_url=company.get("company_logo_url"),
         ))
     return results
 
@@ -184,12 +205,17 @@ async def show_interest(candidate_id: str, user: User, db: AsyncSession) -> dict
     if not candidate or role_str != "seeker":
         raise HTTPException(status_code=404, detail="Candidate not found")
 
+    company_label = _provider_display_name(user)
     await create_notification(
         db=db,
         user_id=candidate_id,
         type=NotificationType.interest,
-        title="Profile Interest",
-        message=f"{user.first_name} {user.last_name} from {user.company_name or 'a company'} has shown interest in your profile. Log in to view and connect.",
+        title=company_label,
+        message=(
+            f"{user.first_name} {user.last_name} from {company_label} has shown interest "
+            "in your profile. Log in to view and connect."
+        ),
         related_user_id=user.id,
+        auto_commit=True,
     )
     return {"message": "Interest shown successfully. Candidate has been notified."}

@@ -7,6 +7,7 @@ from sqlalchemy import select, update, delete, func, case, or_, distinct
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.modules.jobs_portal.models.career_roadmap import CareerRoadmap
 from app.modules.jobs_portal.models.roadmap import Roadmap, Milestone, Resource, MilestoneStatus, RoadmapCategory, RoadmapRole
 from app.shared.models.user import User
 from app.modules.jobs_portal.models.portfolio import Portfolio  # Ensure Portfolio is registered for backref
@@ -53,6 +54,16 @@ class RoadmapService:
         Suggest potential career roles for the user from published roadmaps in the database
         """
         try:
+            catalog_titles = (
+                await db.execute(
+                    select(distinct(CareerRoadmap.title)).where(CareerRoadmap.is_published.is_(True))
+                )
+            ).scalars().all()
+            option_roles = (await db.execute(select(distinct(RoadmapRole.name)))).scalars().all()
+            seeded = [r for r in (*catalog_titles, *option_roles) if r and str(r).strip()]
+            if seeded:
+                return list(dict.fromkeys(seeded))
+
             stmt = select(distinct(Roadmap.target_role)).where(
                 Roadmap.is_published.is_(True),
                 Roadmap.user_id.is_(None),

@@ -9,6 +9,7 @@ from sqlalchemy import func, literal, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.jobs_portal.models.career_enquiry import DEFAULT_STATUS, CareerEnquiry
+from app.modules.jobs_portal.models.event_lucky import EventLuckyEntry
 from app.modules.super_admin.models.contact_inquiry import DEFAULT_CONTACT_STATUS, ContactInquiry
 from app.shared.models.notification import NotificationType
 from app.modules.jobs_portal.schemas.career_enquiry import (
@@ -43,6 +44,34 @@ def _follow_up_fields(item) -> dict:
         "main_objection": item.main_objection,
         "final_outcome": item.final_outcome,
     }
+
+
+async def _otp_verified_enquiry_ids(db: AsyncSession, enquiry_ids: List[str]) -> set[str]:
+    """Enquiry IDs whose linked event registration completed email OTP."""
+    ids = [eid for eid in enquiry_ids if eid]
+    if not ids:
+        return set()
+    rows = await db.execute(
+        select(EventLuckyEntry.enquiry_id).where(
+            EventLuckyEntry.enquiry_id.in_(ids),
+            EventLuckyEntry.email_verified.is_(True),
+        )
+    )
+    return {str(eid) for eid in rows.scalars().all() if eid}
+
+
+async def _with_email_verified(
+    db: AsyncSession,
+    items: List[UnifiedEnquiryOut],
+) -> List[UnifiedEnquiryOut]:
+    career_ids = [item.id for item in items if item.source == "career"]
+    verified = await _otp_verified_enquiry_ids(db, career_ids)
+    if not verified:
+        return items
+    return [
+        item.model_copy(update={"email_verified": True}) if item.id in verified else item
+        for item in items
+    ]
 
 
 def _career_to_out(item: CareerEnquiry) -> CareerEnquiryOut:
@@ -177,7 +206,8 @@ async def admin_get_enquiry(enquiry_id: str, db: AsyncSession) -> UnifiedEnquiry
     career_result = await db.execute(select(CareerEnquiry).where(CareerEnquiry.id == enquiry_id))
     career_enquiry = career_result.scalar_one_or_none()
     if career_enquiry:
-        return _career_to_unified(career_enquiry)
+        items = await _with_email_verified(db, [_career_to_unified(career_enquiry)])
+        return items[0]
 
     contact_result = await db.execute(select(ContactInquiry).where(ContactInquiry.id == enquiry_id))
     contact_enquiry = contact_result.scalar_one_or_none()
@@ -643,8 +673,9 @@ async def _list_all_merged(
     unified.sort(key=lambda item: _merged_sort_value(item, sort_by), reverse=_sort_desc(sort_dir))
     total = len(unified)
     offset = (page - 1) * page_size
+    page_items = await _with_email_verified(db, unified[offset : offset + page_size])
     return CareerEnquiryListResponse(
-        items=unified[offset : offset + page_size],
+        items=page_items,
         total=total,
         page=page,
         page_size=page_size,
@@ -699,8 +730,9 @@ async def admin_list_career_enquiries(
             sort_by=sort_by,
             sort_dir=sort_dir,
         )
+        items = await _with_email_verified(db, [_career_to_unified(row) for row in rows])
         return CareerEnquiryListResponse(
-            items=[_career_to_unified(row) for row in rows],
+            items=items,
             total=total,
             page=page,
             page_size=page_size,
@@ -863,7 +895,8 @@ async def admin_update_career_enquiry_status(
 
         await db.commit()
         await db.refresh(enquiry)
-        return _career_to_unified(enquiry)
+        items = await _with_email_verified(db, [_career_to_unified(enquiry)])
+        return items[0]
 
     result = await db.execute(select(ContactInquiry).where(ContactInquiry.id == enquiry_id))
     inquiry = result.scalar_one_or_none()
@@ -1150,7 +1183,8 @@ async def admin_create_enquiry(
     db.add(enquiry)
     await db.commit()
     await db.refresh(enquiry)
-    return _career_to_unified(enquiry)
+    items = await _with_email_verified(db, [_career_to_unified(enquiry)])
+    return items[0]
 
 
 def enquiry_import_template():

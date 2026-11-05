@@ -261,55 +261,75 @@ def send_candidate_match_email_task(
     run_async(_send())
 
 
-def queue_interview_scheduled_email(**kwargs):
+def _queue_email_task_or_send_direct(
+    *,
+    task,
+    kwargs: dict,
+    send_coro,
+    label: str,
+) -> None:
+    """Prefer Celery; if unavailable, send via the async email service with logging."""
     to_email = kwargs.get("to_email")
     if not to_email:
         return
     try:
-        send_interview_scheduled_email_task.delay(**kwargs)
+        task.delay(**kwargs)
+        return
     except Exception as exc:
-        logger.warning(f"Failed to queue interview email via celery to {to_email}: {exc}")
-        import asyncio
-        from app.shared.services.email_service import send_interview_scheduled_email
+        logger.warning("Failed to queue %s via Celery to %s: %s", label, to_email, exc)
+
+    async def _send():
+        await send_coro(**kwargs)
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
         try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(send_interview_scheduled_email(**kwargs))
-        except RuntimeError:
-            pass
+            asyncio.run(_send())
+        except Exception:
+            logger.exception("Failed to send %s directly to %s (no event loop)", label, to_email)
+        return
+
+    async def _send_logged():
+        try:
+            await _send()
+        except Exception:
+            logger.exception("Failed to send %s directly to %s", label, to_email)
+
+    loop.create_task(_send_logged())
+
+
+def queue_interview_scheduled_email(**kwargs):
+    from app.shared.services.email_service import send_interview_scheduled_email
+
+    _queue_email_task_or_send_direct(
+        task=send_interview_scheduled_email_task,
+        kwargs=kwargs,
+        send_coro=send_interview_scheduled_email,
+        label="interview-scheduled email",
+    )
 
 
 def queue_job_match_email(**kwargs):
-    to_email = kwargs.get("to_email")
-    if not to_email:
-        return
-    try:
-        send_job_match_email_task.delay(**kwargs)
-    except Exception as exc:
-        logger.warning(f"Failed to queue job match email via celery to {to_email}: {exc}")
-        import asyncio
-        from app.shared.services.email_service import send_job_match_email
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(send_job_match_email(**kwargs))
-        except RuntimeError:
-            pass
+    from app.shared.services.email_service import send_job_match_email
+
+    _queue_email_task_or_send_direct(
+        task=send_job_match_email_task,
+        kwargs=kwargs,
+        send_coro=send_job_match_email,
+        label="job-match email",
+    )
 
 
 def queue_candidate_match_email(**kwargs):
-    to_email = kwargs.get("to_email")
-    if not to_email:
-        return
-    try:
-        send_candidate_match_email_task.delay(**kwargs)
-    except Exception as exc:
-        logger.warning(f"Failed to queue candidate match email via celery to {to_email}: {exc}")
-        import asyncio
-        from app.shared.services.email_service import send_candidate_match_email
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(send_candidate_match_email(**kwargs))
-        except RuntimeError:
-            pass
+    from app.shared.services.email_service import send_candidate_match_email
+
+    _queue_email_task_or_send_direct(
+        task=send_candidate_match_email_task,
+        kwargs=kwargs,
+        send_coro=send_candidate_match_email,
+        label="candidate-match email",
+    )
 
 
 @celery_app.task(

@@ -51,6 +51,77 @@ def _split_full_name(full_name: str) -> tuple[str, str]:
         return parts[0], ""
     return parts[0], " ".join(parts[1:])
 
+
+def _looks_like_excel(content: bytes, filename: str = "") -> bool:
+    name = (filename or "").lower()
+    if name.endswith((".xlsx", ".xls")):
+        return True
+    # OLE Compound Document (.xls)
+    if content[:8] == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":
+        return True
+    # ZIP / OOXML (.xlsx) — avoid false positives on tiny files
+    if len(content) > 4 and content[:2] == b"PK":
+        return True
+    return False
+
+
+def _decode_tabular_text(content: bytes) -> str:
+    for encoding in ("utf-8-sig", "utf-8", "cp1252", "iso-8859-1"):
+        try:
+            return content.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return content.decode("utf-8", errors="replace")
+
+
+def read_import_dataframe(content: bytes, filename: str = "") -> pd.DataFrame:
+    """
+    Read seeker/provider bulk-import uploads.
+
+    Handles Excel, comma/semicolon/tab CSV (Excel locale exports), and gives a
+    clear error when the file is not a multi-column table.
+    """
+    if not content or not content.strip():
+        raise ValueError("File is empty")
+
+    if _looks_like_excel(content, filename):
+        return pd.read_excel(io.BytesIO(content), dtype=str)
+
+    text = _decode_tabular_text(content)
+    if not text.strip():
+        raise ValueError("File is empty")
+
+    last_err: Optional[Exception] = None
+    header_line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+
+    # Explicit separators only. Do NOT use sep=None (Sniffer can pick letters like "t").
+    # engine='python' treats sep as regex — never pass a bare "|".
+    for sep in (",", ";", "\t"):
+        if sep not in header_line:
+            continue
+        try:
+            df = pd.read_csv(
+                io.StringIO(text),
+                dtype=str,
+                sep=sep,
+                engine="python",
+                on_bad_lines="error",
+            )
+        except Exception as exc:
+            last_err = exc
+            continue
+        if len(df.columns) >= 2:
+            return df
+
+    detail = str(last_err) if last_err else "no comma/semicolon/tab columns detected in header"
+    raise ValueError(
+        "Could not read as a multi-column CSV/Excel file "
+        f"({detail}). Download the sample template and save as CSV "
+        "(comma or semicolon separated) or Excel (.xlsx) with headers like "
+        "first_name, last_name, email, phone."
+    )
+
+
 async def run_bulk_import_job(
     job_id: str,
     content: Optional[bytes] = None,
@@ -89,23 +160,20 @@ async def _run_bulk_import_job_inner(
     file_path: Optional[str] = None,
 ) -> None:
     job = get_job(job_id)
-    filename = (file_path or job.get("filename", "") if job else "").lower()
-    
+    filename = ""
+    if job and job.get("filename"):
+        filename = str(job.get("filename") or "")
+    if file_path:
+        filename = filename or file_path
+
     try:
-        if filename.endswith(('.xlsx', '.xls')):
-            df = pd.read_excel(io.BytesIO(content), dtype=str)
-        else:
-            try:
-                text = content.decode("utf-8-sig")
-            except UnicodeDecodeError:
-                text = content.decode("iso-8859-1")
-            df = pd.read_csv(io.StringIO(text), dtype=str)
-            
+        df = read_import_dataframe(content, filename=filename)
+
         # Normalize column names for flexible header mapping.
         df.columns = [_normalize_header(c) for c in df.columns]
-        
+
         df = df.where(pd.notnull(df), None)
-        rows: List[dict] = df.to_dict('records')
+        rows: List[dict] = df.to_dict("records")
     except Exception as e:
         update_job(job_id, status="failed", message=f"Invalid file format: {str(e)}", progress=100)
         return

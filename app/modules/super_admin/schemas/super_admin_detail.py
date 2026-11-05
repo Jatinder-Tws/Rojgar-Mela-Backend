@@ -36,6 +36,8 @@ class ProviderJobItem(BaseModel):
 
 class SeekerApplicationItem(BaseModel):
     id: str
+    job_id: Optional[str] = None
+    provider_id: Optional[str] = None
     job_title: str
     company_name: Optional[str] = None
     company_location: Optional[str] = None
@@ -53,6 +55,8 @@ class SeekerApplicationItem(BaseModel):
 class SeekerInterviewItem(BaseModel):
     id: str
     title: str
+    job_id: Optional[str] = None
+    provider_id: Optional[str] = None
     job_title: Optional[str] = None
     provider_name: Optional[str] = None
     interview_type: Optional[str] = None
@@ -66,12 +70,32 @@ class SeekerInterviewItem(BaseModel):
         from_attributes = True
 
 
+# ── Application (for listing under provider) ──────────────────────────────
+
+class ProviderApplicationItem(BaseModel):
+    id: str
+    candidate_name: str
+    candidate_email: Optional[str] = None
+    candidate_phone: Optional[str] = None
+    seeker_id: Optional[str] = None
+    job_id: str
+    job_title: str
+    status: str
+    applied_at: datetime
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
 # ── Provider Interview item ───────────────────────────────────────────────
 
 class ProviderInterviewItem(BaseModel):
     id: str
     title: str
+    seeker_id: Optional[str] = None
     seeker_name: Optional[str] = None
+    job_id: Optional[str] = None
     job_title: Optional[str] = None
     interview_type: Optional[str] = None
     status: str
@@ -124,6 +148,12 @@ class AdminProviderDetailResponse(BaseModel):
     total_jobs: int = 0
     active_jobs: int = 0
     total_applications_received: int = 0
+
+    # Applications received across this provider's jobs (additive; read-only)
+    applications: List[ProviderApplicationItem] = []
+    shortlisted_count: int = 0
+    interviewing_count: int = 0
+    selected_count: int = 0
 
     # Recent interviews
     interviews: List[ProviderInterviewItem] = []

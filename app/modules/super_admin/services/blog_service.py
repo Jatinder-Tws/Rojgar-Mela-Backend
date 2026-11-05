@@ -7,7 +7,11 @@ from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.super_admin.models.blog_post import BlogPost
-from app.modules.super_admin.schemas.blog_admin import BlogPostCreate, BlogPostUpdate
+from app.modules.super_admin.schemas.blog_admin import (
+    BlogPostCreate,
+    BlogPostUpdate,
+    normalize_blog_media_url,
+)
 
 
 def slugify(text: str) -> str:
@@ -143,7 +147,9 @@ async def create_blog_post(db: AsyncSession, data: BlogPostCreate, created_by_id
     if not published_date_str:
         published_date_str = datetime.utcnow().strftime("%B %d, %Y")
 
-    resolved_status = resolve_publish_status(data.status, data.author_avatar, data.cover_image)
+    author_avatar = normalize_blog_media_url(data.author_avatar)
+    cover_image = normalize_blog_media_url(data.cover_image)
+    resolved_status = resolve_publish_status(data.status, author_avatar, cover_image)
 
     post = BlogPost(
         id=str(uuid.uuid4()),
@@ -155,9 +161,9 @@ async def create_blog_post(db: AsyncSession, data: BlogPostCreate, created_by_id
         tags=data.tags or [],
         author_name=data.author_name or "Rojgar Mela Content Team",
         author_role=data.author_role or "Career Research & Editorial",
-        author_avatar=data.author_avatar,
+        author_avatar=author_avatar,
         author_bio=data.author_bio,
-        cover_image=data.cover_image,
+        cover_image=cover_image,
         read_time=data.read_time or "6 min read",
         published_date=published_date_str,
         status=resolved_status,
@@ -196,6 +202,10 @@ async def update_blog_post(db: AsyncSession, blog_id: str, data: BlogPostUpdate)
         update_dict["faqs"] = [
             f if isinstance(f, dict) else f.dict() for f in update_dict["faqs"]
         ]
+
+    for media_key in ("author_avatar", "cover_image"):
+        if media_key in update_dict and update_dict[media_key] is not None:
+            update_dict[media_key] = normalize_blog_media_url(update_dict[media_key])
 
     final_author_avatar = update_dict.get("author_avatar", post.author_avatar)
     final_cover_image = update_dict.get("cover_image", post.cover_image)

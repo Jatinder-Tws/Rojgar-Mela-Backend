@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from pydantic import BaseModel, Field, field_serializer
@@ -8,6 +8,9 @@ def _utc_iso(dt: datetime) -> str:
     """Always emit UTC ISO string with Z suffix so browsers parse correctly."""
     if dt is None:
         return ''
+    if dt.tzinfo is not None:
+        # Avoid ...+00:00Z which is invalid in JS Date parsers
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
     return dt.isoformat() + 'Z'
 
 

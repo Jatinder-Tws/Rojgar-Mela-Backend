@@ -42,6 +42,25 @@ from app.modules.super_admin.services.support_realtime_service import broadcast_
 logger = logging.getLogger(__name__)
 
 
+async def _helpdesk_supervisor_emails(db: AsyncSession) -> list[str]:
+    from app.shared.models.supervisor_profile import SupervisorProfile
+
+    result = await db.execute(
+        select(User.email, SupervisorProfile.permissions)
+        .join(SupervisorProfile, SupervisorProfile.user_id == User.id)
+        # User model has no is_active; supervisor profile gate is the source of truth.
+        .where(SupervisorProfile.is_active.is_(True))
+    )
+    emails: list[str] = []
+    for email, permissions in result.all():
+        if not email:
+            continue
+        perms = permissions if isinstance(permissions, list) else []
+        if "*" in perms or "help_desk" in perms:
+            emails.append(email.strip().lower())
+    return emails
+
+
 async def _add_portal_notification(
     db: AsyncSession,
     email: str,
@@ -71,8 +90,17 @@ async def _add_portal_notification(
         logger.warning("Failed to add portal notification: %s", exc)
 
 
-async def _safe_notify_user(db: AsyncSession, user_id: str, title: str, message: str, related_user_id: Optional[str] = None):
+async def _safe_notify_user(
+    db: AsyncSession,
+    user_id: str,
+    title: str,
+    message: str,
+    related_user_id: Optional[str] = None,
+    related_job_id: Optional[str] = None,
+):
     try:
+        # auto_commit=True: get_db() does not commit on exit, so owner bell notifications
+        # must persist explicitly after the ticket reply transaction has already committed.
         await create_notification(
             db,
             user_id=user_id,
@@ -80,7 +108,9 @@ async def _safe_notify_user(db: AsyncSession, user_id: str, title: str, message:
             title=title,
             message=message,
             related_user_id=related_user_id,
+            related_job_id=related_job_id,
             email_notification=False,
+            auto_commit=True,
         )
     except Exception as exc:
         logger.warning("Support notification failed (non-fatal): %s", exc)
@@ -99,6 +129,18 @@ def _user_role_str(user: User) -> str:
     if user.role is None:
         return "user"
     return user.role.value if hasattr(user.role, "value") else str(user.role)
+
+
+def _support_ticket_role_label(user: User) -> str:
+    """Human-readable role for admin Help & Support notifications."""
+    role = _user_role_str(user)
+    if role == "teacher":
+        return "Teacher"
+    if role == "seeker":
+        return "Seeker"
+    if role == "provider":
+        return "Recruiter"
+    return "Trainee"
 
 
 def _user_display_name(user: User) -> str:
@@ -249,7 +291,7 @@ async def create_ticket(body: TicketCreate, user: User, db: AsyncSession) -> Tic
     # Portal Notification to Admins
     admin_res = await db.execute(select(User.email).where(User.is_super_admin == True))
     admin_emails = [r[0] for r in admin_res.all()]
-    role_label = "Teacher" if _user_role_str(user) == "teacher" else "Trainee"
+    role_label = _support_ticket_role_label(user)
     for admin_email in admin_emails:
         await _add_portal_notification(
             db,
@@ -262,22 +304,67 @@ async def create_ticket(body: TicketCreate, user: User, db: AsyncSession) -> Tic
             severity="info"
         )
 
+    for supervisor_email in await _helpdesk_supervisor_emails(db):
+        await _add_portal_notification(
+            db,
+            email=supervisor_email,
+            role="supervisor",
+            notif_type="new_ticket_created",
+            title="New Support Ticket",
+            description=f"[{ticket.ticket_number}] {role_label} {user.email}: {ticket.subject}",
+            detail=ticket.description,
+            severity="info",
+        )
+
     await db.commit()
     await db.refresh(ticket)
     await db.refresh(initial_msg)
 
-    await notify_super_admins(
-        db,
-        title="New Support Ticket",
-        message=f"[{ticket.ticket_number}] {role_label} {_user_display_name(user)}: {ticket.subject}",
-        type=NotificationType.general,
-        related_job_id=str(ticket.id),
-        related_user_id=str(user.id),
-    )
+    # Post-commit side effects must not fail the create response (ticket already saved)
+    try:
+        await notify_super_admins(
+            db,
+            title="New Support Ticket",
+            message=f"[{ticket.ticket_number}] {role_label} {_user_display_name(user)}: {ticket.subject}",
+            type=NotificationType.general,
+            related_job_id=str(ticket.id),
+            related_user_id=str(user.id),
+        )
+    except Exception as exc:
+        logger.warning("Support admin notify after create failed (non-fatal): %s", exc)
+
+    try:
+        from app.shared.models.supervisor_profile import SupervisorProfile
+
+        supervisor_rows = await db.execute(
+            select(User.id, SupervisorProfile.permissions)
+            .join(SupervisorProfile, SupervisorProfile.user_id == User.id)
+            # User model has no is_active; supervisor profile gate is the source of truth.
+            .where(SupervisorProfile.is_active.is_(True))
+        )
+        for user_id, permissions in supervisor_rows.all():
+            perms = permissions if isinstance(permissions, list) else []
+            if "*" not in perms and "help_desk" not in perms:
+                continue
+            await create_notification(
+                db,
+                user_id=str(user_id),
+                title="New Support Ticket",
+                message=f"[{ticket.ticket_number}] {role_label} {_user_display_name(user)}: {ticket.subject}",
+                type=NotificationType.general,
+                related_job_id=str(ticket.id),
+                related_user_id=str(user.id),
+                auto_commit=True,
+            )
+    except Exception as exc:
+        logger.warning("Support supervisor notify after create failed (non-fatal): %s", exc)
 
     initial_out = _message_to_out(initial_msg, user)
-    await broadcast_ticket_message(db, ticket, initial_out)
-    await broadcast_ticket_update(db, ticket, action="created")
+    await _safe_broadcast_message(db, ticket, initial_out)
+    try:
+        await broadcast_ticket_update(db, ticket, action="created")
+    except Exception as exc:
+        logger.warning("Support ticket create broadcast failed (non-fatal): %s", exc)
 
     return TicketDetailOut(
         **_ticket_to_out(ticket, message_count=1, last_message_at=initial_msg.created_at, ticket_user=user).model_dump(),
@@ -661,6 +748,7 @@ async def admin_reply_ticket(
         title="Support Team Replied",
         message=f"Your ticket [{ticket.ticket_number}] has a new reply from Rojgar Mela Support.",
         related_user_id=str(admin.id),
+        related_job_id=str(ticket.id),
     )
     await _safe_broadcast_message(db, ticket, msg_out)
     return msg_out
@@ -758,14 +846,19 @@ async def admin_update_ticket_status(
     await db.refresh(ticket)
 
     status_label = new_status.value.replace("_", " ").title()
-    await create_notification(
-        db,
-        user_id=str(ticket.user_id),
-        type=NotificationType.general,
-        title=f"Ticket {status_label}",
-        message=f"Your support ticket [{ticket.ticket_number}] is now {status_label.lower()}.",
-        email_notification=False,
-    )
+    try:
+        await create_notification(
+            db,
+            user_id=str(ticket.user_id),
+            type=NotificationType.general,
+            title=f"Ticket {status_label}",
+            message=f"Your support ticket [{ticket.ticket_number}] is now {status_label.lower()}.",
+            related_job_id=str(ticket.id),
+            email_notification=False,
+            auto_commit=True,
+        )
+    except Exception as exc:
+        logger.warning("Support status notification failed (non-fatal): %s", exc)
 
     await broadcast_ticket_update(db, ticket, action="status_changed")
 

@@ -250,3 +250,25 @@ async def get_public_user(user_id: str, db: AsyncSession) -> UserOut:
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     return UserOut.model_validate(user)
+
+
+async def get_existing_public_user_ids(ids: list[str], db: AsyncSession) -> list[str]:
+    """Return which of the given user IDs still exist (for seeker interest list filtering)."""
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for raw in ids[:100]:
+        if not raw or not isinstance(raw, str):
+            continue
+        value = raw.strip()
+        if not value or value in seen:
+            continue
+        try:
+            uuid.UUID(value)
+        except ValueError:
+            continue
+        seen.add(value)
+        cleaned.append(value)
+    if not cleaned:
+        return []
+    res = await db.execute(select(User.id).where(User.id.in_(cleaned)))
+    return [str(row[0]) for row in res.all()]

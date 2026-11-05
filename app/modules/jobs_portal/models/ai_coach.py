@@ -17,12 +17,12 @@ class AICoachSession(Base):
     target_role = Column(String(100), nullable=False)
     experience_level = Column(String(50), nullable=False)
     focus_area = Column(String(50), default="General", nullable=False)
-    mode = Column(String(10), default="text", nullable=False)  # "text" | "live"
+    mode = Column(String(10), default="text", nullable=False)  # "text" | "live" | "speak"
 
     # Store the conversation history: [{"role": "bot", "content": "..."}, {"role": "user", "content": "..."}]
     chat_history = Column(JSON, default=list, nullable=False)
     
-    status = Column(String(20), default="in_progress") # in_progress, completed, failed
+    status = Column(String(20), default="in_progress")  # in_progress, completed, failed, expired
     
     # Detailed scores
     overall_score = Column(Integer, nullable=True)

@@ -1,21 +1,30 @@
-from fastapi import APIRouter, BackgroundTasks, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends, File, UploadFile
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.shared.models.user import User
 from app.shared.schemas.auth import UserOut, OnboardingRequest, UpdateSettingsRequest, UpdateSettingsResponse
-from app.core.dependencies import require_verified, get_current_user
+from app.core.dependencies import require_verified, get_current_user, require_authenticated
 from app.shared.controllers.users_controller import (
     get_me as ctrl_get_me,
     complete_onboarding as ctrl_complete_onboarding,
     update_settings as ctrl_update_settings,
     upload_profile_pic as ctrl_upload_profile_pic,
     get_public_user as ctrl_get_public_user,
+    get_existing_public_user_ids as ctrl_get_existing_public_user_ids,
     delete_own_account as ctrl_delete_own_account,
 )
-from fastapi import File, UploadFile
 
 router = APIRouter(prefix="/users", tags=["users"])
+
+
+class ExistingUserIdsRequest(BaseModel):
+    ids: list[str] = Field(default_factory=list, max_length=100)
+
+
+class ExistingUserIdsResponse(BaseModel):
+    existing: list[str]
 
 
 @router.get("/me", response_model=UserOut)
@@ -42,6 +51,17 @@ async def upload_profile_pic(file: UploadFile = File(...), user: User = Depends(
 async def delete_own_account(user: User = Depends(require_verified), db: AsyncSession = Depends(get_db)):
     """Permanently delete the authenticated user's own account."""
     await ctrl_delete_own_account(user, db)
+
+
+@router.post("/public/existing-ids", response_model=ExistingUserIdsResponse)
+async def get_existing_public_user_ids(
+    body: ExistingUserIdsRequest,
+    _user: User = Depends(require_authenticated),
+    db: AsyncSession = Depends(get_db),
+):
+    """Batch-check which public user IDs still exist (deleted accounts are omitted)."""
+    existing = await ctrl_get_existing_public_user_ids(body.ids, db)
+    return ExistingUserIdsResponse(existing=existing)
 
 
 @router.get("/public/{user_id}", response_model=UserOut)
