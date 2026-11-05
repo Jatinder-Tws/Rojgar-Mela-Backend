@@ -75,6 +75,78 @@ def _find_week_bucket(buckets: list[dict[str, Any]], d: Optional[date]) -> Optio
     return None
 
 
+_COMPLETED_TX_STATUSES = frozenset({"completed", "success", "paid"})
+
+
+def _tx_status_ok(status: Optional[str]) -> bool:
+    return (status or "").lower() in _COMPLETED_TX_STATUSES
+
+
+def _sum_completed_payment_transactions(
+    transactions: list[Any],
+    *,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+) -> tuple[float, bool]:
+    """Net completed payment - refund amount in range. Returns (net, had_matching_tx)."""
+    net = 0.0
+    found = False
+    for tx in transactions:
+        if not _tx_status_ok(getattr(tx, "status", None)):
+            continue
+        tx_type = (getattr(tx, "transaction_type", None) or "").lower()
+        if tx_type not in {"payment", "refund"}:
+            continue
+        tx_day = tx.created_at.date() if getattr(tx, "created_at", None) else None
+        if (date_from or date_to) and not _in_range(tx_day, date_from, date_to):
+            continue
+        found = True
+        amount = float(getattr(tx, "amount", 0) or 0)
+        if tx_type == "payment":
+            net += amount
+        else:
+            net -= amount
+    return net, found
+
+
+def compute_fee_collection(
+    *,
+    enrollments_paid_total: float,
+    transactions: list[Any],
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+) -> float:
+    """
+    Lifetime (no date filter): sum of enrollment.paid_amount — same source as Fee Ledger
+    Total Revenue. Transaction rows alone can undercount legacy / admin-created payments.
+
+    Date-filtered: prefer completed payment/refund transactions in range; fall back to
+    enrollment paid totals for that filtered set when no ledger rows exist.
+    """
+    paid_total = max(0.0, float(enrollments_paid_total or 0))
+    if not date_from and not date_to:
+        return round(paid_total, 2)
+
+    tx_net, had_tx = _sum_completed_payment_transactions(
+        transactions, date_from=date_from, date_to=date_to
+    )
+    if had_tx:
+        return round(max(0.0, tx_net), 2)
+    return round(paid_total, 2)
+
+
+def _installment_collected_amount(ins: dict[str, Any]) -> float:
+    """Cash actually received on an installment (supports partial payments)."""
+    status = (ins.get("status") or "").lower()
+    amount = float(ins.get("amount") or 0)
+    paid = float(ins.get("paidAmount") or ins.get("paid_amount") or 0)
+    if status == "paid":
+        return amount if amount > 0 else paid
+    if paid > 0:
+        return paid
+    return 0.0
+
+
 async def build_dashboard_summary(
     db: AsyncSession,
     *,
@@ -210,19 +282,13 @@ async def build_dashboard_summary(
     avg_attendance = round(attendance_sum / total_filtered) if total_filtered else 0
     avg_completion = round(completion_sum / total_filtered) if total_filtered else 0
 
-    fee_collection = 0.0
-    for tx in transactions:
-        if (tx.transaction_type or "").lower() != "payment":
-            continue
-        if (tx.status or "").lower() not in {"completed", "success", "paid"}:
-            continue
-        tx_day = tx.created_at.date() if tx.created_at else None
-        if (from_d or to_d) and not _in_range(tx_day, from_d, to_d):
-            continue
-        fee_collection += float(tx.amount or 0)
-
-    if fee_collection <= 0:
-        fee_collection = sum(float(e.paid_amount or 0) for e in filtered)
+    paid_from_enrollments = sum(float(e.paid_amount or 0) for e in filtered)
+    fee_collection = compute_fee_collection(
+        enrollments_paid_total=paid_from_enrollments,
+        transactions=transactions,
+        date_from=from_d,
+        date_to=to_d,
+    )
 
     total_seats = sum(int(b.max_seats or 0) for b in batches)
     filled_seats = sum(seats_by_batch.get(b.id, 0) for b in batches)
@@ -261,12 +327,21 @@ async def build_dashboard_summary(
     for tx in transactions:
         if (tx.transaction_type or "").lower() != "payment":
             continue
-        if (tx.status or "").lower() not in {"completed", "success", "paid"}:
+        if not _tx_status_ok(tx.status):
             continue
         tx_day = tx.created_at.date() if tx.created_at else None
         bucket = _find_week_bucket(weeks, tx_day)
         if bucket:
             bucket["collected"] += float(tx.amount or 0)
+    for tx in transactions:
+        if (tx.transaction_type or "").lower() != "refund":
+            continue
+        if not _tx_status_ok(tx.status):
+            continue
+        tx_day = tx.created_at.date() if tx.created_at else None
+        bucket = _find_week_bucket(weeks, tx_day)
+        if bucket:
+            bucket["collected"] = max(0.0, bucket["collected"] - float(tx.amount or 0))
 
     if all(b["collected"] <= 0 for b in weeks):
         for e in enrollments:
@@ -275,11 +350,19 @@ async def build_dashboard_summary(
                 for ins in installments:
                     if not isinstance(ins, dict):
                         continue
-                    if (ins.get("status") or "") == "paid":
-                        d = _parse_iso_date(ins.get("paid_date") or ins.get("due_date") or e.enrollment_date)
-                        bucket = _find_week_bucket(weeks, d)
-                        if bucket:
-                            bucket["collected"] += float(ins.get("amount") or 0)
+                    collected = _installment_collected_amount(ins)
+                    if collected <= 0:
+                        continue
+                    d = _parse_iso_date(
+                        ins.get("paidDate")
+                        or ins.get("paid_date")
+                        or ins.get("dueDate")
+                        or ins.get("due_date")
+                        or e.enrollment_date
+                    )
+                    bucket = _find_week_bucket(weeks, d)
+                    if bucket:
+                        bucket["collected"] += collected
             elif float(e.paid_amount or 0) > 0:
                 d = _parse_iso_date(e.enrollment_date)
                 bucket = _find_week_bucket(weeks, d)
