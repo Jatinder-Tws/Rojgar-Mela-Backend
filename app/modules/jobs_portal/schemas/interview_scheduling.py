@@ -1,5 +1,5 @@
 from datetime import datetime, time, timezone
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator,AliasChoices
 
@@ -47,6 +47,9 @@ class ProviderInterviewSettingsUpdate(BaseModel):
     default_title: Optional[str] = Field(None, min_length=1, max_length=200)
     default_interviewer_name: Optional[str] = Field(None, max_length=200)
     default_agenda: Optional[str] = None
+    default_interview_type: Optional[Literal["video", "walk_in"]] = None
+    default_meeting_link: Optional[str] = Field(None, max_length=2000)
+    default_location: Optional[str] = Field(None, max_length=2000)
     windows: Optional[List[AvailabilityWindowIn]] = None
 
     @field_validator("slot_duration_minutes")
@@ -79,6 +82,9 @@ class ProviderInterviewSettingsOut(BaseModel):
     default_title: str
     default_interviewer_name: Optional[str] = None
     default_agenda: Optional[str] = None
+    default_interview_type: str = "video"
+    default_meeting_link: Optional[str] = None
+    default_location: Optional[str] = None
     # windows: List[AvailabilityWindowOut] = []
     windows: List[AvailabilityWindowOut] = Field(
         default_factory=list,

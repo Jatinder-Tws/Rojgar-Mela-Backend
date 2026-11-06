@@ -173,6 +173,8 @@ class JobOut(BaseModel):
     source_platform: Optional[str] = None
     external_apply_url: Optional[str] = None
     company_name: Optional[str] = None
+    company_type: Optional[str] = None
+    company_industry: Optional[str] = None
     company_website: Optional[str] = None
     company_about: Optional[str] = None
     company_size: Optional[str] = None
@@ -285,6 +287,8 @@ class ApplicationOut(BaseModel):
     required_skills: Optional[List[str]] = []
     location: Optional[str] = None
     ai_interview_enabled: Optional[bool] = False
+    has_interview: bool = False
+    interview_status: Optional[str] = None
     # Seeker details (populated for provider-facing endpoints)
     seeker_first_name: Optional[str] = None
     seeker_last_name: Optional[str] = None

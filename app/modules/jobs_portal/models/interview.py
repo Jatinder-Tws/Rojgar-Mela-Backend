@@ -36,13 +36,24 @@ class Interview(Base):
 
     title = Column(String(200), nullable=False)
     agenda = Column(Text, nullable=True)
-    interview_type = Column(Enum(InterviewType), default=InterviewType.video, nullable=False)
+    interview_type = Column(
+        Enum(InterviewType, native_enum=False, create_constraint=False, length=32),
+        default=InterviewType.video,
+        nullable=False,
+    )
     meeting_link = Column(Text, nullable=True)
     location = Column(Text, nullable=True)
-    status = Column(Enum(InterviewStatus), default=InterviewStatus.scheduled, nullable=False)
+    # Column is varchar in the database. A native enum bind fails with
+    # "operator does not exist: character varying = interviewstatus".
+    status = Column(
+        Enum(InterviewStatus, native_enum=False, create_constraint=False, length=32),
+        default=InterviewStatus.scheduled,
+        nullable=False,
+    )
     scheduled_at = Column(DateTime, nullable=False, index=True)
     scheduled_period = Column(String(2), nullable=True)
     interviewer_name = Column(String(200), nullable=False)
+    outcome_notes = Column(Text, nullable=True)
     
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)

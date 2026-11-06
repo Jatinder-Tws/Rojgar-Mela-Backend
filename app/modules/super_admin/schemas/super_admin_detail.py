@@ -188,6 +188,25 @@ class SeekerExperienceItem(BaseModel):
     is_current: Optional[bool] = None
 
 
+class SeekerCertificationItem(BaseModel):
+    name: Optional[str] = None
+    issuer: Optional[str] = None
+    date: Optional[str] = None
+    url: Optional[str] = None
+
+
+class SeekerLanguageItem(BaseModel):
+    language: Optional[str] = None
+    proficiency: Optional[str] = None
+
+
+class SeekerProjectItem(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    url: Optional[str] = None
+    technologies: Optional[List[str]] = None
+
+
 # ── Seeker Detail ─────────────────────────────────────────────────────────
 
 class AdminSeekerDetailResponse(BaseModel):
@@ -234,6 +253,7 @@ class AdminSeekerDetailResponse(BaseModel):
     # Portfolio (real profile data)
     headline: Optional[str] = None
     bio: Optional[str] = None
+    date_of_birth: Optional[str] = None
     city: Optional[str] = None
     state: Optional[str] = None
     linkedin_url: Optional[str] = None
@@ -245,6 +265,9 @@ class AdminSeekerDetailResponse(BaseModel):
     skills: List[SeekerSkillItem] = []
     education_history: List[SeekerEducationItem] = []
     work_experiences: List[SeekerExperienceItem] = []
+    certifications: List[SeekerCertificationItem] = []
+    languages: List[SeekerLanguageItem] = []
+    projects: List[SeekerProjectItem] = []
 
     # Job fair participation
     registered_job_fairs: Optional[List[str]] = None

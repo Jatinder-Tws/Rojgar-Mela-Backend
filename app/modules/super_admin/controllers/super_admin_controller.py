@@ -81,9 +81,16 @@ from app.modules.jobs_portal.services.dashboard_analytics import get_dashboard_a
 from app.modules.super_admin.services.super_admin_bulk_import import run_bulk_import_job
 from app.modules.jobs_portal.services.portfolio_service import (
     calculate_completion,
+    normalize_certifications,
     normalize_education,
+    normalize_languages,
+    normalize_projects,
     normalize_skills,
     normalize_work_experiences,
+)
+from app.modules.super_admin.services.seeker_profile_fields import (
+    apply_seeker_profile_fields,
+    seeker_profile_payload,
 )
 from app.modules.super_admin.services.super_admin_utils import normalize_phone as _normalize_phone, temp_password as _temp_password
 
@@ -551,6 +558,7 @@ async def list_platform_jobs(
     items = [
         AdminJobListItem(
             id=str(job.id),
+            provider_id=str(user.id) if user.id else None,
             title=job.title,
             company=user.company_name or _user_display_name(user, "Provider"),
             industry=job.industry,
@@ -625,6 +633,9 @@ async def get_platform_job(db: AsyncSession, job_id: str) -> AdminJobDetailRespo
         created_at=job.created_at,
         updated_at=job.updated_at,
         company=provider.company_name or _user_display_name(provider, "Provider"),
+        company_type=provider.company_type.value if getattr(provider.company_type, "value", None) else provider.company_type,
+        company_industry=(provider.industry or "").strip() or None,
+        company_about=(provider.company_about or "").strip() or None,
         provider_email=provider.email,
         provider_phone=provider.phone,
         company_location=provider.company_location,
@@ -1228,8 +1239,11 @@ async def list_platform_interviews(
         AdminInterviewListItem(
             id=str(iv.id),
             title=iv.title,
+            seeker_id=str(seeker.id) if seeker and seeker.id else None,
             seeker_name=_user_display_name(seeker),
+            provider_id=str(provider.id) if provider and provider.id else None,
             provider_name=provider.company_name or _user_display_name(provider, "Provider"),
+            job_id=str(job.id) if job and job.id else None,
             job_title=job.title,
             scheduled_at=iv.scheduled_at,
             source=str(iv.source.value if hasattr(iv.source, "value") else iv.source),
@@ -1404,6 +1418,45 @@ async def list_seeker_industries(db: AsyncSession) -> List[str]:
     return sorted(seen.values(), key=str.lower)
 
 
+def _parse_job_type(value: Optional[str]) -> Optional[JobType]:
+    if value is None or not str(value).strip():
+        return None
+    try:
+        return JobType(str(value).strip())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Job type must be in_office, wfh, or hybrid") from exc
+
+
+async def _email_seeker_credentials(db: AsyncSession, user: User, plain_password: str) -> None:
+    """Email login email + password. Account stays created if SMTP fails."""
+    from app.shared.services.email_service import send_welcome_email
+
+    try:
+        await send_welcome_email(
+            to_email=user.email,
+            first_name=user.first_name or "there",
+            role="seeker",
+            password=plain_password,
+            raise_on_error=True,
+        )
+        user.welcome_email_status = "sent"
+        user.welcome_email_error = None
+    except Exception as exc:
+        logger.exception("Seeker credential email failed for user %s", user.id)
+        user.welcome_email_status = "failed"
+        user.welcome_email_error = str(exc)[:500]
+    await db.commit()
+
+
+def _queue_seeker_match_refresh(user_id: str) -> None:
+    try:
+        from app.shared.services.celery_tasks import invalidate_seeker_matches_task
+
+        invalidate_seeker_matches_task.delay(str(user_id))
+    except Exception:
+        logger.warning("Could not queue seeker match refresh for %s", user_id, exc_info=True)
+
+
 async def create_seeker(body: AdminSeekerCreate, db: AsyncSession) -> AdminUserOut:
     phone = _normalize_phone(body.phone)
     if len(phone) != 10:
@@ -1415,14 +1468,22 @@ async def create_seeker(body: AdminSeekerCreate, db: AsyncSession) -> AdminUserO
     await _check_duplicate(db, body.email, phone)
     pwd = body.password or _temp_password()
     user = User(
-        first_name=body.first_name.strip(), last_name=body.last_name.strip(), email=body.email, phone=phone,
+        first_name=body.first_name.strip(), last_name=(body.last_name or "").strip(), email=body.email, phone=phone,
         hashed_password=hash_password(pwd), role=UserRole.seeker, is_verified=True, onboarding_complete=True,
-        industry=body.industry.strip(), job_role=body.job_role.strip(), job_type=JobType(body.job_type) if body.job_type else None,
+        industry=body.industry.strip(), job_role=body.job_role.strip(), job_type=_parse_job_type(body.job_type),
         salary_range=body.salary_range, experience=body.experience, is_assessment_done=True,
+        welcome_email_status="pending",
     )
     db.add(user)
+    await db.flush()
+    portfolio = Portfolio(user_id=user.id)
+    apply_seeker_profile_fields(user, portfolio, seeker_profile_payload(body, exclude_unset=False))
+    db.add(portfolio)
     await db.commit()
     await db.refresh(user)
+    await _email_seeker_credentials(db, user, pwd)
+    await db.refresh(user)
+    _queue_seeker_match_refresh(user.id)
     return _user_to_admin_out(user, "seeker")
 
 
@@ -1455,6 +1516,9 @@ async def get_seeker_detail(user_id: str, db: AsyncSession) -> AdminSeekerDetail
     skills = []
     education_history = []
     work_experiences = []
+    certifications = []
+    languages = []
+    projects = []
     if portfolio:
         pct, filled, missing = calculate_completion(portfolio, user)
         sections_filled = len(filled)
@@ -1462,6 +1526,9 @@ async def get_seeker_detail(user_id: str, db: AsyncSession) -> AdminSeekerDetail
         skills = normalize_skills(portfolio.skills)
         education_history = normalize_education(portfolio.education)
         work_experiences = normalize_work_experiences(portfolio.work_experiences)
+        certifications = normalize_certifications(portfolio.certifications)
+        languages = normalize_languages(portfolio.languages)
+        projects = normalize_projects(portfolio.projects)
 
     # Job fair names
     jf_titles = await _seeker_job_fair_names(db, user.id)
@@ -1557,7 +1624,7 @@ async def get_seeker_detail(user_id: str, db: AsyncSession) -> AdminSeekerDetail
         profile_sections_total=sections_total,
         has_resume=has_resume,
         father_or_mother_name=user.father_or_mother_name,
-        gender=user.gender,
+        gender=user.gender or (portfolio.gender if portfolio else None),
         address=user.address,
         highest_qualification=user.highest_qualification,
         stream_specialization=user.stream_specialization,
@@ -1565,6 +1632,7 @@ async def get_seeker_detail(user_id: str, db: AsyncSession) -> AdminSeekerDetail
         preferred_job_sector=user.preferred_job_sector,
         headline=portfolio.headline if portfolio else None,
         bio=portfolio.bio if portfolio else None,
+        date_of_birth=portfolio.date_of_birth if portfolio else None,
         city=portfolio.city if portfolio else None,
         state=portfolio.state if portfolio else None,
         linkedin_url=portfolio.linkedin_url if portfolio else None,
@@ -1576,6 +1644,9 @@ async def get_seeker_detail(user_id: str, db: AsyncSession) -> AdminSeekerDetail
         skills=skills,
         education_history=education_history,
         work_experiences=work_experiences,
+        certifications=certifications,
+        languages=languages,
+        projects=projects,
         registered_job_fairs=jf_titles,
         created_at=user.created_at,
         updated_at=user.updated_at,
@@ -1591,16 +1662,59 @@ async def get_seeker_detail(user_id: str, db: AsyncSession) -> AdminSeekerDetail
 
 async def update_seeker(user_id: str, body: AdminSeekerUpdate, db: AsyncSession) -> AdminUserOut:
     user = await _get_role_user(db, user_id, UserRole.seeker)
+    new_password = body.password if body.password else None
     await _apply_user_update(db, user, body)
-    if body.job_type is not None:
-        user.job_type = JobType(body.job_type) if body.job_type else None
+    updates = body.model_dump(exclude_unset=True)
+    if "job_type" in updates:
+        user.job_type = _parse_job_type(body.job_type)
     for field in ("industry", "job_role", "salary_range", "experience"):
-        val = getattr(body, field, None)
-        if val is not None:
+        if field in updates:
+            val = updates[field]
             setattr(user, field, val.strip() if isinstance(val, str) else val)
+    portfolio = (await db.execute(select(Portfolio).where(Portfolio.user_id == user.id))).scalar_one_or_none()
+    if portfolio is None:
+        portfolio = Portfolio(user_id=user.id)
+        db.add(portfolio)
+    apply_seeker_profile_fields(user, portfolio, seeker_profile_payload(body, exclude_unset=True))
     await db.commit()
     await db.refresh(user)
+    if new_password:
+        await _email_seeker_credentials(db, user, new_password)
+        await db.refresh(user)
+    _queue_seeker_match_refresh(user.id)
     return _user_to_admin_out(user, "seeker")
+
+
+_RESUME_FIELDS_KEPT_WHEN_SET = (
+    "experience",
+    "highest_qualification",
+    "stream_specialization",
+    "college_institute_name",
+    "preferred_job_sector",
+    "job_role",
+)
+
+
+async def upload_seeker_resume(user_id: str, file, background_tasks, db: AsyncSession) -> AdminUserOut:
+    """Store a resume for a seeker using the same parser as the seeker upload."""
+    from app.modules.jobs_portal.controllers.resumes_controller import upload_resume
+
+    user = await _get_role_user(db, user_id, UserRole.seeker)
+    preserved = {
+        field: getattr(user, field)
+        for field in _RESUME_FIELDS_KEPT_WHEN_SET
+        if getattr(user, field)
+    }
+    await upload_resume(background_tasks, file, user, db)
+    await db.refresh(user)
+    for field, value in preserved.items():
+        setattr(user, field, value)
+    if preserved:
+        await db.commit()
+        await db.refresh(user)
+    has_resume = await _seeker_has_resume(db, user.id)
+    _queue_seeker_match_refresh(user.id)
+    return _user_to_admin_out(user, "seeker", has_resume=has_resume)
 
 
 async def delete_seeker(user_id: str, db: AsyncSession) -> None:

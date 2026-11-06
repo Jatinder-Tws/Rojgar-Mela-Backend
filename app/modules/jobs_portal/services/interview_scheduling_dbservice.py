@@ -18,6 +18,7 @@ from app.shared.models.notification import NotificationType
 from app.shared.services.notification_service import create_notification
 from app.modules.jobs_portal.schemas.interviews import InterviewCreate, InterviewOut, InterviewOutcomeUpdate
 from app.modules.jobs_portal.schemas.interview_scheduling import ProviderInterviewSettingsUpdate
+from app.modules.jobs_portal.services.interview_flow import auto_schedule_block_reason
 
 logger = logging.getLogger(__name__)
 
@@ -47,13 +48,32 @@ async def get_or_create_settings(
     settings = result.scalar_one_or_none()
 
     if not settings:
-        settings = ProviderInterviewSettings(provider_id=provider_id)
+        settings = ProviderInterviewSettings(provider_id=provider_id, timezone="Asia/Kolkata")
         db.add(settings)
         await db.commit()
         await db.refresh(settings)
         settings.availability_windows = []
 
     return settings
+
+
+def _reject_incomplete_auto_schedule(
+    settings: ProviderInterviewSettings,
+    has_windows: Optional[bool] = None,
+) -> None:
+    if not settings.auto_schedule_enabled:
+        return
+    windows_ready = (
+        bool(settings.availability_windows) if has_windows is None else has_windows
+    )
+    reason = auto_schedule_block_reason(
+        settings.default_interview_type,
+        settings.default_meeting_link,
+        settings.default_location,
+        windows_ready,
+    )
+    if reason:
+        raise HTTPException(status_code=400, detail=reason)
 
 
 async def upsert_settings(
@@ -67,7 +87,9 @@ async def upsert_settings(
     for key, value in data.items():
         setattr(settings, key, value)
 
+    has_windows: Optional[bool] = None
     if body.windows is not None:
+        has_windows = len(body.windows) > 0
         await db.execute(
             delete(ProviderAvailabilityWindow).where(
                 ProviderAvailabilityWindow.provider_id == provider_id
@@ -80,13 +102,13 @@ async def upsert_settings(
                     day_of_week=window.day_of_week,
                     start_time=window.start_time,
                     end_time=window.end_time,
-                    # period=window.period,
                     start_period=window.start_period,
                     end_period=window.end_period
                 )
             )
 
     settings.updated_at = _utc_now_naive()
+    _reject_incomplete_auto_schedule(settings, has_windows=has_windows)
     await db.commit()
     return settings
 
@@ -97,12 +119,11 @@ async def toggle_auto_schedule_db(
     auto_schedule_enabled: bool,
 ) -> ProviderInterviewSettings:
     settings = await get_or_create_settings(db, provider_id)
-    if auto_schedule_enabled and not settings.availability_windows:
-        raise HTTPException(
-            status_code=400,
-            detail="Configure availability windows before enabling auto-schedule",
-        )
-    settings.auto_schedule_enabled = auto_schedule_enabled
+    if auto_schedule_enabled:
+        settings.auto_schedule_enabled = True
+        _reject_incomplete_auto_schedule(settings)
+    else:
+        settings.auto_schedule_enabled = False
     await db.commit()
     return settings
 
@@ -117,6 +138,7 @@ async def load_busy_intervals(
     result = await db.execute(
         select(Interview.scheduled_at).where(
             Interview.provider_id == provider_id,
+            Interview.status == InterviewStatus.scheduled,
             Interview.scheduled_at >= start_utc,
             Interview.scheduled_at < end_utc,
         )
@@ -147,6 +169,39 @@ async def create_interview(
     job = job_result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+
+    if not body.application_id:
+        raise HTTPException(status_code=400, detail="application_id is required")
+
+    app_result = await db.execute(select(Application).where(Application.id == body.application_id))
+    application = app_result.scalar_one_or_none()
+    if (
+        not application
+        or str(application.job_id) != str(body.job_id)
+        or not application.seeker_id
+        or str(application.seeker_id) != str(body.seeker_id)
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Application does not match this job and candidate",
+        )
+    if application.status not in (ApplicationStatus.shortlisted, ApplicationStatus.interviewing):
+        raise HTTPException(
+            status_code=409,
+            detail="Shortlist the candidate before scheduling an interview",
+        )
+
+    existing_result = await db.execute(
+        select(Interview.id).where(
+            Interview.application_id == application.id,
+            Interview.status.in_([InterviewStatus.scheduled, InterviewStatus.completed]),
+        )
+    )
+    if existing_result.first():
+        raise HTTPException(
+            status_code=409,
+            detail="An interview already exists for this application",
+        )
 
     # Import locally to avoid circular import issues
     from app.modules.jobs_portal.services.interview_scheduling_service import assert_slot_available
@@ -181,11 +236,7 @@ async def create_interview(
     )
     db.add(interview)
 
-    if body.application_id:
-        app_result = await db.execute(select(Application).where(Application.id == body.application_id))
-        application = app_result.scalar_one_or_none()
-        if application:
-            application.status = ApplicationStatus.interviewing
+    application.status = ApplicationStatus.interviewing
     
     await db.commit()
     await db.refresh(interview)
@@ -269,7 +320,10 @@ async def get_user_interviews(
         item = InterviewOut.model_validate(i)
         item.job_title = i.job.title if i.job else "Unknown Job"
         item.seeker_name = f"{i.seeker.first_name} {i.seeker.last_name}" if i.seeker else "Unknown Seeker"
-        item.provider_name = f"{i.provider.first_name} {i.provider.last_name}" if i.provider else "Unknown Provider"
+        company = (i.provider.company_name or "").strip() if i.provider else ""
+        person = f"{i.provider.first_name} {i.provider.last_name}".strip() if i.provider else ""
+        item.company_name = company or None
+        item.provider_name = company or person or "Unknown Provider"
         out.append(item)
         
     return out
@@ -292,23 +346,28 @@ async def record_interview_outcome(
 
     interview.status = InterviewStatus.completed
     if body.notes:
-        interview.agenda = (interview.agenda or "") + f"\n\nOutcome notes: {body.notes}"
+        interview.outcome_notes = body.notes.strip()
 
     if interview.application_id:
         app_result = await db.execute(select(Application).where(Application.id == interview.application_id))
         application = app_result.scalar_one_or_none()
         if application:
+            note = (body.notes or "").strip()
             if body.outcome == "selected":
                 application.status = ApplicationStatus.selected
                 outcome_title = "Congratulations:"
                 outcome_msg = f"You have been selected after your interview for '{interview.title}'."
+                if note:
+                    outcome_msg = f"{outcome_msg} {note}"
                 notif_type = NotificationType.shortlisted
                 outcome_email_title = "Congratulations — You're Selected"
             else:
                 application.status = ApplicationStatus.rejected
-                application.rejection_reason = body.notes or "Not selected after interview"
+                application.rejection_reason = note or "Not selected after interview"
                 outcome_title = "Interview Outcome Update:"
                 outcome_msg = f"Thank you for interviewing. Unfortunately you were not selected for '{interview.title}'."
+                if note:
+                    outcome_msg = f"{outcome_msg} {note}"
                 notif_type = NotificationType.rejected
                 outcome_email_title = "Interview Outcome Update"
 

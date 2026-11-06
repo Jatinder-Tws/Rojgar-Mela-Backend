@@ -321,6 +321,7 @@ async def send_welcome_email(
     *,
     password: Optional[str] = None,
     login_username: Optional[str] = None,
+    raise_on_error: bool = False,
 ) -> None:
     """Send a welcome email after normal account registration / onboarding."""
     template = _env.get_template("welcome_email.html")
@@ -350,7 +351,12 @@ async def send_welcome_email(
         year=datetime.utcnow().year,
         **_support_context(),
     )
-    await _send_branded_email(to_email, f"Welcome to RojgarMela.AI, {first_name}!", html)
+    await _send_branded_email(
+        to_email,
+        f"Welcome to RojgarMela.AI, {first_name}!",
+        html,
+        raise_on_error=raise_on_error,
+    )
 
 
 async def send_enrollment_receipt_email(
@@ -1000,7 +1006,7 @@ async def send_interview_scheduled_email(
         date_part = f"{ist_dt.strftime('%A')}, {_ordinal_day(ist_dt.day)} {ist_dt.strftime('%B')}, {ist_dt.year}"
         hour = ist_dt.hour % 12 or 12
         minute = ist_dt.minute
-        am_pm = scheduled_period or ("AM" if ist_dt.hour < 12 else "PM")
+        am_pm = "AM" if ist_dt.hour < 12 else "PM"
         time_part = f"{hour}:{minute:02d} {am_pm} IST"
         scheduled_at_display = f"{date_part} at {time_part}"
 
@@ -1018,7 +1024,7 @@ async def send_interview_scheduled_email(
             "location": location,
             "agenda": agenda,
             "interviewer_name": interviewer_name,
-            "dashboard_url": f"{settings.FRONTEND_URL.rstrip('/')}/interviews",
+            "dashboard_url": f"{settings.FRONTEND_URL.rstrip('/')}/scheduled-interviews",
             "year": datetime.utcnow().year,
             **_support_context(),
         }

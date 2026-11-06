@@ -3,6 +3,15 @@ from typing import List, Optional
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
+from app.modules.jobs_portal.schemas.portfolio import (
+    CertificationItem,
+    EducationItem,
+    LanguageItem,
+    ProjectItem,
+    SkillItem,
+    WorkExperienceItem,
+)
+
 
 class SuperAdminLoginRequest(BaseModel):
     email: EmailStr
@@ -37,7 +46,78 @@ class AdminUserBase(BaseModel):
     password: Optional[str] = Field(None, min_length=8)
 
 
-class AdminSeekerCreate(AdminUserBase):
+class AdminSeekerProfileFields(BaseModel):
+    """Portfolio and extended profile fields a seeker can fill, written by admin."""
+
+    preferred_locations: Optional[List[str]] = None
+    father_or_mother_name: Optional[str] = Field(None, max_length=200)
+    gender: Optional[str] = Field(None, max_length=50)
+    address: Optional[str] = None
+    highest_qualification: Optional[str] = Field(None, max_length=200)
+    stream_specialization: Optional[str] = Field(None, max_length=200)
+    college_institute_name: Optional[str] = Field(None, max_length=255)
+    preferred_job_sector: Optional[str] = Field(None, max_length=200)
+    headline: Optional[str] = Field(None, max_length=200)
+    bio: Optional[str] = None
+    date_of_birth: Optional[str] = Field(None, max_length=20)
+    city: Optional[str] = Field(None, max_length=100)
+    state: Optional[str] = Field(None, max_length=100)
+    linkedin_url: Optional[str] = Field(None, max_length=500)
+    github_url: Optional[str] = Field(None, max_length=500)
+    website_url: Optional[str] = Field(None, max_length=500)
+    total_experience_years: Optional[float] = Field(None, ge=0, le=80)
+    current_company: Optional[str] = Field(None, max_length=200)
+    current_role: Optional[str] = Field(None, max_length=200)
+    skills: Optional[List[SkillItem]] = None
+    work_experiences: Optional[List[WorkExperienceItem]] = None
+    education: Optional[List[EducationItem]] = None
+    certifications: Optional[List[CertificationItem]] = None
+    languages: Optional[List[LanguageItem]] = None
+    projects: Optional[List[ProjectItem]] = None
+
+    @field_validator(
+        "father_or_mother_name",
+        "gender",
+        "address",
+        "highest_qualification",
+        "stream_specialization",
+        "college_institute_name",
+        "preferred_job_sector",
+        "headline",
+        "bio",
+        "date_of_birth",
+        "city",
+        "state",
+        "linkedin_url",
+        "github_url",
+        "website_url",
+        "current_company",
+        "current_role",
+    )
+    @classmethod
+    def strip_optional_profile_text(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        text = v.strip()
+        return text or None
+
+    @field_validator("preferred_locations")
+    @classmethod
+    def clean_preferred_locations(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+        if v is None:
+            return None
+        cleaned: List[str] = []
+        for item in v:
+            text = str(item).strip()
+            if text and text not in cleaned:
+                cleaned.append(text[:200])
+            if len(cleaned) >= 5:
+                break
+        return cleaned
+
+
+class AdminSeekerCreate(AdminUserBase, AdminSeekerProfileFields):
+    last_name: Optional[str] = Field(None, max_length=50)
     industry: str = Field(..., min_length=1, max_length=100)
     job_role: str = Field(..., min_length=1, max_length=100)
     job_type: Optional[str] = None
@@ -59,7 +139,7 @@ class AdminSeekerCreate(AdminUserBase):
         return v.strip()
 
 
-class AdminSeekerUpdate(BaseModel):
+class AdminSeekerUpdate(AdminSeekerProfileFields):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     email: Optional[EmailStr] = None
@@ -234,9 +314,12 @@ class HiringPipelineStats(BaseModel):
 
 class ShortlistActivityItem(BaseModel):
     application_id: str
+    seeker_id: Optional[str] = None
     seeker_name: str
     seeker_email: Optional[str] = None
+    job_id: Optional[str] = None
     job_title: Optional[str] = None
+    provider_id: Optional[str] = None
     provider_name: str
     provider_email: Optional[str] = None
     status: str
@@ -466,6 +549,7 @@ class AdminJobCreate(BaseModel):
 
 class AdminJobListItem(BaseModel):
     id: str
+    provider_id: Optional[str] = None
     title: str
     company: str
     industry: Optional[str] = None
@@ -502,6 +586,9 @@ class AdminJobDetailResponse(BaseModel):
     updated_at: Optional[datetime] = None
     # Provider / company
     company: str
+    company_type: Optional[str] = None
+    company_industry: Optional[str] = None
+    company_about: Optional[str] = None
     provider_email: Optional[str] = None
     provider_phone: Optional[str] = None
     company_location: Optional[str] = None
@@ -554,8 +641,11 @@ class AdminShortlistRequest(BaseModel):
 class AdminInterviewListItem(BaseModel):
     id: str
     title: str
+    seeker_id: Optional[str] = None
     seeker_name: str
+    provider_id: Optional[str] = None
     provider_name: str
+    job_id: Optional[str] = None
     job_title: str
     scheduled_at: datetime
     source: str

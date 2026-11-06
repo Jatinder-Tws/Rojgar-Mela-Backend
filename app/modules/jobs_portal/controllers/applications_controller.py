@@ -11,7 +11,7 @@ from app.modules.jobs_portal.models.resume import Resume
 from app.shared.models.user import User
 from app.shared.models.notification import Notification, NotificationType
 from app.modules.jobs_portal.models.external_candidate import ExternalCandidate
-from app.modules.jobs_portal.models.interview import Interview
+from app.modules.jobs_portal.models.interview import Interview, InterviewStatus
 from app.modules.jobs_portal.schemas.jobs import ApplicationCreate, ApplicationOut, ProviderShortlistRequest, RejectApplicationRequest, ShortlistedApplicationOut
 from app.modules.jobs_portal.services.ai_feedback_service import generate_rejection_feedback
 from app.shared.services.notification_service import create_notification
@@ -37,6 +37,45 @@ def _queue_notification_email(user: User | None, title: str, message: str) -> No
     queue_notification_email(
         user.email, title, message, user.first_name or "there"
     )
+
+
+async def _attach_interview_flags(db: AsyncSession, apps: List[ApplicationOut]) -> None:
+    ids = [app.id for app in apps if app.id]
+    if not ids:
+        return
+    result = await db.execute(
+        select(Interview).where(
+            Interview.application_id.in_(ids),
+            Interview.status.in_([InterviewStatus.scheduled, InterviewStatus.completed]),
+        )
+    )
+    by_app: dict[str, Interview] = {}
+    for interview in result.scalars().all():
+        if not interview.application_id:
+            continue
+        key = str(interview.application_id)
+        current = by_app.get(key)
+        if current is None or (
+            interview.status == InterviewStatus.scheduled
+            and current.status != InterviewStatus.scheduled
+        ):
+            by_app[key] = interview
+    for app in apps:
+        interview = by_app.get(str(app.id))
+        app.has_interview = interview is not None
+        app.interview_status = (
+            interview.status.value if interview and interview.status else None
+        )
+
+
+async def _scheduled_interview(db: AsyncSession, application_id: str) -> Interview | None:
+    result = await db.execute(
+        select(Interview).where(
+            Interview.application_id == application_id,
+            Interview.status == InterviewStatus.scheduled,
+        )
+    )
+    return result.scalars().first()
 
 
 async def apply_to_job(
@@ -201,6 +240,7 @@ async def get_all_applicants(user: User, db: AsyncSession) -> List[ApplicationOu
             app_out.seeker_first_name = app.candidate_name
             app_out.seeker_last_name = ""
         out.append(app_out)
+    await _attach_interview_flags(db, out)
     return out
 
 
@@ -245,6 +285,7 @@ async def get_job_applications(job_id: str, user: User, db: AsyncSession) -> Lis
             app_out.candidate_resume_url = app.candidate_resume_url
         app_out.ai_feedback = app.ai_feedback
         out.append(app_out)
+    await _attach_interview_flags(db, out)
     return out
 
 
@@ -486,6 +527,12 @@ async def reject_application(
     if not job:
         raise HTTPException(status_code=403, detail="Forbidden")
 
+    if await _scheduled_interview(db, str(app.id)):
+        raise HTTPException(
+            status_code=409,
+            detail="Record the result from Scheduled Interviews. This candidate already has an interview.",
+        )
+
     app.status = ApplicationStatus.rejected
     app.rejection_reason = body.rejection_reason
     await log_audit_event(
@@ -605,6 +652,11 @@ async def update_application_status(
                 await db.rollback()
 
         elif status == "rejected":
+            if await _scheduled_interview(db, str(app.id)):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Record the result from Scheduled Interviews. This candidate already has an interview.",
+                )
             app.status = ApplicationStatus.rejected
             app.rejection_reason = ai_feedback or "Not specified"
             await log_audit_event(
@@ -619,40 +671,22 @@ async def update_application_status(
             )
             await db.commit()
 
-        elif status in ("interviewing", "selected"):
-            app.status = ApplicationStatus(status)
-            await log_audit_event(
-                db,
-                user,
-                action="STATUS_CHANGE",
-                entity_type="application",
-                entity_id=str(app.id),
-                entity_name=job.title,
-                description=f"Updated candidate application status to '{status}' for '{job.title}'",
-                changes={"new_status": status},
+        elif status == "interviewing":
+            raise HTTPException(
+                status_code=400,
+                detail="Schedule an interview to move this candidate into the interview stage",
             )
-            await db.commit()
 
-            if status == "selected":
-                seeker_result = await db.execute(select(User).where(User.id == app.seeker_id))
-                seeker = seeker_result.scalar_one_or_none()
-                if seeker:
-                    provider_label = _provider_display_name(user)
-                    selected_msg = (
-                        f"Congratulations! You have been selected for '{job.title}' "
-                        f"at {provider_label}."
-                    )
-                    await create_notification(
-                        db=db,
-                        user_id=seeker.id,
-                        type=NotificationType.shortlisted,
-                        title="Congratulations",
-                        message=selected_msg,
-                        related_job_id=str(job.id),
-                        related_user_id=str(user.id),
-                        auto_commit=True,
-                    )
-                    _queue_notification_email(seeker, "Congratulations — You're Selected", selected_msg)
+        elif status == "selected":
+            if await _scheduled_interview(db, str(app.id)):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Record the result from Scheduled Interviews",
+                )
+            raise HTTPException(
+                status_code=400,
+                detail="Select the candidate from Scheduled Interviews after the interview",
+            )
 
         else:
             app.status = status

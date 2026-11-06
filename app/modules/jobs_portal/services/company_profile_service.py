@@ -30,7 +30,7 @@ from app.modules.jobs_portal.services.google_places_service import (
 from app.shared.models.user import User
 
 MAX_GALLERY_IMAGES = 8
-MAX_GALLERY_BYTES = 5 * 1024 * 1024
+MAX_GALLERY_BYTES = 2 * 1024 * 1024
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif"}
 
 
@@ -101,6 +101,8 @@ def public_company_payload(provider: Optional[User]) -> dict[str, Any]:
         )
     return {
         "company_name": provider.company_name,
+        "company_type": provider.company_type.value if getattr(provider.company_type, "value", None) else provider.company_type,
+        "company_industry": (provider.industry or "").strip() or None,
         "company_website": provider.company_website,
         "company_about": provider.company_about,
         "company_size": provider.company_size,
@@ -314,7 +316,7 @@ async def upload_gallery_image(
 
     content = await file.read()
     if len(content) > MAX_GALLERY_BYTES:
-        raise HTTPException(status_code=400, detail="Each image must be 5 MB or smaller")
+        raise HTTPException(status_code=400, detail="Each image must be 2 MB or smaller")
 
     ext = os.path.splitext(file.filename or "")[1].lower() or ".jpg"
     if ext not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:

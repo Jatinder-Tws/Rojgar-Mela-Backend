@@ -1,8 +1,7 @@
 import os
 import uuid
-import asyncio
 from fastapi import BackgroundTasks, HTTPException, UploadFile
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 from app.core.config import settings, get_upload_dir
@@ -92,32 +91,59 @@ async def complete_onboarding(
     return UserOut.model_validate(user)
 
 
+def _phone_key(value: Optional[str]) -> str:
+    digits = "".join(ch for ch in (value or "") if ch.isdigit())
+    return digits[-10:] if len(digits) >= 10 else digits
+
+
+async def phone_is_available(phone: str, user: User, db: AsyncSession) -> bool:
+    incoming_key = _phone_key(phone)
+    if len(incoming_key) != 10:
+        raise HTTPException(status_code=400, detail="Phone number must be exactly 10 digits")
+    if incoming_key == _phone_key(user.phone):
+        return True
+    taken_phone = await db.execute(
+        select(User.id).where(
+            User.id != user.id,
+            User.phone.isnot(None),
+            or_(User.phone == incoming_key, User.phone.like(f"%{incoming_key}")),
+        ).limit(1)
+    )
+    return taken_phone.scalar_one_or_none() is None
+
+
 async def update_settings(
     body: UpdateSettingsRequest,
     background_tasks: BackgroundTasks,
     user: User,
     db: AsyncSession,
 ) -> UpdateSettingsResponse:
-    uniqueness_checks = []
+    phone_to_apply: Optional[str] = None
     if body.email and body.email != user.email:
-        uniqueness_checks.append(
-            db.execute(select(User.id).where(User.email == body.email).limit(1))
+        taken_email = await db.execute(
+            select(User.id).where(User.email == body.email, User.id != user.id).limit(1)
         )
-    if body.phone and body.phone != user.phone:
-        uniqueness_checks.append(
-            db.execute(select(User.id).where(User.phone == body.phone).limit(1))
-        )
+        if taken_email.scalar_one_or_none():
+            raise HTTPException(status_code=400, detail="Email already in use")
 
-    if uniqueness_checks:
-        results = await asyncio.gather(*uniqueness_checks)
-        check_idx = 0
-        if body.email and body.email != user.email:
-            if results[check_idx].scalar_one_or_none():
-                raise HTTPException(status_code=400, detail="Email already in use")
-            check_idx += 1
-        if body.phone and body.phone != user.phone:
-            if results[check_idx].scalar_one_or_none():
-                raise HTTPException(status_code=400, detail="Phone number already in use")
+    if body.phone:
+        incoming_key = _phone_key(body.phone)
+        current_key = _phone_key(user.phone)
+        if incoming_key and incoming_key == current_key:
+            phone_to_apply = None
+        elif len(incoming_key) != 10:
+            raise HTTPException(status_code=400, detail="Phone number must be exactly 10 digits")
+        else:
+            taken_phone = await db.execute(
+                select(User.id).where(
+                    User.id != user.id,
+                    User.phone.isnot(None),
+                    or_(User.phone == incoming_key, User.phone.like(f"%{incoming_key}")),
+                ).limit(1)
+            )
+            if taken_phone.scalar_one_or_none():
+                raise HTTPException(status_code=400, detail="This phone number is already registered.")
+            phone_to_apply = incoming_key
 
     seeker_match_fields_changed = user.role == UserRole.seeker and any(
         getattr(body, field) is not None
@@ -132,12 +158,15 @@ async def update_settings(
         user.email = body.email
 
     new_qr_code = None
-    if body.phone is not None and body.phone != user.phone:
-        user.phone = body.phone
-        user.totp_secret = totp_service.generate_secret()
-        user.totp_enabled = False
-        uri = totp_service.get_provisioning_uri(user.phone, user.totp_secret)
-        new_qr_code = totp_service.generate_qr_base64(uri)
+    if phone_to_apply and phone_to_apply != _phone_key(user.phone):
+        had_totp = bool(user.totp_enabled)
+        user.phone = phone_to_apply
+        # A disabled authenticator has no live login codes, so do not force a new setup.
+        if had_totp:
+            user.totp_secret = totp_service.generate_secret()
+            user.totp_enabled = False
+            uri = totp_service.get_provisioning_uri(user.phone, user.totp_secret)
+            new_qr_code = totp_service.generate_qr_base64(uri)
 
     if body.auto_apply_enabled is not None:
         user.auto_apply_enabled = body.auto_apply_enabled
@@ -202,17 +231,20 @@ async def update_settings(
 
 
 async def upload_profile_pic(file: UploadFile, user: User, db: AsyncSession) -> UserOut:
-    if not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="File must be an image")
-    ext = os.path.splitext(file.filename)[1]
+    content_type = (file.content_type or "").lower()
+    if not content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Upload a JPG, PNG, WEBP, or GIF image")
+    content = await file.read()
+    if len(content) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Logo must be 5 MB or smaller")
+    ext = os.path.splitext(file.filename or "")[1]
     filename = f"profile_{user.id}_{uuid.uuid4().hex}{ext}"
     file_path = str(get_upload_dir() / filename)
     try:
-        content = await file.read()
         with open(file_path, "wb") as f:
             f.write(content)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not save file: {str(e)}")
+    except Exception:
+        raise HTTPException(status_code=500, detail="Could not save file")
     user.profile_pic_url = f"/uploads/{filename}"
     await db.commit()
     await db.refresh(user)

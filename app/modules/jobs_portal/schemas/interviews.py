@@ -55,6 +55,7 @@ class InterviewOut(BaseModel):
     meeting_link: Optional[str] = None
     location: Optional[str] = None
     status: str = "scheduled"
+    outcome_notes: Optional[str] = None
     scheduled_at: datetime
     created_at: datetime
     scheduled_period: Optional[str] = None
@@ -62,6 +63,7 @@ class InterviewOut(BaseModel):
     # Enriched data for display
     seeker_name: Optional[str] = None
     provider_name: Optional[str] = None
+    company_name: Optional[str] = None
     job_title: Optional[str] = None
 
     @field_serializer("scheduled_at", "created_at", when_used="json")

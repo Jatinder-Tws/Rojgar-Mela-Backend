@@ -13,9 +13,104 @@ from app.modules.jobs_portal.models.job import JobPosting, JobType
 from app.modules.jobs_portal.services.company_profile_service import public_company_payload
 
 
+def _plain_snippet(value: Any, limit: int = 180) -> Optional[str]:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    plain = re.sub(r"<[^>]+>", " ", value)
+    plain = re.sub(r"\s+", " ", plain).strip()
+    if not plain:
+        return None
+    if len(plain) <= limit:
+        return plain
+    cut = plain[:limit].rsplit(" ", 1)[0].strip()
+    return f"{cut or plain[:limit].strip()}…"
+
+
+_DESCRIPTION_SECTION = re.compile(
+    r"\n\s*(?:Responsibilities|Key qualifications|Education:|Relevant experience:|Apply by:|Interview:)\b",
+    re.IGNORECASE,
+)
+
+
+def _only_description(text: str) -> Optional[str]:
+    qualification = re.search(r"Required Qualification:\s*(.+)", text, re.IGNORECASE)
+    if qualification:
+        return qualification.group(1).strip() or None
+    if re.search(r"Name Of Employer:", text, re.IGNORECASE):
+        return None
+    body = _DESCRIPTION_SECTION.split(text, maxsplit=1)[0].strip()
+    return body or None
+
+
+def _card_description_text(job: JobPosting) -> Optional[str]:
+    """Card line is the job description only, not responsibilities or scraped labels."""
+    details = job.posting_details if isinstance(job.posting_details, dict) else {}
+    summary = details.get("summary") if isinstance(details, dict) else None
+    if isinstance(summary, str) and summary.strip():
+        return _only_description(summary)
+
+    meta = job.source_metadata if isinstance(job.source_metadata, dict) else {}
+    if (job.source_platform or "").strip():
+        for key in ("qualification", "description"):
+            raw = meta.get(key)
+            if isinstance(raw, str) and raw.strip():
+                cleaned = _only_description(raw)
+                if cleaned:
+                    return cleaned
+
+    text = job.description if isinstance(job.description, str) else ""
+    if not text.strip():
+        return None
+    return _only_description(text)
+
+
+def _parse_loose_date(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return value
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1]
+    candidates = [text, text[:19], text[:10]]
+    formats = (
+        "%Y-%m-%d",
+        "%d-%m-%Y",
+        "%d/%m/%Y",
+        "%d %b %Y",
+        "%d %B %Y",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+    )
+    for candidate in candidates:
+        for fmt in formats:
+            try:
+                return datetime.strptime(candidate, fmt)
+            except ValueError:
+                continue
+    return None
+
+
+def _card_deadline(job: JobPosting) -> Optional[str]:
+    details = job.posting_details if isinstance(job.posting_details, dict) else {}
+    raw = details.get("application_deadline") if isinstance(details, dict) else None
+    if not raw and isinstance(job.source_metadata, dict):
+        raw = job.source_metadata.get("last_date_to_apply")
+    parsed = _parse_loose_date(raw)
+    return parsed.date().isoformat() if parsed else None
+
+
+def _card_posted_at(job: JobPosting) -> datetime:
+    meta = job.source_metadata if isinstance(job.source_metadata, dict) else {}
+    return _parse_loose_date(meta.get("posted_on")) or job.created_at
+
+
 def serialize_public_job(job: JobPosting) -> dict[str, Any]:
     provider = job.provider
     jt = job.job_type.value if job.job_type else None
+    skills = job.required_skills if isinstance(job.required_skills, list) else []
     return {
         "id": job.id,
         "title": job.title,
@@ -30,7 +125,10 @@ def serialize_public_job(job: JobPosting) -> dict[str, Any]:
         "employment_type": job.employment_type,
         "shift": job.shift,
         "post_count": job.post_count or 0,
-        "posted_at": job.created_at,
+        "posted_at": _card_posted_at(job),
+        "application_deadline": _card_deadline(job),
+        "description_snippet": _plain_snippet(_card_description_text(job)),
+        "required_skills": [str(skill).strip() for skill in skills if str(skill).strip()][:8],
         "company_logo_url": provider.profile_pic_url if provider else None,
         "company_rating": provider.company_rating if provider else None,
         "company_review_count": provider.company_review_count if provider else None,
@@ -48,6 +146,7 @@ def serialize_public_job_detail(job: JobPosting) -> dict[str, Any]:
             "description": job.description,
             "required_skills": job.required_skills or [],
             "perks": job.perks or [],
+            "posting_details": job.posting_details if isinstance(job.posting_details, dict) else None,
             "company_address": provider.company_address if provider else None,
             "company_location": provider.company_location if provider else None,
             **public_company_payload(provider),

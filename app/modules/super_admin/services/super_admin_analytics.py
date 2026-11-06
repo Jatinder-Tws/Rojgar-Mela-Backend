@@ -77,6 +77,9 @@ async def get_detailed_platform_analytics(db: AsyncSession) -> dict:
     shortlist_rows = await db.execute(
         select(
             Application.id,
+            Application.seeker_id,
+            Application.job_id,
+            JobPosting.provider_id,
             Application.updated_at,
             Application.status,
             Seeker.first_name,
@@ -100,6 +103,9 @@ async def get_detailed_platform_analytics(db: AsyncSession) -> dict:
     recent_shortlists = []
     for (
         app_id,
+        seeker_id,
+        job_id,
+        provider_id,
         updated_at,
         status,
         s_fn,
@@ -116,9 +122,12 @@ async def get_detailed_platform_analytics(db: AsyncSession) -> dict:
         recent_shortlists.append(
             {
                 "application_id": app_id,
+                "seeker_id": str(seeker_id) if seeker_id else None,
                 "seeker_name": seeker_name,
                 "seeker_email": s_email,
+                "job_id": str(job_id) if job_id else None,
                 "job_title": job_title,
+                "provider_id": str(provider_id) if provider_id else None,
                 "provider_name": provider_name,
                 "provider_email": p_email,
                 "status": status.value if hasattr(status, "value") else str(status),

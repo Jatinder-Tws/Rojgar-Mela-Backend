@@ -48,6 +48,7 @@ from app.modules.super_admin.controllers.super_admin_controller import (
     get_seeker as ctrl_get_seeker,
     get_seeker_detail as ctrl_get_seeker_detail,
     update_seeker as ctrl_update_seeker,
+    upload_seeker_resume as ctrl_upload_seeker_resume,
     delete_seeker as ctrl_delete_seeker,
     set_seeker_password as ctrl_set_seeker_password,
     bulk_import_seekers as ctrl_bulk_import_seekers,
@@ -333,6 +334,17 @@ async def get_seeker(user_id: str, admin: User = Depends(require_super_admin_or_
 @router.put("/seekers/{user_id}", response_model=AdminUserOut)
 async def update_seeker(user_id: str, body: AdminSeekerUpdate, admin: User = Depends(require_super_admin_or_permission("job_seekers")), db: AsyncSession = Depends(get_db)):
     return await ctrl_update_seeker(user_id, body, db)
+
+
+@router.post("/seekers/{user_id}/resume", response_model=AdminUserOut)
+async def upload_seeker_resume(
+    user_id: str,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    admin: User = Depends(require_super_admin_or_permission("job_seekers")),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_upload_seeker_resume(user_id, file, background_tasks, db)
 
 
 @router.delete("/seekers/{user_id}", status_code=204)
