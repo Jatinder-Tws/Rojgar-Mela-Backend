@@ -1,6 +1,6 @@
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, File, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.super_admin.controllers.support_controller import (
@@ -15,12 +15,14 @@ from app.modules.super_admin.controllers.support_controller import (
     create_contact_inquiry as ctrl_create_inquiry,
     update_my_ticket as ctrl_update_ticket,
     update_user_message as ctrl_update_message,
+    upload_support_attachment as ctrl_upload_attachment,
 )
 from app.core.database import get_db
 from app.shared.models.user import User
 from app.modules.super_admin.schemas.support import (
     FeedbackCreate,
     FeedbackOut,
+    SupportAttachmentOut,
     TicketCreate,
     TicketDetailOut,
     TicketMessageCreate,
@@ -46,10 +48,19 @@ async def create_ticket(
 
 @router.get("/tickets", response_model=List[TicketOut])
 async def list_tickets(
+    source: Optional[str] = Query(None, description="job_portal | training | all"),
     user: User = Depends(require_seeker_or_provider),
     db: AsyncSession = Depends(get_db),
 ):
-    return await ctrl_list_tickets(user, db)
+    return await ctrl_list_tickets(user, db, source=source)
+
+
+@router.post("/attachments", response_model=SupportAttachmentOut, status_code=201)
+async def upload_attachment(
+    file: UploadFile = File(...),
+    user: User = Depends(require_seeker_or_provider),
+):
+    return await ctrl_upload_attachment(file, user)
 
 
 @router.get("/tickets/{ticket_id}", response_model=TicketDetailOut)

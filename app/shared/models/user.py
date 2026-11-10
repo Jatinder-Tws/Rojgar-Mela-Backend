@@ -155,7 +155,10 @@ class User(Base):
         foreign_keys="SupervisorProfile.user_id",
     )
     platform_feedback = relationship(
-        "PlatformFeedback", back_populates="user", cascade="all, delete-orphan"
+        "PlatformFeedback",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        foreign_keys="PlatformFeedback.user_id",
     )
     roadmaps = relationship(
         "Roadmap", back_populates="user", cascade="all, delete-orphan"

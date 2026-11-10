@@ -25,6 +25,8 @@ class TicketCategory(str, enum.Enum):
     technical = "technical"
     jobs = "jobs"
     billing = "billing"
+    attendance = "attendance"
+    class_schedule = "class_schedule"
     other = "other"
 
 
@@ -32,6 +34,11 @@ class TicketPriority(str, enum.Enum):
     low = "low"
     medium = "medium"
     high = "high"
+
+
+class TicketSource(str, enum.Enum):
+    job_portal = "job_portal"
+    training = "training"
 
 
 class SupportTicket(Base):
@@ -46,6 +53,8 @@ class SupportTicket(Base):
     description = Column(Text, nullable=False)
     status = Column(Enum(TicketStatus), nullable=False, default=TicketStatus.open, index=True)
     priority = Column(Enum(TicketPriority), nullable=False, default=TicketPriority.medium)
+    # Same table for both portals; source keeps job vs training queues separate.
+    source = Column(String(32), nullable=False, default=TicketSource.job_portal.value, index=True)
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
@@ -63,9 +72,11 @@ class TicketMessage(Base):
     id = Column(UUID(as_uuid=False), primary_key=True, default=_uuid)
     ticket_id = Column(UUID(as_uuid=False), ForeignKey("support_tickets.id", ondelete="CASCADE"), nullable=False, index=True)
     author_id = Column(UUID(as_uuid=False), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
-    body = Column(Text, nullable=False)
+    body = Column(Text, nullable=False, default="")
     is_staff_reply = Column(Boolean, default=False, nullable=False)
     is_bot_reply = Column(Boolean, default=False, nullable=False)
+    attachment_url = Column(String(500), nullable=True)
+    attachment_filename = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     ticket = relationship("SupportTicket", back_populates="messages")

@@ -291,10 +291,14 @@ async def list_seekers(
     sort_by: Optional[str] = Query(None), sort_dir: Optional[str] = Query(None),
     created_from: Optional[str] = Query(None, description="Registered from YYYY-MM-DD"),
     created_to: Optional[str] = Query(None, description="Registered to YYYY-MM-DD"),
+    profile: Optional[str] = Query(
+        None,
+        description="Profile filter: incomplete = completion below 50% (dashboard alert)",
+    ),
 ):
     return await ctrl_list_seekers(
         db, page, page_size, search, industry, status, job_fair_id, sort_by, sort_dir,
-        created_from, created_to,
+        created_from, created_to, profile,
     )
 
 

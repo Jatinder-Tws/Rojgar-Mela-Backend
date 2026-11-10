@@ -32,6 +32,12 @@ class PlatformFeedback(Base):
     comment = Column(Text, nullable=False)
     page_context = Column(String(100), nullable=True)
 
+    # Admin response on the same feedback row (no separate reply table).
+    admin_reply = Column(Text, nullable=True)
+    admin_replied_by = Column(UUID(as_uuid=False), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    admin_replied_at = Column(DateTime, nullable=True)
+
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
-    user = relationship("User", back_populates="platform_feedback")
+    user = relationship("User", foreign_keys=[user_id], back_populates="platform_feedback")
+    replied_by_user = relationship("User", foreign_keys=[admin_replied_by])

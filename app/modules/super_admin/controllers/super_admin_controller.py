@@ -550,7 +550,11 @@ async def list_platform_jobs(
         app_count_rows = (
             await db.execute(
                 select(Application.job_id, func.count(Application.id))
-                .where(Application.job_id.in_(job_ids))
+                .join(JobPosting, Application.job_id == JobPosting.id)
+                .where(
+                    Application.job_id.in_(job_ids),
+                    JobPosting.platform_managed_clause(),
+                )
                 .group_by(Application.job_id)
             )
         ).all()
@@ -564,7 +568,8 @@ async def list_platform_jobs(
             industry=job.industry,
             location=job.location,
             post_count=int(job.post_count or 0),
-            application_count=int(application_counts.get(job.id, 0)),
+            # Official/external listings have no in-platform hiring pipeline.
+            application_count=0 if job.is_external_listing else int(application_counts.get(job.id, 0)),
             is_active=bool(job.is_active),
             created_at=job.created_at,
         )
@@ -584,20 +589,21 @@ async def get_platform_job(db: AsyncSession, job_id: str) -> AdminJobDetailRespo
         raise HTTPException(status_code=404, detail="Job not found")
     job, provider = row
 
-    status_rows = (
-        await db.execute(
-            select(Application.status, func.count(Application.id))
-            .where(Application.job_id == job.id)
-            .group_by(Application.status)
-        )
-    ).all()
     applications_by_status: dict = {}
     application_count = 0
-    for status, count in status_rows:
-        key = str(status.value if hasattr(status, "value") else status)
-        n = int(count or 0)
-        applications_by_status[key] = n
-        application_count += n
+    if not job.is_external_listing:
+        status_rows = (
+            await db.execute(
+                select(Application.status, func.count(Application.id))
+                .where(Application.job_id == job.id)
+                .group_by(Application.status)
+            )
+        ).all()
+        for status, count in status_rows:
+            key = str(status.value if hasattr(status, "value") else status)
+            n = int(count or 0)
+            applications_by_status[key] = n
+            application_count += n
 
     match_count = int(
         await db.scalar(select(func.count(Match.id)).where(Match.job_id == job.id)) or 0
@@ -813,6 +819,7 @@ async def list_platform_matches(
                 application_status=(
                     str(app.status.value if hasattr(app.status, "value") else app.status) if app else None
                 ),
+                source_platform=job.source_platform,
             )
         )
     return AdminMatchListResponse(items=items, total=int(total), page=page, page_size=page_size)
@@ -846,7 +853,7 @@ async def list_platform_applications(
         .outerjoin(Seeker, Application.seeker_id == Seeker.id)
     )
 
-    filters = []
+    filters = [JobPosting.platform_managed_clause()]
     if job_id and job_id.strip():
         filters.append(Application.job_id == job_id.strip())
     if provider_id and provider_id.strip():
@@ -893,6 +900,7 @@ async def list_platform_applications(
                 status=str(app.status.value if hasattr(app.status, "value") else app.status),
                 applied_at=app.applied_at,
                 updated_at=app.updated_at,
+                source_platform=job.source_platform,
             )
         )
     return AdminApplicationListResponse(items=items, total=int(total), page=page, page_size=page_size)
@@ -936,6 +944,7 @@ async def _application_list_item(
         status=str(app.status.value if hasattr(app.status, "value") else app.status),
         applied_at=app.applied_at,
         updated_at=app.updated_at,
+        source_platform=job.source_platform if job else None,
     )
 
 
@@ -960,6 +969,14 @@ async def update_platform_application_status(
     if status not in allowed:
         raise HTTPException(status_code=400, detail=f"Invalid status. Allowed: {', '.join(sorted(allowed))}")
 
+    job_result = await db.execute(select(JobPosting).where(JobPosting.id == app.job_id))
+    job = job_result.scalar_one_or_none()
+    if job is not None and job.is_external_listing:
+        raise HTTPException(
+            status_code=400,
+            detail="This is an official listing. Hiring is not managed on the platform.",
+        )
+
     previous_status = str(app.status.value if hasattr(app.status, "value") else app.status)
     app.status = ApplicationStatus(status)
     if status == "rejected":
@@ -967,8 +984,6 @@ async def update_platform_application_status(
     elif status != "rejected":
         app.rejection_reason = None
 
-    job_result = await db.execute(select(JobPosting).where(JobPosting.id == app.job_id))
-    job = job_result.scalar_one_or_none()
     provider = None
     if job:
         provider_result = await db.execute(select(User).where(User.id == job.provider_id))
@@ -1095,6 +1110,11 @@ async def shortlist_platform_candidate(
     job = job_result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    if job.is_external_listing:
+        raise HTTPException(
+            status_code=400,
+            detail="This is an official listing. Hiring is not managed on the platform.",
+        )
 
     provider_result = await db.execute(select(User).where(User.id == job.provider_id))
     provider = provider_result.scalar_one_or_none()
@@ -1293,7 +1313,12 @@ async def platform_stats(db: AsyncSession) -> PlatformStatsResponse:
     providers = await db.scalar(select(func.count(User.id)).where(User.role == UserRole.provider, User.is_super_admin.is_(False)))
     total_jobs = await db.scalar(select(func.count(JobPosting.id)))
     active_jobs = await db.scalar(select(func.count(JobPosting.id)).where(JobPosting.is_active.is_(True)))
-    total_apps = await db.scalar(select(func.count(Application.id)))
+    total_apps = await db.scalar(
+        select(func.count(Application.id))
+        .select_from(Application)
+        .join(JobPosting, Application.job_id == JobPosting.id)
+        .where(JobPosting.platform_managed_clause())
+    )
     verified = await db.scalar(select(func.count(User.id)).where(User.is_verified.is_(True), User.is_super_admin.is_(False)))
     new_users = await db.scalar(select(func.count(User.id)).where(User.created_at >= thirty_days_ago, User.is_super_admin.is_(False)))
     reg_time = await db.execute(
@@ -1302,7 +1327,13 @@ async def platform_stats(db: AsyncSession) -> PlatformStatsResponse:
         .group_by("day").order_by("day")
     )
     registrations_over_time = [{"date": row[0].isoformat() if row[0] else "", "count": row[1]} for row in reg_time.fetchall()]
-    apps_status = await db.execute(select(Application.status, func.count(Application.id)).group_by(Application.status))
+    apps_status = await db.execute(
+        select(Application.status, func.count(Application.id))
+        .select_from(Application)
+        .join(JobPosting, Application.job_id == JobPosting.id)
+        .where(JobPosting.platform_managed_clause())
+        .group_by(Application.status)
+    )
     applications_by_status = {str(row[0]): row[1] for row in apps_status.fetchall()}
     return PlatformStatsResponse(
         total_seekers=seekers or 0, total_providers=providers or 0, total_jobs=total_jobs or 0,
@@ -1339,6 +1370,7 @@ async def list_seekers(
     industry: Optional[str], status: Optional[str] = None, job_fair_id: Optional[str] = None,
     sort_by: Optional[str] = None, sort_dir: Optional[str] = None,
     created_from: Optional[str] = None, created_to: Optional[str] = None,
+    profile: Optional[str] = None,
 ) -> AdminUserListResponse:
     from app.modules.jobs_portal.models.job_fair import JobFairSeeker
     seeker_filters = [User.role == UserRole.seeker, User.is_super_admin.is_(False)]
@@ -1368,11 +1400,41 @@ async def list_seekers(
         count_q = count_q.join(JobFairSeeker, JobFairSeeker.seeker_id == User.id).where(JobFairSeeker.job_fair_id == job_fair_id)
         select_q = select_q.join(JobFairSeeker, JobFairSeeker.seeker_id == User.id).where(JobFairSeeker.job_fair_id == job_fair_id)
 
+    ordered = select_q.order_by(_ordered(_seeker_sort_column(sort_by), sort_dir), User.id.desc())
+    profile_key = (profile or "").strip().lower()
+    # Matches dashboard alert: completion % < 50 (same calculate_completion formula).
+    if profile_key == "incomplete":
+        all_rows = (await db.execute(ordered)).all()
+        incomplete_rows = []
+        for user, portfolio in all_rows:
+            pct = 0
+            if portfolio:
+                pct, _, _ = calculate_completion(portfolio, user)
+            if pct < 50:
+                incomplete_rows.append((user, portfolio, pct))
+        total = len(incomplete_rows)
+        offset = (page - 1) * page_size
+        page_slice = incomplete_rows[offset: offset + page_size]
+        user_ids = [user.id for user, _, _ in page_slice]
+        has_resume_ids = await _seeker_has_resume_ids(db, user_ids)
+        last_active = await _last_active_map(db, user_ids)
+        items = []
+        for user, _portfolio, pct in page_slice:
+            jf_titles = await _seeker_job_fair_names(db, user.id)
+            items.append(
+                _user_to_admin_out(
+                    user,
+                    "seeker",
+                    profile_completion_percentage=pct,
+                    registered_job_fairs=jf_titles,
+                    has_resume=user.id in has_resume_ids,
+                    last_active_at=last_active.get(user.id),
+                )
+            )
+        return AdminUserListResponse(items=items, total=total, page=page, page_size=page_size)
+
     total = await db.scalar(count_q)
-    result = await db.execute(
-        select_q.order_by(_ordered(_seeker_sort_column(sort_by), sort_dir), User.id.desc())
-        .offset((page - 1) * page_size).limit(page_size)
-    )
+    result = await db.execute(ordered.offset((page - 1) * page_size).limit(page_size))
     rows = result.all()
     user_ids = [user.id for user, _ in rows]
     has_resume_ids = await _seeker_has_resume_ids(db, user_ids)

@@ -62,7 +62,11 @@ async def get_detailed_platform_analytics(db: AsyncSession) -> dict:
 
     apps_by_status = {}
     apps_result = await db.execute(
-        select(Application.status, func.count(Application.id)).group_by(Application.status)
+        select(Application.status, func.count(Application.id))
+        .select_from(Application)
+        .join(JobPosting, Application.job_id == JobPosting.id)
+        .where(JobPosting.platform_managed_clause())
+        .group_by(Application.status)
     )
     for status, count in apps_result.all():
         key = status.value if hasattr(status, "value") else str(status)
@@ -95,7 +99,10 @@ async def get_detailed_platform_analytics(db: AsyncSession) -> dict:
         .join(JobPosting, Application.job_id == JobPosting.id)
         .join(Provider, JobPosting.provider_id == Provider.id)
         .outerjoin(Seeker, Application.seeker_id == Seeker.id)
-        .where(Application.status == ApplicationStatus.shortlisted)
+        .where(
+            Application.status == ApplicationStatus.shortlisted,
+            JobPosting.platform_managed_clause(),
+        )
         .order_by(Application.updated_at.desc())
         .limit(100)
     )
@@ -146,7 +153,10 @@ async def get_detailed_platform_analytics(db: AsyncSession) -> dict:
         .select_from(Application)
         .join(JobPosting, Application.job_id == JobPosting.id)
         .join(Provider, JobPosting.provider_id == Provider.id)
-        .where(Application.status == ApplicationStatus.shortlisted)
+        .where(
+            Application.status == ApplicationStatus.shortlisted,
+            JobPosting.platform_managed_clause(),
+        )
         .group_by(Provider.id, Provider.company_name, Provider.first_name, Provider.last_name)
         .order_by(func.count(Application.id).desc())
         .limit(20)
@@ -163,9 +173,13 @@ async def get_detailed_platform_analytics(db: AsyncSession) -> dict:
 
     thirty_days_ago = datetime.utcnow() - timedelta(days=30)
     shortlists_30d = await db.scalar(
-        select(func.count(Application.id)).where(
+        select(func.count(Application.id))
+        .select_from(Application)
+        .join(JobPosting, Application.job_id == JobPosting.id)
+        .where(
             Application.status == ApplicationStatus.shortlisted,
             Application.updated_at >= thirty_days_ago,
+            JobPosting.platform_managed_clause(),
         )
     ) or 0
 

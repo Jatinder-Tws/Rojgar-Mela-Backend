@@ -249,6 +249,7 @@ class MatchedCandidateOut(BaseModel):
     resume_filename: Optional[str] = None
     profile_pic_url: Optional[str] = None
     job_id: Optional[str] = None
+    provider_interested: bool = False
 
 
 class ApplicationCreate(BaseModel):
@@ -286,6 +287,7 @@ class ApplicationOut(BaseModel):
     job_description: Optional[str] = None
     required_skills: Optional[List[str]] = []
     location: Optional[str] = None
+    source_platform: Optional[str] = None
     ai_interview_enabled: Optional[bool] = False
     has_interview: bool = False
     interview_status: Optional[str] = None

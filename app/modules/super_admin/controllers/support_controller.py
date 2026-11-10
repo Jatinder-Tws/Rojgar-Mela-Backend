@@ -1,13 +1,16 @@
 import logging
 import random
+import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import List, Optional
 
-from fastapi import HTTPException
+from fastapi import HTTPException, UploadFile
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.config import get_upload_dir
 from app.shared.models.notification import NotificationType
 from app.modules.super_admin.models.platform_feedback import FeedbackCategory, PlatformFeedback
 from app.modules.super_admin.models.support_ticket import (
@@ -15,6 +18,7 @@ from app.modules.super_admin.models.support_ticket import (
     TicketCategory,
     TicketMessage,
     TicketPriority,
+    TicketSource,
     TicketStatus,
 )
 from app.modules.super_admin.models.contact_inquiry import ContactInquiry
@@ -23,6 +27,8 @@ from app.modules.super_admin.schemas.support import (
     FeedbackCreate,
     FeedbackListResponse,
     FeedbackOut,
+    FeedbackReplyCreate,
+    SupportAttachmentOut,
     TicketCreate,
     TicketDetailOut,
     TicketListResponse,
@@ -36,6 +42,15 @@ from app.modules.super_admin.schemas.support import (
     InquiryListResponse,
     InquiryReplyCreate,
 )
+
+_SUPPORT_IMAGE_TYPES = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
+_SUPPORT_IMAGE_MAX_BYTES = 5 * 1024 * 1024
 from app.shared.services.notification_service import create_notification, notify_super_admins
 from app.modules.super_admin.services.support_realtime_service import broadcast_ticket_message, broadcast_ticket_update
 
@@ -152,6 +167,13 @@ def _generate_ticket_number() -> str:
     return f"RM-{datetime.utcnow().strftime('%y%m%d')}-{random.randint(1000, 9999)}"
 
 
+def _normalize_source(value: Optional[str]) -> str:
+    normalized = (value or TicketSource.job_portal.value).strip().lower()
+    if normalized not in {TicketSource.job_portal.value, TicketSource.training.value}:
+        return TicketSource.job_portal.value
+    return normalized
+
+
 def _ticket_to_out(
     ticket: SupportTicket,
     message_count: int = 0,
@@ -166,6 +188,7 @@ def _ticket_to_out(
         description=ticket.description,
         status=ticket.status.value if hasattr(ticket.status, "value") else str(ticket.status),
         priority=ticket.priority.value if hasattr(ticket.priority, "value") else str(ticket.priority),
+        source=_normalize_source(getattr(ticket, "source", None)),
         created_at=ticket.created_at,
         updated_at=ticket.updated_at,
         resolved_at=ticket.resolved_at,
@@ -177,7 +200,13 @@ def _ticket_to_out(
     )
 
 
-async def _recent_same_message(ticket_id: str, author_id: Optional[str], body: str, db: AsyncSession) -> Optional[TicketMessage]:
+async def _recent_same_message(
+    ticket_id: str,
+    author_id: Optional[str],
+    body: str,
+    db: AsyncSession,
+    attachment_url: Optional[str] = None,
+) -> Optional[TicketMessage]:
     result = await db.execute(
         select(TicketMessage)
         .where(TicketMessage.ticket_id == ticket_id, TicketMessage.author_id == author_id)
@@ -185,7 +214,11 @@ async def _recent_same_message(ticket_id: str, author_id: Optional[str], body: s
         .limit(1)
     )
     last = result.scalar_one_or_none()
-    if not last or (last.body or "").strip() != body.strip() or not last.created_at:
+    if not last or not last.created_at:
+        return None
+    if (last.body or "").strip() != (body or "").strip():
+        return None
+    if (last.attachment_url or None) != (attachment_url or None):
         return None
     if (datetime.utcnow() - last.created_at).total_seconds() > 8:
         return None
@@ -211,11 +244,34 @@ def _message_to_out(msg: TicketMessage, author: Optional[User] = None) -> Ticket
         author_id=msg.author_id,
         author_name=author_name,
         author_role=author_role,
-        body=msg.body,
+        body=msg.body or "",
         is_staff_reply=msg.is_staff_reply,
         is_bot_reply=bool(getattr(msg, "is_bot_reply", False)),
+        attachment_url=getattr(msg, "attachment_url", None),
+        attachment_filename=getattr(msg, "attachment_filename", None),
         created_at=msg.created_at,
     )
+
+
+async def upload_support_attachment(file: UploadFile, user: User) -> SupportAttachmentOut:
+    content_type = (file.content_type or "").lower().strip()
+    ext = _SUPPORT_IMAGE_TYPES.get(content_type)
+    if not ext:
+        raise HTTPException(status_code=400, detail="Only JPEG, PNG, WebP, or GIF images are allowed")
+
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Empty file")
+    if len(raw) > _SUPPORT_IMAGE_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="Screenshot must be 5 MB or smaller")
+
+    original = Path(file.filename or f"screenshot{ext}").name
+    safe_stem = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in Path(original).stem)[:40] or "screenshot"
+    filename = f"support_{user.id[:8]}_{uuid.uuid4().hex[:12]}_{safe_stem}{ext}"
+    dest_dir = get_upload_dir() / "support"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    (dest_dir / filename).write_bytes(raw)
+    return SupportAttachmentOut(url=f"/uploads/support/{filename}", filename=original[:255] or filename)
 
 
 async def _get_user_ticket(ticket_id: str, user: User, db: AsyncSession) -> SupportTicket:
@@ -247,6 +303,10 @@ async def create_ticket(body: TicketCreate, user: User, db: AsyncSession) -> Tic
         priority = TicketPriority(body.priority)
     except ValueError:
         priority = TicketPriority.medium
+    source = _normalize_source(body.source)
+    # Training-only categories always belong to the training queue.
+    if category in (TicketCategory.attendance, TicketCategory.class_schedule):
+        source = TicketSource.training.value
 
     ticket_number = _generate_ticket_number()
     for _ in range(5):
@@ -262,6 +322,7 @@ async def create_ticket(body: TicketCreate, user: User, db: AsyncSession) -> Tic
         subject=body.subject.strip(),
         description=body.description.strip(),
         priority=priority,
+        source=source,
         status=TicketStatus.open,
     )
     db.add(ticket)
@@ -372,7 +433,11 @@ async def create_ticket(body: TicketCreate, user: User, db: AsyncSession) -> Tic
     )
 
 
-async def list_my_tickets(user: User, db: AsyncSession) -> List[TicketOut]:
+async def list_my_tickets(
+    user: User,
+    db: AsyncSession,
+    source: Optional[str] = None,
+) -> List[TicketOut]:
     msg_count_sq = (
         select(func.count(TicketMessage.id))
         .where(TicketMessage.ticket_id == SupportTicket.id)
@@ -386,11 +451,12 @@ async def list_my_tickets(user: User, db: AsyncSession) -> List[TicketOut]:
         .scalar_subquery()
     )
 
+    query = select(SupportTicket, msg_count_sq, last_msg_sq).where(SupportTicket.user_id == user.id)
+    if source and source != "all":
+        query = query.where(SupportTicket.source == _normalize_source(source))
+
     result = await db.execute(
-        select(SupportTicket, msg_count_sq, last_msg_sq)
-        .where(SupportTicket.user_id == user.id)
-        .order_by(SupportTicket.updated_at.desc())
-        .limit(100)
+        query.order_by(SupportTicket.updated_at.desc()).limit(100)
     )
     rows = result.all()
     return [_ticket_to_out(t, int(mc or 0), lm, ticket_user=user) for t, mc, lm in rows]
@@ -428,21 +494,27 @@ async def add_user_message(ticket_id: str, body: TicketMessageCreate, user: User
     if ticket.status in (TicketStatus.resolved, TicketStatus.closed):
         raise HTTPException(status_code=400, detail="This ticket is closed. Please open a new ticket.")
 
-    duplicate = await _recent_same_message(ticket.id, user.id, body.body, db)
+    text = (body.body or "").strip()
+    attachment_url = body.attachment_url
+    attachment_filename = body.attachment_filename
+    duplicate = await _recent_same_message(ticket.id, user.id, text, db, attachment_url)
     if duplicate:
         return _message_to_out(duplicate, user)
 
     msg = TicketMessage(
         ticket_id=ticket.id,
         author_id=user.id,
-        body=body.body.strip(),
+        body=text or ("(screenshot attached)" if attachment_url else ""),
         is_staff_reply=False,
+        attachment_url=attachment_url,
+        attachment_filename=attachment_filename,
     )
     db.add(msg)
     ticket.updated_at = datetime.utcnow()
     if ticket.status == TicketStatus.resolved:
         ticket.status = TicketStatus.open
 
+    detail_preview = text or attachment_filename or "Screenshot attached"
     # Portal Notification to Admins
     admin_res = await db.execute(select(User.email).where(User.is_super_admin == True))
     admin_emails = [r[0] for r in admin_res.all()]
@@ -454,7 +526,7 @@ async def add_user_message(ticket_id: str, body: TicketMessageCreate, user: User
             notif_type="ticket_reply",
             title="Ticket Response Received",
             description=f"[{ticket.ticket_number}] New reply from {user.email}",
-            detail=body.body.strip(),
+            detail=detail_preview,
             severity="info"
         )
 
@@ -543,6 +615,30 @@ async def delete_my_ticket(ticket_id: str, user: User, db: AsyncSession) -> None
 
 # ── User: Feedback ───────────────────────────────────────────────────────────
 
+def _feedback_to_out(
+    fb: PlatformFeedback,
+    feedback_user: Optional[User] = None,
+    replier: Optional[User] = None,
+) -> FeedbackOut:
+    return FeedbackOut(
+        id=fb.id,
+        user_id=fb.user_id,
+        user_name=_user_display_name(feedback_user) if feedback_user else None,
+        user_email=feedback_user.email if feedback_user else None,
+        user_role=_user_role_str(feedback_user) if feedback_user else None,
+        rating=fb.rating,
+        category=fb.category.value if hasattr(fb.category, "value") else str(fb.category),
+        comment=fb.comment,
+        page_context=fb.page_context,
+        admin_reply=fb.admin_reply,
+        admin_replied_at=fb.admin_replied_at,
+        admin_replier_name=_user_display_name(replier) if replier else (
+            "Rojgar Mela Support" if fb.admin_reply else None
+        ),
+        created_at=fb.created_at,
+    )
+
+
 async def submit_feedback(body: FeedbackCreate, user: User, db: AsyncSession) -> FeedbackOut:
     try:
         category = FeedbackCategory(body.category)
@@ -569,18 +665,7 @@ async def submit_feedback(body: FeedbackCreate, user: User, db: AsyncSession) ->
         related_user_id=str(user.id),
     )
 
-    return FeedbackOut(
-        id=fb.id,
-        user_id=fb.user_id,
-        user_name=_user_display_name(user),
-        user_email=user.email,
-        user_role=_user_role_str(user),
-        rating=fb.rating,
-        category=fb.category.value,
-        comment=fb.comment,
-        page_context=fb.page_context,
-        created_at=fb.created_at,
-    )
+    return _feedback_to_out(fb, feedback_user=user)
 
 
 async def list_my_feedback(user: User, db: AsyncSession) -> List[FeedbackOut]:
@@ -591,18 +676,16 @@ async def list_my_feedback(user: User, db: AsyncSession) -> List[FeedbackOut]:
         .limit(50)
     )
     items = result.scalars().all()
+    replier_ids = {fb.admin_replied_by for fb in items if fb.admin_replied_by}
+    repliers: dict[str, User] = {}
+    if replier_ids:
+        replier_rows = await db.execute(select(User).where(User.id.in_(replier_ids)))
+        repliers = {u.id: u for u in replier_rows.scalars().all()}
     return [
-        FeedbackOut(
-            id=fb.id,
-            user_id=fb.user_id,
-            user_name=_user_display_name(user),
-            user_email=user.email,
-            user_role=_user_role_str(user),
-            rating=fb.rating,
-            category=fb.category.value if hasattr(fb.category, "value") else str(fb.category),
-            comment=fb.comment,
-            page_context=fb.page_context,
-            created_at=fb.created_at,
+        _feedback_to_out(
+            fb,
+            feedback_user=user,
+            replier=repliers.get(fb.admin_replied_by) if fb.admin_replied_by else None,
         )
         for fb in items
     ]
@@ -616,6 +699,7 @@ async def admin_list_tickets(
     page_size: int = 20,
     search: Optional[str] = None,
     status: Optional[str] = None,
+    source: Optional[str] = None,
 ) -> TicketListResponse:
     query = select(SupportTicket, User).join(User, SupportTicket.user_id == User.id)
     count_query = select(func.count()).select_from(SupportTicket)
@@ -627,6 +711,11 @@ async def admin_list_tickets(
             count_query = count_query.where(SupportTicket.status == status_enum)
         except ValueError:
             pass
+
+    if source and source != "all":
+        src = _normalize_source(source)
+        query = query.where(SupportTicket.source == src)
+        count_query = count_query.where(SupportTicket.source == src)
 
     if search:
         term = f"%{search.strip()}%"
@@ -707,21 +796,27 @@ async def admin_reply_ticket(
 ) -> TicketMessageOut:
     ticket = await _get_ticket_admin(ticket_id, db)
 
-    duplicate = await _recent_same_message(ticket.id, admin.id, body.body, db)
+    text = (body.body or "").strip()
+    attachment_url = body.attachment_url
+    attachment_filename = body.attachment_filename
+    duplicate = await _recent_same_message(ticket.id, admin.id, text, db, attachment_url)
     if duplicate:
         return _message_to_out(duplicate, admin)
 
     msg = TicketMessage(
         ticket_id=ticket.id,
         author_id=admin.id,
-        body=body.body.strip(),
+        body=text or ("(screenshot attached)" if attachment_url else ""),
         is_staff_reply=True,
+        attachment_url=attachment_url,
+        attachment_filename=attachment_filename,
     )
     db.add(msg)
     ticket.updated_at = datetime.utcnow()
     if ticket.status == TicketStatus.open:
         ticket.status = TicketStatus.in_progress
 
+    detail_preview = text or attachment_filename or "Screenshot attached"
     # Portal Notification to User
     user_res = await db.execute(select(User).where(User.id == ticket.user_id))
     t_user = user_res.scalar_one_or_none()
@@ -734,7 +829,7 @@ async def admin_reply_ticket(
             notif_type="ticket_commented",
             title="Support Team Replied",
             description=f"Your ticket [{ticket.ticket_number}] has a new reply.",
-            detail=body.body.strip(),
+            detail=detail_preview,
             severity="info"
         )
 
@@ -898,6 +993,7 @@ async def admin_list_feedback(
         term = f"%{search.strip()}%"
         filt = or_(
             PlatformFeedback.comment.ilike(term),
+            PlatformFeedback.admin_reply.ilike(term),
             User.email.ilike(term),
             User.first_name.ilike(term),
             User.last_name.ilike(term),
@@ -914,22 +1010,72 @@ async def admin_list_feedback(
     )
     rows = result.all()
 
+    replier_ids = {fb.admin_replied_by for fb, _ in rows if fb.admin_replied_by}
+    repliers: dict[str, User] = {}
+    if replier_ids:
+        replier_rows = await db.execute(select(User).where(User.id.in_(replier_ids)))
+        repliers = {u.id: u for u in replier_rows.scalars().all()}
+
     items = [
-        FeedbackOut(
-            id=fb.id,
-            user_id=fb.user_id,
-            user_name=_user_display_name(u),
-            user_email=u.email,
-            user_role=_user_role_str(u),
-            rating=fb.rating,
-            category=fb.category.value if hasattr(fb.category, "value") else str(fb.category),
-            comment=fb.comment,
-            page_context=fb.page_context,
-            created_at=fb.created_at,
+        _feedback_to_out(
+            fb,
+            feedback_user=u,
+            replier=repliers.get(fb.admin_replied_by) if fb.admin_replied_by else None,
         )
         for fb, u in rows
     ]
     return FeedbackListResponse(items=items, total=total)
+
+
+async def admin_reply_feedback(
+    feedback_id: str,
+    body: FeedbackReplyCreate,
+    admin: User,
+    db: AsyncSession,
+) -> FeedbackOut:
+    result = await db.execute(
+        select(PlatformFeedback).where(PlatformFeedback.id == feedback_id)
+    )
+    fb = result.scalar_one_or_none()
+    if not fb:
+        raise HTTPException(status_code=404, detail="Feedback not found")
+
+    message = body.message.strip()
+    fb.admin_reply = message
+    fb.admin_replied_by = admin.id
+    fb.admin_replied_at = datetime.utcnow()
+    await db.commit()
+    await db.refresh(fb)
+
+    feedback_user = (
+        await db.execute(select(User).where(User.id == fb.user_id))
+    ).scalar_one_or_none()
+
+    try:
+        await create_notification(
+            db,
+            user_id=str(fb.user_id),
+            title="Support replied to your feedback",
+            message=message[:240],
+            type=NotificationType.general,
+            related_user_id=str(admin.id),
+            auto_commit=True,
+        )
+    except Exception as exc:
+        logger.warning("Feedback reply notify failed (non-fatal): %s", exc)
+
+    return _feedback_to_out(fb, feedback_user=feedback_user, replier=admin)
+
+
+async def admin_delete_feedback(feedback_id: str, db: AsyncSession) -> None:
+    result = await db.execute(
+        select(PlatformFeedback).where(PlatformFeedback.id == feedback_id)
+    )
+    fb = result.scalar_one_or_none()
+    if not fb:
+        raise HTTPException(status_code=404, detail="Feedback not found")
+    await db.delete(fb)
+    await db.commit()
 
 
 def _inquiry_to_out(inquiry: ContactInquiry) -> InquiryOut:

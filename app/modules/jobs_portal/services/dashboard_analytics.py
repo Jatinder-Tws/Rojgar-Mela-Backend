@@ -18,6 +18,21 @@ from app.modules.jobs_portal.services.portfolio_service import calculate_complet
 # Keep in sync with super_admin_controller._created_range_filters (IST calendar days → UTC-naive).
 _IST_OFFSET = timedelta(hours=5, minutes=30)
 
+# Official/govt scraped jobs are discovery-only — exclude from hiring funnel KPIs/lists.
+_PLATFORM_APPS = JobPosting.platform_managed_clause()
+
+
+def _platform_app_count(*extra_where):
+    """Count applications on platform-managed jobs (joins job + provider like the admin list)."""
+    return (
+        select(func.count(Application.id))
+        .select_from(Application)
+        .join(JobPosting, Application.job_id == JobPosting.id)
+        .join(User, JobPosting.provider_id == User.id)
+        .where(_PLATFORM_APPS, *extra_where)
+        .scalar_subquery()
+    )
+
 
 def _pct_change(today: int, yesterday: int) -> float:
     if yesterday == 0:
@@ -105,7 +120,7 @@ def _kpi_labels(period_start: datetime, period_end: datetime) -> dict[str, str]:
         "interviews": _period_label("Interviews"),
         "new_matches": _period_label("New Matches"),
         "selections": _period_label("Selections"),
-        "companies_active": "Companies with Jobs",
+        "companies_active": "Providers with Jobs",
     }
 
 
@@ -204,9 +219,12 @@ async def get_dashboard_analytics(
     totals_query = select(
         select(func.count(User.id)).where(User.role == UserRole.seeker, User.is_super_admin.is_(False)).scalar_subquery().label("total_seekers"),
         select(func.count(User.id)).where(User.role == UserRole.provider, User.is_super_admin.is_(False)).scalar_subquery().label("total_providers"),
+        select(func.count(User.id)).where(User.role == UserRole.supervisor, User.is_super_admin.is_(False)).scalar_subquery().label("total_supervisors"),
+        select(func.count(User.id)).where(User.role == UserRole.supervisor, User.is_super_admin.is_(False), User.created_at >= day_start, User.created_at < day_end).scalar_subquery().label("new_supervisors_period"),
+        select(func.count(User.id)).where(User.role == UserRole.supervisor, User.is_super_admin.is_(False), User.created_at >= yesterday_start, User.created_at < yesterday_end).scalar_subquery().label("new_supervisors_prev"),
         select(func.count(JobPosting.id)).scalar_subquery().label("total_jobs"),
         select(func.count(JobPosting.id)).where(JobPosting.is_active.is_(True)).scalar_subquery().label("active_jobs"),
-        select(func.count(Application.id)).scalar_subquery().label("total_applications"),
+        _platform_app_count().label("total_applications"),
         select(func.count(Match.id)).scalar_subquery().label("total_matches"),
         # new_registrations KPI = seekers only so drill-down to /seekers matches the card.
         select(func.count(User.id)).where(User.role == UserRole.seeker, User.is_super_admin.is_(False), User.created_at >= day_start, User.created_at < day_end).scalar_subquery().label("new_regs_today"),
@@ -215,16 +233,16 @@ async def get_dashboard_analytics(
         select(func.count(User.id)).where(User.role == UserRole.seeker, User.is_super_admin.is_(False), User.created_at >= yesterday_start, User.created_at < yesterday_end).scalar_subquery().label("new_seekers_prev"),
         select(func.count(User.id)).where(User.role == UserRole.provider, User.is_super_admin.is_(False), User.created_at >= day_start, User.created_at < day_end).scalar_subquery().label("new_providers_period"),
         select(func.count(User.id)).where(User.role == UserRole.provider, User.is_super_admin.is_(False), User.created_at >= yesterday_start, User.created_at < yesterday_end).scalar_subquery().label("new_providers_prev"),
-        # Application KPIs join job+provider so counts match the admin applications list (inner joins).
-        select(func.count(Application.id)).select_from(Application).join(JobPosting, Application.job_id == JobPosting.id).join(User, JobPosting.provider_id == User.id).where(Application.applied_at >= day_start, Application.applied_at < day_end).scalar_subquery().label("apps_today"),
-        select(func.count(Application.id)).select_from(Application).join(JobPosting, Application.job_id == JobPosting.id).join(User, JobPosting.provider_id == User.id).where(Application.applied_at >= yesterday_start, Application.applied_at < yesterday_end).scalar_subquery().label("apps_yesterday"),
+        # Application KPIs match admin applications list (platform-managed jobs only).
+        _platform_app_count(Application.applied_at >= day_start, Application.applied_at < day_end).label("apps_today"),
+        _platform_app_count(Application.applied_at >= yesterday_start, Application.applied_at < yesterday_end).label("apps_yesterday"),
         select(func.count(Interview.id)).select_from(Interview).join(Seeker, Interview.seeker_id == Seeker.id).join(Provider, Interview.provider_id == Provider.id).join(JobPosting, Interview.job_id == JobPosting.id).where(Interview.scheduled_at >= day_start, Interview.scheduled_at < day_end).scalar_subquery().label("interviews_today"),
         select(func.count(Interview.id)).select_from(Interview).join(Seeker, Interview.seeker_id == Seeker.id).join(Provider, Interview.provider_id == Provider.id).join(JobPosting, Interview.job_id == JobPosting.id).where(Interview.scheduled_at >= yesterday_start, Interview.scheduled_at < yesterday_end).scalar_subquery().label("interviews_yesterday"),
         select(func.count(Match.id)).where(Match.created_at >= day_start, Match.created_at < day_end).scalar_subquery().label("matches_today"),
         select(func.count(Match.id)).where(Match.created_at >= yesterday_start, Match.created_at < yesterday_end).scalar_subquery().label("matches_yesterday"),
         # Selections = currently selected apps applied in period (matches funnel + list filters).
-        select(func.count(Application.id)).select_from(Application).join(JobPosting, Application.job_id == JobPosting.id).join(User, JobPosting.provider_id == User.id).where(Application.status == ApplicationStatus.selected, Application.applied_at >= day_start, Application.applied_at < day_end).scalar_subquery().label("selections_today"),
-        select(func.count(Application.id)).select_from(Application).join(JobPosting, Application.job_id == JobPosting.id).join(User, JobPosting.provider_id == User.id).where(Application.status == ApplicationStatus.selected, Application.applied_at >= yesterday_start, Application.applied_at < yesterday_end).scalar_subquery().label("selections_yesterday"),
+        _platform_app_count(Application.status == ApplicationStatus.selected, Application.applied_at >= day_start, Application.applied_at < day_end).label("selections_today"),
+        _platform_app_count(Application.status == ApplicationStatus.selected, Application.applied_at >= yesterday_start, Application.applied_at < yesterday_end).label("selections_yesterday"),
         select(func.count(func.distinct(JobPosting.provider_id))).where(JobPosting.is_active.is_(True)).scalar_subquery().label("companies_active"),
         select(func.count(func.distinct(JobPosting.provider_id))).where(JobPosting.is_active.is_(True), JobPosting.created_at < day_start).scalar_subquery().label("companies_active_yesterday"),
         select(func.count(JobPosting.id)).where(JobPosting.is_active.is_(True), JobPosting.created_at < day_start).scalar_subquery().label("active_jobs_yesterday"),
@@ -242,23 +260,26 @@ async def get_dashboard_analytics(
         select(func.count(User.id)).where(User.role == UserRole.seeker, User.is_super_admin.is_(False), User.created_at >= sixty_days_ago, User.created_at < thirty_days_ago).scalar_subquery().label("seekers_prev_30d"),
         select(func.count(User.id)).where(User.role == UserRole.provider, User.is_super_admin.is_(False), User.created_at >= thirty_days_ago).scalar_subquery().label("providers_30d"),
         select(func.count(User.id)).where(User.role == UserRole.provider, User.is_super_admin.is_(False), User.created_at >= sixty_days_ago, User.created_at < thirty_days_ago).scalar_subquery().label("providers_prev_30d"),
-        select(func.count(func.distinct(JobPosting.provider_id))).select_from(Application).join(JobPosting, Application.job_id == JobPosting.id).scalar_subquery().label("hiring_companies"),
-        select(func.count(func.distinct(JobPosting.provider_id))).select_from(Application).join(JobPosting, Application.job_id == JobPosting.id).where(Application.applied_at < thirty_days_ago).scalar_subquery().label("hiring_companies_prev"),
+        select(func.count(func.distinct(JobPosting.provider_id))).select_from(Application).join(JobPosting, Application.job_id == JobPosting.id).where(_PLATFORM_APPS).scalar_subquery().label("hiring_companies"),
+        select(func.count(func.distinct(JobPosting.provider_id))).select_from(Application).join(JobPosting, Application.job_id == JobPosting.id).where(_PLATFORM_APPS, Application.applied_at < thirty_days_ago).scalar_subquery().label("hiring_companies_prev"),
         select(func.count(JobPosting.id)).where(JobPosting.created_at >= thirty_days_ago).scalar_subquery().label("jobs_30d"),
         select(func.count(JobPosting.id)).where(JobPosting.created_at >= sixty_days_ago, JobPosting.created_at < thirty_days_ago).scalar_subquery().label("jobs_prev_30d"),
         select(func.count(JobPosting.id)).where(JobPosting.ai_interview_enabled.is_(True)).scalar_subquery().label("featured_jobs"),
         select(func.count(JobPosting.id)).where(JobPosting.ai_interview_enabled.is_(True), JobPosting.created_at < thirty_days_ago).scalar_subquery().label("featured_prev"),
         select(func.count(JobPosting.id)).where(JobPosting.is_active.is_(False), JobPosting.updated_at < thirty_days_ago).scalar_subquery().label("inactive_prev"),
-        select(func.count(Application.id)).where(Application.applied_at >= week_start).scalar_subquery().label("apps_week"),
-        select(func.count(Application.id)).where(Application.applied_at >= prev_week_start, Application.applied_at < week_start).scalar_subquery().label("apps_prev_week"),
-        select(func.count(Application.id)).where(Application.applied_at >= thirty_days_ago).scalar_subquery().label("apps_30d"),
-        select(func.count(Application.id)).where(Application.applied_at >= sixty_days_ago, Application.applied_at < thirty_days_ago).scalar_subquery().label("apps_prev_30d"),
+        _platform_app_count(Application.applied_at >= week_start).label("apps_week"),
+        _platform_app_count(Application.applied_at >= prev_week_start, Application.applied_at < week_start).label("apps_prev_week"),
+        _platform_app_count(Application.applied_at >= thirty_days_ago).label("apps_30d"),
+        _platform_app_count(Application.applied_at >= sixty_days_ago, Application.applied_at < thirty_days_ago).label("apps_prev_30d"),
         # Funnel stages — same job+provider join as list_platform_applications
-        select(func.count(Application.id)).select_from(Application).join(JobPosting, Application.job_id == JobPosting.id).join(User, JobPosting.provider_id == User.id).where(Application.applied_at >= day_start, Application.applied_at < day_end).scalar_subquery().label("period_applied"),
-        select(func.count(Application.id)).select_from(Application).join(JobPosting, Application.job_id == JobPosting.id).join(User, JobPosting.provider_id == User.id).where(Application.applied_at >= day_start, Application.applied_at < day_end, Application.status == ApplicationStatus.shortlisted).scalar_subquery().label("period_shortlisted"),
-        select(func.count(Application.id)).select_from(Application).join(JobPosting, Application.job_id == JobPosting.id).join(User, JobPosting.provider_id == User.id).where(Application.applied_at >= day_start, Application.applied_at < day_end, Application.status == ApplicationStatus.interviewing).scalar_subquery().label("period_interviewing"),
-        select(func.count(Application.id)).select_from(Application).join(JobPosting, Application.job_id == JobPosting.id).join(User, JobPosting.provider_id == User.id).where(Application.applied_at >= day_start, Application.applied_at < day_end, Application.status == ApplicationStatus.selected).scalar_subquery().label("period_selected"),
-        select(func.count(Application.id)).where(Application.status == ApplicationStatus.rejected).scalar_subquery().label("all_time_rejected"),
+        _platform_app_count(Application.applied_at >= day_start, Application.applied_at < day_end).label("period_applied"),
+        # Conversion funnel buckets — mutually exclusive current status of apps applied in period
+        _platform_app_count(Application.applied_at >= day_start, Application.applied_at < day_end, Application.status.in_([ApplicationStatus.applied, ApplicationStatus.auto_applied])).label("period_no_action"),
+        _platform_app_count(Application.applied_at >= day_start, Application.applied_at < day_end, Application.status == ApplicationStatus.shortlisted).label("period_shortlisted"),
+        _platform_app_count(Application.applied_at >= day_start, Application.applied_at < day_end, Application.status == ApplicationStatus.interviewing).label("period_interviewing"),
+        _platform_app_count(Application.applied_at >= day_start, Application.applied_at < day_end, Application.status == ApplicationStatus.selected).label("period_selected"),
+        _platform_app_count(Application.applied_at >= day_start, Application.applied_at < day_end, Application.status == ApplicationStatus.rejected).label("period_rejected"),
+        _platform_app_count(Application.status == ApplicationStatus.rejected).label("all_time_rejected"),
         select(func.count(Interview.id)).select_from(Interview).join(Seeker, Interview.seeker_id == Seeker.id).join(Provider, Interview.provider_id == Provider.id).join(JobPosting, Interview.job_id == JobPosting.id).where(Interview.scheduled_at >= day_start, Interview.scheduled_at < day_end).scalar_subquery().label("period_interviews"),
     )
 
@@ -383,7 +404,11 @@ async def get_dashboard_analytics(
         .select_from(Application)
         .join(JobPosting, Application.job_id == JobPosting.id)
         .join(Provider, JobPosting.provider_id == Provider.id)
-        .where(Application.applied_at >= day_start, Application.applied_at < day_end)
+        .where(
+            _PLATFORM_APPS,
+            Application.applied_at >= day_start,
+            Application.applied_at < day_end,
+        )
         .group_by(Provider.id, Provider.company_name, Provider.first_name, Provider.last_name)
         .order_by(func.count(Application.id).desc())
         .limit(8)
@@ -391,7 +416,15 @@ async def get_dashboard_analytics(
 
     # Query 14: Latest seekers in period
     latest_seeker_query = (
-        select(User.first_name, User.last_name, User.email, User.industry, User.created_at, User.is_verified)
+        select(
+            User.id,
+            User.first_name,
+            User.last_name,
+            User.email,
+            User.industry,
+            User.created_at,
+            User.is_verified,
+        )
         .where(
             User.role == UserRole.seeker,
             User.is_super_admin.is_(False),
@@ -413,6 +446,8 @@ async def get_dashboard_analytics(
     # Query 16: Recent applications in period
     recent_app_query = (
         select(
+            Application.id,
+            Application.seeker_id,
             Application.status,
             Application.applied_at,
             Seeker.first_name,
@@ -423,7 +458,11 @@ async def get_dashboard_analytics(
         )
         .outerjoin(Seeker, Application.seeker_id == Seeker.id)
         .join(JobPosting, Application.job_id == JobPosting.id)
-        .where(Application.applied_at >= day_start, Application.applied_at < day_end)
+        .where(
+            _PLATFORM_APPS,
+            Application.applied_at >= day_start,
+            Application.applied_at < day_end,
+        )
         .order_by(Application.applied_at.desc())
         .limit(6)
     )
@@ -456,7 +495,6 @@ async def get_dashboard_analytics(
         .outerjoin(Portfolio, Portfolio.user_id == User.id)
         .where(User.role == UserRole.seeker, User.is_super_admin.is_(False))
         .order_by(User.created_at.desc())
-        .limit(1000)
     )
 
     # ── 2. Run All Queries in Parallel using asyncio.gather ──────────────────
@@ -490,6 +528,9 @@ async def get_dashboard_analytics(
     # Totals
     total_seekers = tot_row.total_seekers
     total_providers = tot_row.total_providers
+    total_supervisors = tot_row.total_supervisors
+    new_supervisors_period = tot_row.new_supervisors_period
+    new_supervisors_prev = tot_row.new_supervisors_prev
     total_jobs = tot_row.total_jobs
     active_jobs = tot_row.active_jobs
     inactive_jobs = total_jobs - active_jobs
@@ -535,11 +576,13 @@ async def get_dashboard_analytics(
     apps_30d = sum_row.apps_30d
     apps_prev_30d = sum_row.apps_prev_30d
 
-    # Funnel (selected reporting period)
+    # Funnel (selected reporting period) — conversion by current status
     period_applied = sum_row.period_applied
+    period_no_action = sum_row.period_no_action
     period_shortlisted = sum_row.period_shortlisted
     period_interviewing = sum_row.period_interviewing
     period_selected = sum_row.period_selected
+    period_rejected = sum_row.period_rejected
     all_time_rejected = sum_row.all_time_rejected
     period_interviews = sum_row.period_interviews
 
@@ -638,11 +681,15 @@ async def get_dashboard_analytics(
             {"label": "Profile Completion Rate", "value": f"{profile_rate}%", "trend": profile_rate_trend},
             {"label": "New Seekers in Period", "value": _fmt(new_seekers_period), "trend": _pct_change(new_seekers_period, new_seekers_prev)},
         ],
+        "supervisors": [
+            {"label": "Total Supervisors", "value": _fmt(total_supervisors), "trend": _pct_change(new_supervisors_period, new_supervisors_prev)},
+            {"label": "New Supervisors in Period", "value": _fmt(new_supervisors_period), "trend": _pct_change(new_supervisors_period, new_supervisors_prev)},
+        ],
         "providers": [
-            {"label": "Total Companies", "value": _fmt(total_providers)},
-            {"label": "Active Companies", "value": _fmt(active_companies)},
-            {"label": "New Companies in Period", "value": _fmt(new_providers_period), "trend": _pct_change(new_providers_period, new_providers_prev)},
-            {"label": "Hiring Companies", "value": _fmt(hiring_companies), "trend": _pct_change(hiring_companies, hiring_companies_prev)},
+            {"label": "Total Providers", "value": _fmt(total_providers)},
+            {"label": "Active Providers", "value": _fmt(active_companies)},
+            {"label": "New Providers in Period", "value": _fmt(new_providers_period), "trend": _pct_change(new_providers_period, new_providers_prev)},
+            {"label": "Hiring Providers", "value": _fmt(hiring_companies), "trend": _pct_change(hiring_companies, hiring_companies_prev)},
         ],
         "jobs": [
             {"label": "Total Jobs", "value": _fmt(total_jobs)},
@@ -657,22 +704,22 @@ async def get_dashboard_analytics(
         ],
     }
 
+    # Conversion funnel: Applied is the pool; remaining stages are mutually exclusive
+    # current statuses of those applications (pct = share of Applied).
     funnel_base = max(period_applied, 1)
-    shortlisted_count = period_shortlisted
-    scheduled_count = period_interviews
-    # Interview stage = apps currently interviewing (applied in period) — matches list drill-down.
-    interview_count = period_interviewing
     recruitment_funnel = [
         {"stage": "Applied", "count": period_applied, "pct": 100.0 if period_applied else 0.0},
-        {"stage": "Shortlisted", "count": shortlisted_count, "pct": _funnel_pct(shortlisted_count, funnel_base)},
-        {"stage": "Scheduled", "count": scheduled_count, "pct": _funnel_pct(scheduled_count, funnel_base)},
-        {"stage": "Interview", "count": interview_count, "pct": _funnel_pct(interview_count, funnel_base)},
+        {"stage": "No action", "count": period_no_action, "pct": _funnel_pct(period_no_action, funnel_base)},
+        {"stage": "Shortlisted", "count": period_shortlisted, "pct": _funnel_pct(period_shortlisted, funnel_base)},
+        {"stage": "Interview", "count": period_interviewing, "pct": _funnel_pct(period_interviewing, funnel_base)},
         {"stage": "Selected", "count": period_selected, "pct": _funnel_pct(period_selected, funnel_base)},
+        {"stage": "Rejected", "count": period_rejected, "pct": _funnel_pct(period_rejected, funnel_base)},
     ]
+    acted_on = max(period_applied - period_no_action, 0)
     funnel_velocity = [
-        {"label": "Shortlist Rate", "value": _funnel_pct(shortlisted_count, funnel_base), "badge": "Applied → Shortlisted", "tone": "blue"},
-        {"label": "Schedule Rate", "value": _funnel_pct(scheduled_count, funnel_base), "badge": "Shortlisted → Scheduled", "tone": "purple"},
-        {"label": "Selection Rate", "value": _funnel_pct(period_selected, funnel_base), "badge": "Interview → Selected", "tone": "green"},
+        {"label": "Action Rate", "value": _funnel_pct(acted_on, funnel_base), "badge": "Applied → Any action", "tone": "blue"},
+        {"label": "Interview Rate", "value": _funnel_pct(period_interviewing, funnel_base), "badge": "Applied → Interview", "tone": "purple"},
+        {"label": "Selection Rate", "value": _funnel_pct(period_selected, funnel_base), "badge": "Applied → Selected", "tone": "green"},
     ]
     above_80_matches = int(match_stats_row.above_80 or 0)
     funnel_highlight = None
@@ -797,7 +844,9 @@ async def get_dashboard_analytics(
     # Latest seekers
     latest_seekers = [
         {
+            "id": str(r.id),
             "name": f"{r.first_name or ''} {r.last_name or ''}".strip() or r.email or "Seeker",
+            "email": r.email or None,
             "industry": r.industry or "—",
             "status": "Verified" if r.is_verified else "Pending",
             "created_at": r.created_at.isoformat() if r.created_at else None,
@@ -820,7 +869,10 @@ async def get_dashboard_analytics(
     # Recent applications
     recent_applications = [
         {
+            "id": str(r.id),
+            "seeker_id": str(r.seeker_id) if r.seeker_id else None,
             "candidate": f"{r.first_name or ''} {r.last_name or ''}".strip() or r.candidate_name or r.email or "Guest",
+            "email": r.email or None,
             "job": r.title,
             "status": r.status.value if hasattr(r.status, "value") else str(r.status),
             "applied_at": r.applied_at.isoformat() if r.applied_at else None,
@@ -828,12 +880,25 @@ async def get_dashboard_analytics(
         for r in recent_app_res.all()
     ]
 
-    # Activity feed
+    # Activity feed (entity ids enable deep-link / auto-filter from the dashboard)
     activity = []
     for s in latest_seekers[:4]:
-        activity.append({"type": "registration", "message": f"New candidate {s['name']} registered", "time": s["created_at"]})
+        activity.append({
+            "type": "registration",
+            "message": f"New candidate {s['name']} registered",
+            "time": s["created_at"],
+            "entity_id": s["id"],
+            "search_q": s.get("email") or s["name"],
+        })
     for a in recent_applications[:4]:
-        activity.append({"type": "application", "message": f"{a['candidate']} applied for {a['job']}", "time": a["applied_at"]})
+        activity.append({
+            "type": "application",
+            "message": f"{a['candidate']} applied for {a['job']}",
+            "time": a["applied_at"],
+            "entity_id": a["id"],
+            "seeker_id": a.get("seeker_id"),
+            "search_q": a.get("email") or a["candidate"],
+        })
     activity.sort(key=lambda x: x.get("time") or "", reverse=True)
     activity = activity[:8]
 
@@ -848,7 +913,7 @@ async def get_dashboard_analytics(
 
     platform_overview = [
         {"label": "Total Users", "value": total_seekers + total_providers, "trend": _pct_change(new_regs_today, new_regs_yesterday)},
-        {"label": "Companies", "value": total_providers, "trend": _pct_change(new_providers_period, new_providers_prev)},
+        {"label": "Providers", "value": total_providers, "trend": _pct_change(new_providers_period, new_providers_prev)},
         {"label": "Jobs", "value": active_jobs, "trend": _pct_change(active_jobs, active_jobs_yesterday)},
         {"label": "Applications", "value": apps_today, "trend": _pct_change(apps_today, apps_yesterday)},
     ]

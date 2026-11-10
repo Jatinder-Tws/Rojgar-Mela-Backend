@@ -91,6 +91,13 @@ class JobPosting(Base):
     def is_external_listing(self) -> bool:
         return bool((self.source_platform or "").strip())
 
+    @classmethod
+    def platform_managed_clause(cls):
+        """SQL filter for jobs with in-platform hiring (excludes official/govt scraped listings)."""
+        from sqlalchemy import or_
+
+        return or_(cls.source_platform.is_(None), cls.source_platform == "")
+
     @property
     def external_apply_url(self):
         """Official apply link for scraped jobs (government portals). Provider jobs return None."""

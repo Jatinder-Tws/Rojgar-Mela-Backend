@@ -430,7 +430,9 @@ class DashboardRecruiter(BaseModel):
 
 
 class DashboardSeekerRow(BaseModel):
+    id: Optional[str] = None
     name: str
+    email: Optional[str] = None
     industry: str
     status: str
     created_at: Optional[str] = None
@@ -445,7 +447,10 @@ class DashboardJobRow(BaseModel):
 
 
 class DashboardApplicationRow(BaseModel):
+    id: Optional[str] = None
+    seeker_id: Optional[str] = None
     candidate: str
+    email: Optional[str] = None
     job: str
     status: str
     applied_at: Optional[str] = None
@@ -455,6 +460,9 @@ class DashboardActivityItem(BaseModel):
     type: str
     message: str
     time: Optional[str] = None
+    entity_id: Optional[str] = None
+    seeker_id: Optional[str] = None
+    search_q: Optional[str] = None
 
 
 class DashboardAlert(BaseModel):
@@ -615,6 +623,7 @@ class AdminMatchListItem(BaseModel):
     created_at: datetime
     application_id: Optional[str] = None
     application_status: Optional[str] = None
+    source_platform: Optional[str] = None
 
 
 class AdminApplicationListItem(BaseModel):
@@ -630,6 +639,7 @@ class AdminApplicationListItem(BaseModel):
     status: str
     applied_at: datetime
     updated_at: datetime
+    source_platform: Optional[str] = None
 
 
 class AdminShortlistRequest(BaseModel):

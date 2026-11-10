@@ -34,11 +34,12 @@ async def complete_onboarding(
     user: User,
     db: AsyncSession,
 ) -> UserOut:
-    try:
-        user.role = UserRole(body.role)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid role. Must be 'seeker' or 'provider'")
+    from app.shared.services.onboarding_validation import resolve_onboarding_role, validate_onboarding_payload
 
+    role = resolve_onboarding_role(user.role, body.role)
+    validate_onboarding_payload(role, body)
+
+    user.role = role
     user.industry = body.industry
     user.job_role = body.job_role
     user.company_name = body.company_name
@@ -47,30 +48,23 @@ async def complete_onboarding(
         user.first_name = body.first_name
     if body.last_name:
         user.last_name = body.last_name
-    if body.email:
-        user.email = body.email
+    # Do not change email during onboarding — that bypasses verification.
     if body.experience:
         user.experience = body.experience
     if body.company_size:
         user.company_size = body.company_size
     if body.job_type:
-        try:
-            user.job_type = JobType(body.job_type)
-        except ValueError:
-            pass
+        user.job_type = JobType(body.job_type)
     if body.salary_range:
         user.salary_range = body.salary_range
     if body.company_type:
-        try:
-            user.company_type = CompanyType(body.company_type)
-        except ValueError:
-            pass
+        user.company_type = CompanyType(body.company_type)
     if body.company_location:
         user.company_location = body.company_location
     if body.company_address:
         user.company_address = body.company_address
     if body.preferred_locations:
-        user.preferred_locations = body.preferred_locations[:5]
+        user.preferred_locations = [loc.strip() for loc in body.preferred_locations if loc and str(loc).strip()][:5]
 
     user.onboarding_complete = True
     await db.commit()
@@ -83,7 +77,7 @@ async def complete_onboarding(
             await db.commit()
 
     from app.shared.services.celery_tasks import send_welcome_email_task, invalidate_seeker_matches_task
-    send_welcome_email_task.delay(user.email, user.first_name or "", str(body.role))
+    send_welcome_email_task.delay(user.email, user.first_name or "", role.value)
 
     if user.role == UserRole.seeker:
         invalidate_seeker_matches_task.delay(str(user.id))

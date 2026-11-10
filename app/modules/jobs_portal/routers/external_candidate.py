@@ -540,11 +540,17 @@ async def upload_public_file(
 @router.put("/shortlist/{candidate_id}",response_model=ExternalCandidateOut)
 async def shortlist_candidate(candidate_id:str,db:AsyncSession=Depends(get_db)):
     result = await db.execute(select(ExternalCandidate).filter(ExternalCandidate.id == candidate_id))
-    print(result)
     candidate = result.scalar_one_or_none()
-    print(candidate)
     if not candidate:
         raise HTTPException(status_code=404, detail="Candidate not found")
+    if candidate.job_id:
+        linked_job = await db.execute(select(JobPosting).where(JobPosting.id == candidate.job_id))
+        linked = linked_job.scalar_one_or_none()
+        if linked and linked.is_external_listing:
+            raise HTTPException(
+                status_code=400,
+                detail="This is an official listing. Hiring is not managed on the platform.",
+            )
     candidate.status = "shortlisted"
     candidate.updated_at = datetime.utcnow();
     
@@ -575,6 +581,14 @@ async def reject_candidate(candidate_id: str, db: AsyncSession = Depends(get_db)
     candidate = result.scalar_one_or_none()
     if not candidate:
         raise HTTPException(status_code=404, detail="Candidate not found")
+    if candidate.job_id:
+        linked_job = await db.execute(select(JobPosting).where(JobPosting.id == candidate.job_id))
+        linked = linked_job.scalar_one_or_none()
+        if linked and linked.is_external_listing:
+            raise HTTPException(
+                status_code=400,
+                detail="This is an official listing. Hiring is not managed on the platform.",
+            )
     
     candidate.status = "rejected"
     candidate.updated_at = datetime.utcnow()

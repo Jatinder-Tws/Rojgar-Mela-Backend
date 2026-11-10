@@ -260,6 +260,7 @@ async def _create_ticket_from_session(
         subject=subject_prefix[:200],
         description=description[:5000],
         priority=TicketPriority.medium,
+        source="job_portal",
         status=TicketStatus.open,
         bot_handled=True,
         escalated_at=datetime.utcnow(),

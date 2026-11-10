@@ -4,7 +4,7 @@ Schemas for super admin provider / seeker detail pages - enriched version.
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 # ── Job (for listing under provider) ──────────────────────────────────────
@@ -200,11 +200,33 @@ class SeekerLanguageItem(BaseModel):
     proficiency: Optional[str] = None
 
 
+def _string_list(value: object) -> Optional[List[str]]:
+    """Accept a list or a comma-separated string so detail responses do not 500."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, str):
+        parts = [part.strip() for part in value.split(",") if part.strip()]
+        return parts or None
+    if isinstance(value, list):
+        parts: List[str] = []
+        for item in value:
+            text = "" if item is None else str(item).strip()
+            if text:
+                parts.append(text)
+        return parts or None
+    return None
+
+
 class SeekerProjectItem(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
     url: Optional[str] = None
     technologies: Optional[List[str]] = None
+
+    @field_validator("technologies", mode="before")
+    @classmethod
+    def technologies_as_list(cls, value: object) -> Optional[List[str]]:
+        return _string_list(value)
 
 
 # ── Seeker Detail ─────────────────────────────────────────────────────────
@@ -237,6 +259,11 @@ class AdminSeekerDetailResponse(BaseModel):
     experience: Optional[str] = None
     preferred_locations: Optional[List[str]] = None
     profile_completion_percentage: Optional[int] = None
+
+    @field_validator("preferred_locations", mode="before")
+    @classmethod
+    def locations_as_list(cls, value: object) -> Optional[List[str]]:
+        return _string_list(value)
     profile_sections_filled: int = 0
     profile_sections_total: int = 0
     has_resume: bool = False

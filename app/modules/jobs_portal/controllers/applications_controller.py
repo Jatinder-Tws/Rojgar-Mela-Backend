@@ -20,6 +20,15 @@ from app.shared.services.audit_service import log_audit_event
 
 logger = logging.getLogger(__name__)
 
+EXTERNAL_LISTING_HIRING_DETAIL = (
+    "This is an official listing. Hiring is not managed on the platform."
+)
+
+
+def _reject_if_external_listing(job: JobPosting | None) -> None:
+    if job is not None and job.is_external_listing:
+        raise HTTPException(status_code=400, detail=EXTERNAL_LISTING_HIRING_DETAIL)
+
 
 def _provider_display_name(provider: User) -> str:
     company = (provider.company_name or "").strip()
@@ -209,6 +218,7 @@ async def get_my_applications(user: User, db: AsyncSession) -> List[ApplicationO
             required_skills=job.required_skills if isinstance(job.required_skills, list) else [],
             ai_interview_enabled=job.ai_interview_enabled,
             location=job.location,
+            source_platform=job.source_platform,
         ))
     return out
 
@@ -230,6 +240,7 @@ async def get_all_applicants(user: User, db: AsyncSession) -> List[ApplicationOu
         app_out.company_name = job.posted_by_name
         app_out.experience_required = job.experience_required
         app_out.salary_range = job.salary_range
+        app_out.source_platform = job.source_platform
         if seeker:
             app_out.seeker_first_name = seeker.first_name
             app_out.seeker_last_name = seeker.last_name
@@ -270,6 +281,7 @@ async def get_job_applications(job_id: str, user: User, db: AsyncSession) -> Lis
         app_out.job_description = job.description
         app_out.required_skills = job.required_skills if isinstance(job.required_skills, list) else []
         app_out.ai_interview_enabled = job.ai_interview_enabled
+        app_out.source_platform = job.source_platform
         if seeker:
             app_out.seeker_first_name = seeker.first_name
             app_out.seeker_last_name = seeker.last_name
@@ -313,6 +325,7 @@ async def get_all_external_applications(user: User, db: AsyncSession) -> List[Ap
             job_title=job.title if job else "General Interest",
             job_type=job.job_type if job else "N/A",
             company_name=job.posted_by_name if job else "N/A",
+            source_platform=job.source_platform if job else None,
             seeker_first_name=candidate.full_name,
             seeker_last_name="",
             seeker_email=candidate.email,
@@ -399,6 +412,7 @@ async def provider_shortlist_candidate(
     job = job_result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    _reject_if_external_listing(job)
 
     seeker_result = await db.execute(select(User).where(User.id == body.seeker_id))
     seeker = seeker_result.scalar_one_or_none()
@@ -470,6 +484,7 @@ async def shortlist_application(app_id: str, user: User, db: AsyncSession) -> Ap
     job = job_result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=403, detail="Forbidden")
+    _reject_if_external_listing(job)
 
     if app.status in (ApplicationStatus.shortlisted, ApplicationStatus.interviewing, ApplicationStatus.selected):
         raise HTTPException(status_code=409, detail="Candidate is already shortlisted")
@@ -526,6 +541,7 @@ async def reject_application(
     job = job_result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=403, detail="Forbidden")
+    _reject_if_external_listing(job)
 
     if await _scheduled_interview(db, str(app.id)):
         raise HTTPException(
@@ -608,6 +624,7 @@ async def update_application_status(
         job = job_result.scalar_one_or_none()
         if not job:
             raise HTTPException(status_code=403, detail="Forbidden")
+        _reject_if_external_listing(job)
 
         if status == "shortlisted":
             if app.status in (ApplicationStatus.shortlisted, ApplicationStatus.interviewing, ApplicationStatus.selected):

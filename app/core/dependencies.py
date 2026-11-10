@@ -97,12 +97,18 @@ async def require_authenticated(user: User = Depends(get_current_user)) -> User:
     return user
 
 
+def _require_onboarding_complete(user: User) -> None:
+    if not getattr(user, "onboarding_complete", False):
+        raise HTTPException(status_code=403, detail="Please complete onboarding to access this page")
+
+
 async def require_seeker(user: User = Depends(require_verified)) -> User:
     if user.role is None:
         raise HTTPException(status_code=403, detail="Please complete onboarding to access this page")
     role_str = user.role.value if hasattr(user.role, "value") else str(user.role)
     if role_str != "seeker":
         raise HTTPException(status_code=403, detail="Only job seekers can perform this action")
+    _require_onboarding_complete(user)
     return user
 
 
@@ -110,6 +116,7 @@ async def require_provider(user: User = Depends(require_verified)) -> User:
     role_str = user.role.value if hasattr(user.role, "value") else str(user.role)
     if role_str != "provider":
         raise HTTPException(status_code=403, detail="Only job providers can perform this action")
+    _require_onboarding_complete(user)
     return user
 
 
@@ -138,6 +145,7 @@ async def require_provider_or_super_admin(
         raise HTTPException(status_code=403, detail="Email not verified")
     if role_str != "provider":
         raise HTTPException(status_code=403, detail="Only job providers can perform this action")
+    _require_onboarding_complete(user)
     return user
 
 

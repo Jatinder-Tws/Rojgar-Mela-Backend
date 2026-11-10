@@ -1,25 +1,31 @@
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, File, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.super_admin.controllers.support_controller import (
+    admin_delete_feedback as ctrl_delete_feedback,
     admin_delete_message as ctrl_delete_message,
     admin_delete_ticket as ctrl_delete_ticket,
     admin_get_ticket as ctrl_get_ticket,
     admin_list_feedback as ctrl_list_feedback,
     admin_list_tickets as ctrl_list_tickets,
+    admin_reply_feedback as ctrl_reply_feedback,
     admin_reply_ticket as ctrl_reply,
     admin_update_message as ctrl_update_message,
     admin_update_ticket as ctrl_update_ticket,
     admin_update_ticket_status as ctrl_update_status,
     admin_list_inquiries as ctrl_list_inquiries,
     admin_reply_to_inquiry as ctrl_reply_to_inquiry,
+    upload_support_attachment as ctrl_upload_attachment,
 )
 from app.core.database import get_db
 from app.shared.models.user import User
 from app.modules.super_admin.schemas.support import (
     FeedbackListResponse,
+    FeedbackOut,
+    FeedbackReplyCreate,
+    SupportAttachmentOut,
     TicketDetailOut,
     TicketListResponse,
     TicketMessageCreate,
@@ -41,10 +47,21 @@ async def list_tickets(
     page_size: int = Query(20, ge=1, le=100),
     search: Optional[str] = None,
     status: Optional[str] = None,
+    source: Optional[str] = Query(None, description="job_portal | training | all"),
     _admin: User = Depends(require_super_admin_or_permission("help_desk")),
     db: AsyncSession = Depends(get_db),
 ):
-    return await ctrl_list_tickets(db, page=page, page_size=page_size, search=search, status=status)
+    return await ctrl_list_tickets(
+        db, page=page, page_size=page_size, search=search, status=status, source=source
+    )
+
+
+@router.post("/attachments", response_model=SupportAttachmentOut, status_code=201)
+async def upload_attachment(
+    file: UploadFile = File(...),
+    admin: User = Depends(require_super_admin_or_permission("help_desk")),
+):
+    return await ctrl_upload_attachment(file, admin)
 
 
 @router.get("/tickets/{ticket_id}", response_model=TicketDetailOut)
@@ -126,6 +143,25 @@ async def list_feedback(
     db: AsyncSession = Depends(get_db),
 ):
     return await ctrl_list_feedback(db, page=page, page_size=page_size, search=search, rating=rating)
+
+
+@router.post("/feedback/{feedback_id}/reply", response_model=FeedbackOut)
+async def reply_to_feedback(
+    feedback_id: str,
+    body: FeedbackReplyCreate,
+    admin: User = Depends(require_super_admin_or_permission("help_desk")),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_reply_feedback(feedback_id, body, admin, db)
+
+
+@router.delete("/feedback/{feedback_id}", status_code=204)
+async def delete_feedback(
+    feedback_id: str,
+    _admin: User = Depends(require_super_admin_or_permission("help_desk")),
+    db: AsyncSession = Depends(get_db),
+):
+    await ctrl_delete_feedback(feedback_id, db)
 
 
 @router.get("/inquiries", response_model=InquiryListResponse)

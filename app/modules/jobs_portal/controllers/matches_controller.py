@@ -1,11 +1,11 @@
-import asyncio
-from typing import List, Optional
+from typing import List, Optional, Set
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.jobs_portal.models.job import JobPosting
 from app.modules.jobs_portal.models.match import Match
+from app.modules.jobs_portal.models.provider_interest import ProviderInterest
 from app.modules.jobs_portal.models.resume import Resume
 from app.shared.models.user import User
 from app.shared.models.notification import NotificationType
@@ -125,6 +125,7 @@ async def get_matched_candidates(
         return []
 
     seeker_ids = [m.seeker_id for m in matches]
+    interested_ids = await _provider_interested_seeker_ids(db, str(user.id), seeker_ids)
 
     seekers_res = await db.execute(select(User).where(User.id.in_(seeker_ids)))
     resumes_res = await db.execute(
@@ -144,9 +145,10 @@ async def get_matched_candidates(
         if not seeker:
             continue
         resume = resumes_map.get(str(match.seeker_id))
+        seeker_id = str(seeker.id)
         results.append(MatchedCandidateOut(
             match_id=str(match.id),
-            user_id=str(seeker.id),
+            user_id=seeker_id,
             first_name=seeker.first_name,
             last_name=seeker.last_name,
             email=seeker.email,
@@ -158,6 +160,7 @@ async def get_matched_candidates(
             resume_filename=resume.filename if resume else None,
             profile_pic_url=seeker.profile_pic_url,
             job_id=str(match.job_id),
+            provider_interested=seeker_id in interested_ids,
         ))
     return results
 
@@ -182,6 +185,8 @@ async def get_candidate_by_match(match_id: str, user: User, db: AsyncSession) ->
         select(Resume).where(Resume.user_id == match.seeker_id).order_by(Resume.created_at.desc()).limit(1)
     )
     resume = resume_result.scalar_one_or_none()
+    interested_ids = await _provider_interested_seeker_ids(db, str(user.id), [match.seeker_id])
+    seeker_id = str(seeker.id)
     return MatchedCandidateOut(
         match_id=match.id,
         user_id=seeker.id,
@@ -195,7 +200,25 @@ async def get_candidate_by_match(match_id: str, user: User, db: AsyncSession) ->
         resume_parsed_json=resume.parsed_json if resume else None,
         resume_filename=resume.filename if resume else None,
         profile_pic_url=seeker.profile_pic_url,
+        job_id=str(match.job_id),
+        provider_interested=seeker_id in interested_ids,
     )
+
+
+async def _provider_interested_seeker_ids(
+    db: AsyncSession,
+    provider_id: str,
+    seeker_ids: list,
+) -> Set[str]:
+    if not seeker_ids:
+        return set()
+    result = await db.execute(
+        select(ProviderInterest.seeker_id).where(
+            ProviderInterest.provider_id == provider_id,
+            ProviderInterest.seeker_id.in_(seeker_ids),
+        )
+    )
+    return {str(row[0]) for row in result.all()}
 
 
 async def show_interest(candidate_id: str, user: User, db: AsyncSession) -> dict:
@@ -205,17 +228,36 @@ async def show_interest(candidate_id: str, user: User, db: AsyncSession) -> dict
     if not candidate or role_str != "seeker":
         raise HTTPException(status_code=404, detail="Candidate not found")
 
-    company_label = _provider_display_name(user)
-    await create_notification(
-        db=db,
-        user_id=candidate_id,
-        type=NotificationType.interest,
-        title=company_label,
-        message=(
-            f"{user.first_name} {user.last_name} from {company_label} has shown interest "
-            "in your profile. Log in to view and connect."
-        ),
-        related_user_id=user.id,
-        auto_commit=True,
+    existing = await db.execute(
+        select(ProviderInterest.id).where(
+            ProviderInterest.provider_id == user.id,
+            ProviderInterest.seeker_id == candidate_id,
+        ).limit(1)
     )
-    return {"message": "Interest shown successfully. Candidate has been notified."}
+    already = existing.scalar_one_or_none() is not None
+    if not already:
+        # Persist interest first; notification auto_commit flushes both rows.
+        db.add(ProviderInterest(provider_id=str(user.id), seeker_id=str(candidate_id)))
+        company_label = _provider_display_name(user)
+        await create_notification(
+            db=db,
+            user_id=candidate_id,
+            type=NotificationType.interest,
+            title=company_label,
+            message=(
+                f"{user.first_name} {user.last_name} from {company_label} has shown interest "
+                "in your profile. Log in to view and connect."
+            ),
+            related_user_id=user.id,
+            auto_commit=True,
+        )
+
+    return {
+        "message": (
+            "Interest already recorded."
+            if already
+            else "Interest shown successfully. Candidate has been notified."
+        ),
+        "provider_interested": True,
+        "already_interested": already,
+    }
