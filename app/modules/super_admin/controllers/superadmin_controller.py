@@ -26,7 +26,7 @@ async def register_superadmin(body, db: AsyncSession) -> TokenResponse:
     user = User(
         first_name=body.first_name, last_name=body.last_name, email=body.email, phone=body.phone,
         role=UserRole.superadmin, hashed_password=hash_password(body.password),
-        is_verified=True, onboarding_complete=True, is_assessment_done=True,
+        is_verified=True, onboarding_complete=True, is_assessment_done=True, is_super_admin=True,
     )
     db.add(user)
     await db.commit()
@@ -40,9 +40,14 @@ async def login_superadmin(body, db: AsyncSession) -> TokenResponse:
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No account found with this email")
-    if user.role != UserRole.superadmin:
+    if user.role != UserRole.superadmin and not getattr(user, "is_super_admin", False):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This account does not have superadmin privileges")
     if not verify_password(body.password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Incorrect password")
+    if not getattr(user, "is_super_admin", False) or user.role != UserRole.superadmin:
+        user.is_super_admin = True
+        user.role = UserRole.superadmin
+        await db.commit()
+        await db.refresh(user)
     token = create_access_token({"sub": user.id})
     return TokenResponse(access_token=token, user=UserOut.model_validate(user))

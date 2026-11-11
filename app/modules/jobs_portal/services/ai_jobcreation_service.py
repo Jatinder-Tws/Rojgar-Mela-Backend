@@ -551,9 +551,11 @@ async def enhance_job_section(
         raise ValueError("Job title is required to enhance a section")
 
     section_key = (section or "").strip().lower()
-    allowed = {"summary", "responsibilities", "interview_process"}
+    allowed = {"summary", "responsibilities", "interview_process", "additional_notes"}
     if section_key not in allowed:
-        raise ValueError("section must be summary, responsibilities, or interview_process")
+        raise ValueError(
+            "section must be summary, responsibilities, interview_process, or additional_notes"
+        )
 
     current = (current_text or "").strip()
     skills_str = ", ".join(required_skills) if required_skills else "not specified"
@@ -582,6 +584,15 @@ Enhance or write the Responsibilities section only.
 - 5–10 concrete duties for this role
 - Max 1000 characters
 - Do not include salary, perks, or interview process
+- Return JSON: {"text": "..."}
+"""
+    elif section_key == "additional_notes":
+        rules = """
+Enhance or write the Additional Notes section only.
+- Short practical notes for candidates (joining, shifts, docs, other useful info)
+- Plain text, 1–4 short sentences or short bullet lines
+- Max 500 characters
+- Do not rewrite the full job description or list core responsibilities
 - Return JSON: {"text": "..."}
 """
     else:
@@ -636,6 +647,8 @@ Choose the best Interview Process for this role.
         text = text[:500]
     elif section_key == "responsibilities":
         text = text[:1000]
+    elif section_key == "additional_notes":
+        text = text[:500]
     else:
         normalized = text.lower().strip()
         match = next((opt for opt in INTERVIEW_PROCESS_OPTIONS if opt == normalized), None)

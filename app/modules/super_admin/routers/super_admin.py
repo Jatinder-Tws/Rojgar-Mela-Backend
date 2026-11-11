@@ -11,7 +11,7 @@ from app.core.database import get_db
 from app.shared.models.user import User
 from app.modules.super_admin.schemas.super_admin import (
     AdminApplicationListItem, AdminApplicationListResponse, AdminAssessmentListResponse, AdminInterviewListResponse,
-    AdminJobCreate, AdminJobDetailResponse, AdminJobListResponse, AdminJobProviderOptionsResponse,
+    AdminJobCreate, AdminJobUpdate, AdminJobDetailResponse, AdminJobListResponse, AdminJobProviderOptionsResponse,
     AdminMatchListResponse, AdminProviderCreate, AdminProviderUpdate, AdminShortlistRequest,
     AdminSeekerCreate, AdminSeekerUpdate, AdminSetPasswordRequest, AdminUserExportRequest, AdminUserListResponse,
     AdminUserOut, BulkImportJobStarted, DashboardAnalyticsResponse, DetailedPlatformAnalytics,
@@ -32,6 +32,10 @@ from app.modules.super_admin.controllers.super_admin_controller import (
     get_platform_job as ctrl_get_job,
     list_job_provider_options as ctrl_list_job_provider_options,
     create_platform_job as ctrl_create_platform_job,
+    update_platform_job as ctrl_update_platform_job,
+    delete_platform_job as ctrl_delete_platform_job,
+    activate_platform_job as ctrl_activate_platform_job,
+    deactivate_platform_job as ctrl_deactivate_platform_job,
     list_platform_matches as ctrl_list_matches,
     list_platform_applications as ctrl_list_applications,
     update_platform_application_status as ctrl_update_application_status,
@@ -162,6 +166,46 @@ async def get_job(
     db: AsyncSession = Depends(get_db),
 ):
     return await ctrl_get_job(db, job_id)
+
+
+@router.put("/jobs/{job_id}", response_model=AdminJobDetailResponse)
+async def update_job(
+    job_id: str,
+    body: AdminJobUpdate,
+    background_tasks: BackgroundTasks,
+    admin: User = Depends(require_super_admin_or_permission("jobs")),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_update_platform_job(db, job_id, body, admin, background_tasks)
+
+
+@router.delete("/jobs/{job_id}", status_code=204)
+async def delete_job(
+    job_id: str,
+    admin: User = Depends(require_super_admin_or_permission("jobs")),
+    db: AsyncSession = Depends(get_db),
+):
+    await ctrl_delete_platform_job(db, job_id)
+
+
+@router.patch("/jobs/{job_id}/activate", response_model=AdminJobDetailResponse)
+async def activate_job(
+    job_id: str,
+    background_tasks: BackgroundTasks,
+    admin: User = Depends(require_super_admin_or_permission("jobs")),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_activate_platform_job(db, job_id, admin, background_tasks)
+
+
+@router.patch("/jobs/{job_id}/deactivate", response_model=AdminJobDetailResponse)
+async def deactivate_job(
+    job_id: str,
+    background_tasks: BackgroundTasks,
+    admin: User = Depends(require_super_admin_or_permission("jobs")),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ctrl_deactivate_platform_job(db, job_id, admin, background_tasks)
 
 
 @router.get("/matches", response_model=AdminMatchListResponse)

@@ -55,9 +55,16 @@ from app.modules.jobs_portal.models.resume import Resume
 from app.modules.jobs_portal.models.roadmap import Milestone, Resource, Roadmap
 from app.shared.models.user import CompanyType, JobType, User, UserRole
 from app.modules.jobs_portal.controllers.jobs_controller import create_job_for_provider
-from app.modules.jobs_portal.schemas.jobs import JobCreate
+from app.modules.jobs_portal.schemas.jobs import JobCreate, JobUpdate
+from app.modules.jobs_portal.services.jobs_service import (
+    activate_job_service,
+    deactivate_job_service,
+    schedule_cleanup,
+    update_job_service,
+)
 from app.modules.super_admin.schemas.super_admin import (
     AdminJobCreate,
+    AdminJobUpdate,
     AdminJobProviderOption,
     AdminJobProviderOptionsResponse,
     AdminApplicationListItem, AdminApplicationListResponse, AdminAssessmentListItem,
@@ -543,7 +550,13 @@ async def list_platform_jobs(
 
     total = await db.scalar(count_q) or 0
     offset = (page - 1) * page_size
-    rows = (await db.execute(base.order_by(JobPosting.created_at.desc()).offset(offset).limit(page_size))).all()
+    rows = (
+        await db.execute(
+            base.order_by(JobPosting.updated_at.desc().nullslast(), JobPosting.created_at.desc())
+            .offset(offset)
+            .limit(page_size)
+        )
+    ).all()
     job_ids = [job.id for job, _ in rows]
     application_counts: dict = {}
     if job_ids:
@@ -572,6 +585,8 @@ async def list_platform_jobs(
             application_count=0 if job.is_external_listing else int(application_counts.get(job.id, 0)),
             is_active=bool(job.is_active),
             created_at=job.created_at,
+            updated_at=job.updated_at,
+            source_platform=job.source_platform,
         )
         for job, user in rows
     ]
@@ -735,6 +750,178 @@ async def create_platform_job(
         ),
     )
     return await get_platform_job(db, str(created.id))
+
+
+def _parse_admin_post_count(value: Optional[str]) -> Optional[int]:
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        count = int(str(value).strip())
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Total openings must be a whole number") from exc
+    if count < 1:
+        raise HTTPException(status_code=422, detail="Total openings must be at least 1")
+    if count > 9999:
+        raise HTTPException(status_code=422, detail="Total openings cannot exceed 9999")
+    return count
+
+
+async def update_platform_job(
+    db: AsyncSession,
+    job_id: str,
+    body: AdminJobUpdate,
+    admin: User,
+    background_tasks: BackgroundTasks,
+) -> AdminJobDetailResponse:
+    result = await db.execute(select(JobPosting).where(JobPosting.id == job_id))
+    job = result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    post_count = _parse_admin_post_count(body.post_count)
+    update_payload = JobUpdate(
+        title=body.title,
+        description=body.description,
+        required_skills=body.required_skills,
+        experience_required=body.experience_required,
+        job_type=body.job_type,
+        salary_range=body.salary_range,
+        location=body.location,
+        post_count=post_count,
+        ai_interview_enabled=body.ai_interview_enabled,
+        selection_threshold=body.selection_threshold,
+        shift=body.shift,
+        employment_type=body.employment_type,
+        perks=body.perks,
+        posting_details=body.posting_details,
+        is_active=body.is_active,
+    )
+
+    was_active = bool(job.is_active)
+    content_changed = await update_job_service(job, update_payload, background_tasks)
+
+    if body.industry is not None:
+        job.industry = body.industry.strip() or None
+        content_changed = True
+    if body.posted_by_name is not None:
+        job.posted_by_name = body.posted_by_name.strip() or None
+
+    actor_label = f"{(admin.first_name or '').strip()} {(admin.last_name or '').strip()}".strip() or admin.email
+    from app.shared.services.audit_service import log_audit_event
+
+    await log_audit_event(
+        db,
+        admin,
+        action="UPDATE",
+        entity_type="job",
+        entity_id=str(job.id),
+        entity_name=job.title,
+        description=f"Admin/supervisor ({actor_label}) updated job posting: '{job.title}'",
+    )
+    await db.commit()
+    await db.refresh(job)
+
+    if job.is_active and not was_active:
+        from app.modules.jobs_portal.controllers.jobs_controller import _queue_job_processing
+
+        _queue_job_processing(background_tasks, str(job.id))
+    elif content_changed and job.is_active:
+        from app.modules.jobs_portal.services.seeker_matching_service import invalidate_job_matches
+
+        background_tasks.add_task(invalidate_job_matches, job.id)
+
+    return await get_platform_job(db, str(job.id))
+
+
+async def delete_platform_job(
+    db: AsyncSession,
+    job_id: str,
+    admin: User,
+) -> None:
+    result = await db.execute(select(JobPosting).where(JobPosting.id == job_id))
+    job = result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    actor_label = f"{(admin.first_name or '').strip()} {(admin.last_name or '').strip()}".strip() or admin.email
+    from app.shared.services.audit_service import log_audit_event
+
+    await log_audit_event(
+        db,
+        admin,
+        action="DELETE",
+        entity_type="job",
+        entity_id=str(job.id),
+        entity_name=job.title,
+        description=f"Admin/supervisor ({actor_label}) deleted job posting: '{job.title}'",
+    )
+    await db.delete(job)
+    await db.commit()
+
+
+async def deactivate_platform_job(
+    db: AsyncSession,
+    job_id: str,
+    admin: User,
+    background_tasks: BackgroundTasks,
+) -> AdminJobDetailResponse:
+    result = await db.execute(select(JobPosting).where(JobPosting.id == job_id))
+    job = result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not job.is_active:
+        return await get_platform_job(db, str(job.id))
+
+    actor_label = f"{(admin.first_name or '').strip()} {(admin.last_name or '').strip()}".strip() or admin.email
+    from app.shared.services.audit_service import log_audit_event
+
+    await deactivate_job_service(job)
+    await log_audit_event(
+        db,
+        admin,
+        action="STATUS_CHANGE",
+        entity_type="job",
+        entity_id=str(job.id),
+        entity_name=job.title,
+        description=f"Admin/supervisor ({actor_label}) closed job posting: '{job.title}'",
+        changes={"is_active": False},
+    )
+    await db.commit()
+    schedule_cleanup(background_tasks, job)
+    return await get_platform_job(db, str(job.id))
+
+
+async def activate_platform_job(
+    db: AsyncSession,
+    job_id: str,
+    admin: User,
+    background_tasks: BackgroundTasks,
+) -> AdminJobDetailResponse:
+    result = await db.execute(select(JobPosting).where(JobPosting.id == job_id))
+    job = result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.is_active:
+        return await get_platform_job(db, str(job.id))
+
+    actor_label = f"{(admin.first_name or '').strip()} {(admin.last_name or '').strip()}".strip() or admin.email
+    from app.shared.services.audit_service import log_audit_event
+    from app.modules.jobs_portal.controllers.jobs_controller import _queue_job_processing
+
+    await activate_job_service(job)
+    await log_audit_event(
+        db,
+        admin,
+        action="STATUS_CHANGE",
+        entity_type="job",
+        entity_id=str(job.id),
+        entity_name=job.title,
+        description=f"Admin/supervisor ({actor_label}) activated job posting: '{job.title}'",
+        changes={"is_active": True},
+    )
+    await db.commit()
+    _queue_job_processing(background_tasks, str(job.id))
+    return await get_platform_job(db, str(job.id))
 
 
 async def list_platform_matches(

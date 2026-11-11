@@ -163,6 +163,7 @@ class JobOut(BaseModel):
     location: Optional[str] = None
     is_active: bool
     created_at: datetime
+    updated_at: Optional[datetime] = None
     post_count: int
     ai_interview_enabled: bool
     selection_threshold: int
@@ -441,7 +442,7 @@ class JobSkillsResponse(BaseModel):
 
 
 class EnhanceJobSectionRequest(BaseModel):
-    section: str  # summary | responsibilities | interview_process
+    section: str  # summary | responsibilities | interview_process | additional_notes
     title: str
     current_text: Optional[str] = None
     location: Optional[str] = None
@@ -454,9 +455,11 @@ class EnhanceJobSectionRequest(BaseModel):
     @classmethod
     def validate_section(cls, v: str) -> str:
         key = (v or "").strip().lower()
-        allowed = {"summary", "responsibilities", "interview_process"}
+        allowed = {"summary", "responsibilities", "interview_process", "additional_notes"}
         if key not in allowed:
-            raise ValueError("section must be summary, responsibilities, or interview_process")
+            raise ValueError(
+                "section must be summary, responsibilities, interview_process, or additional_notes"
+            )
         return key
 
     @field_validator("title")

@@ -275,14 +275,31 @@ def _apply_work_types(query: Select, types: list[str]) -> Select:
 def _apply_shifts(query: Select, shifts: list[str]) -> Select:
     if not shifts:
         return query
+    allowed = {"day", "night", "evening", "rotational", "flexible", "any"}
     conditions = []
     for s in shifts:
-        if "night" in s.lower():
-            conditions.append(JobPosting.shift == "night")
-        elif "day" in s.lower():
+        key = (s or "").strip().lower().replace(" shift", "").replace(" ", "_")
+        if key not in allowed:
+            if "night" in key:
+                key = "night"
+            elif "evening" in key or "afternoon" in key:
+                key = "evening"
+            elif "rotat" in key:
+                key = "rotational"
+            elif "flex" in key:
+                key = "flexible"
+            elif key == "any" or "any_shift" in key:
+                key = "any"
+            elif "day" in key:
+                key = "day"
+            else:
+                continue
+        if key == "day":
             conditions.append(
                 or_(JobPosting.shift == "day", JobPosting.shift.is_(None))
             )
+        else:
+            conditions.append(JobPosting.shift == key)
     if conditions:
         return query.filter(or_(*conditions))
     return query

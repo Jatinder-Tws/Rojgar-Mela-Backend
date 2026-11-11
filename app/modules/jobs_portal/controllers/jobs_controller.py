@@ -171,6 +171,7 @@ JOB_SORTABLE_COLUMNS = {
     "location": JobPosting.location,
     "job_type": JobPosting.job_type,
     "created_at": JobPosting.created_at,
+    "updated_at": JobPosting.updated_at,
 }
 
 # Minimum AI match score to treat a job as "matched" in browse filters/badges.
@@ -255,7 +256,7 @@ async def list_jobs(
     from app.shared.models.user import UserRole
     from app.modules.jobs_portal.models.job import JobType as ModelJobType
     from app.modules.jobs_portal.models.match import Match
-    from sqlalchemy import func, and_, or_
+    from sqlalchemy import func, and_
 
     sort_key = sort_by or "created_at"
     sort_by_match = sort_key == "match_score" and user.role == UserRole.seeker
@@ -283,17 +284,12 @@ async def list_jobs(
         base_query = base_query.order_by(order_fn)
 
     # Apply search and filters
+    # Seeker browse accuracy: match job title only. Description ("About the Role")
+    # caused false positives when a keyword appeared only in the role text.
     filters = []
     if search:
         term = f"%{search.strip()}%"
-        filters.append(
-            or_(
-                JobPosting.title.ilike(term),
-                JobPosting.description.ilike(term),
-                JobPosting.location.ilike(term),
-                JobPosting.posted_by_name.ilike(term),
-            )
-        )
+        filters.append(JobPosting.title.ilike(term))
     if job_type and job_type != "all":
         try:
             filters.append(JobPosting.job_type == ModelJobType(job_type))

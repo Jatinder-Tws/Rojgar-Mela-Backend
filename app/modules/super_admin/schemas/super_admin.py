@@ -555,6 +555,38 @@ class AdminJobCreate(BaseModel):
         return v
 
 
+class AdminJobUpdate(BaseModel):
+    """Update a platform job posting (provider ownership stays unchanged)."""
+
+    title: Optional[str] = Field(None, min_length=1, max_length=200)
+    description: Optional[str] = Field(None, min_length=1)
+    required_skills: Optional[List[str]] = None
+    experience_required: Optional[str] = None
+    job_type: Optional[str] = None
+    salary_range: Optional[str] = None
+    industry: Optional[str] = None
+    posted_by_name: Optional[str] = None
+    location: Optional[str] = None
+    post_count: Optional[str] = None
+    ai_interview_enabled: Optional[bool] = None
+    selection_threshold: Optional[int] = None
+    shift: Optional[str] = None
+    employment_type: Optional[str] = None
+    perks: Optional[List[str]] = None
+    posting_details: Optional[dict] = None
+    is_active: Optional[bool] = None
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        v = v.strip()
+        if not v:
+            raise ValueError("Job title cannot be empty")
+        return v
+
+
 class AdminJobListItem(BaseModel):
     id: str
     provider_id: Optional[str] = None
@@ -566,6 +598,8 @@ class AdminJobListItem(BaseModel):
     application_count: int = 0
     is_active: bool
     created_at: datetime
+    updated_at: Optional[datetime] = None
+    source_platform: Optional[str] = None
 
 
 class AdminJobDetailResponse(BaseModel):
