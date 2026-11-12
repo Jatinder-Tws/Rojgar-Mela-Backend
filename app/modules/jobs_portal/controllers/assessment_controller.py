@@ -13,6 +13,7 @@ from app.modules.jobs_portal.schemas.assessment import AssessmentStart, Assessme
 from app.shared.schemas.auth import LoginResponse, UserOut
 from app.core.dependencies import hash_password
 from app.modules.jobs_portal.services.assessment_questions import build_assessment_evaluation
+from app.modules.jobs_portal.services.assessment_result_queries import latest_assessment_for_user_query
 from app.modules.jobs_portal.services.ai_service import (
     generate_career_evaluation,
     generate_career_question_set,
@@ -218,7 +219,7 @@ async def check_phone(phone: str, db: AsyncSession) -> dict:
 
 
 async def get_by_user(user_id: str, db: AsyncSession):
-    result = await db.execute(select(AssessmentResult).where(AssessmentResult.user_id == user_id))
+    result = await db.execute(latest_assessment_for_user_query(user_id))
     return result.scalar_one_or_none()
 
 
@@ -256,5 +257,5 @@ async def link_to_profile(session_id: str, user: User, db: AsyncSession) -> dict
 
 
 async def get_my_assessment(user: User, db: AsyncSession):
-    result = await db.execute(select(AssessmentResult).where(AssessmentResult.user_id == user.id))
+    result = await db.execute(latest_assessment_for_user_query(str(user.id)))
     return result.scalar_one_or_none()

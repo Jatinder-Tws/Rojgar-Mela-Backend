@@ -26,6 +26,18 @@ def _serialize(value: Any) -> Any:
         return value.model_dump()
     if isinstance(value, dict):
         return {k: _serialize(v) for k, v in value.items()}
+    # SQLAlchemy mapped instances (e.g. AssessmentResult) are not JSON-safe as-is.
+    table = getattr(value, "__table__", None)
+    if table is not None and not isinstance(value, type):
+        data = {}
+        for col in table.columns:
+            raw = getattr(value, col.name, None)
+            if hasattr(raw, "isoformat"):
+                raw = raw.isoformat()
+            elif raw is not None and not isinstance(raw, (str, int, float, bool, list, dict)):
+                raw = str(raw)
+            data[col.name] = raw
+        return data
     return value
 
 
