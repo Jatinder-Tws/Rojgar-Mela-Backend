@@ -11,6 +11,7 @@ from app.core.database import get_db
 from app.modules.super_admin.models.email_campaign import CampaignStatus, EmailCampaign, EmailCampaignRecipient, RecipientStatus
 from app.modules.super_admin.models.email_template import EmailTemplate
 from app.shared.models.user import User, UserRole
+from app.shared.services.audit_service import log_audit_event
 from app.modules.super_admin.schemas.email_admin import (
     AudienceEstimateRequest,
     AudienceEstimateResponse,
@@ -146,6 +147,17 @@ async def create_email_template(
         created_by=admin.id,
     )
     db.add(template)
+    await db.flush()
+    await log_audit_event(
+        db,
+        admin,
+        action="CREATE",
+        entity_type="email_template",
+        entity_id=str(template.id),
+        entity_name=template.name,
+        description=f"Created email template '{template.name}'",
+        source_portal="job_portal",
+    )
     await db.commit()
     return _template_to_out(template)
 
@@ -214,7 +226,7 @@ async def update_email_template(
     template_id: str,
     body: EmailTemplateUpdate,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_super_admin_or_permission("email_templates")),
+    admin: User = Depends(require_super_admin_or_permission("email_templates")),
 ):
     template = (await db.execute(select(EmailTemplate).where(EmailTemplate.id == template_id))).scalar_one_or_none()
     if not template:
@@ -234,6 +246,16 @@ async def update_email_template(
         if value is not None:
             setattr(template, field, value)
 
+    await log_audit_event(
+        db,
+        admin,
+        action="UPDATE",
+        entity_type="email_template",
+        entity_id=str(template.id),
+        entity_name=template.name,
+        description=f"Updated email template '{template.name}'",
+        source_portal="job_portal",
+    )
     await db.commit()
     return _template_to_out(template)
 
@@ -242,7 +264,7 @@ async def update_email_template(
 async def delete_email_template(
     template_id: str,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_super_admin_or_permission("email_templates")),
+    admin: User = Depends(require_super_admin_or_permission("email_templates")),
 ):
     template = (await db.execute(select(EmailTemplate).where(EmailTemplate.id == template_id))).scalar_one_or_none()
     if not template:
@@ -254,6 +276,18 @@ async def delete_email_template(
     if in_use:
         raise HTTPException(status_code=400, detail="Template is used by campaigns and cannot be deleted")
 
+    template_name = template.name
+    template_id_str = str(template.id)
+    await log_audit_event(
+        db,
+        admin,
+        action="DELETE",
+        entity_type="email_template",
+        entity_id=template_id_str,
+        entity_name=template_name,
+        description=f"Deleted email template '{template_name}'",
+        source_portal="job_portal",
+    )
     await db.delete(template)
 
 
@@ -326,6 +360,18 @@ async def create_email_campaign(
         created_by=admin.id,
     )
     db.add(campaign)
+    await db.flush()
+    await log_audit_event(
+        db,
+        admin,
+        action="CREATE",
+        entity_type="email_campaign",
+        entity_id=str(campaign.id),
+        entity_name=campaign.name,
+        description=f"Created email campaign '{campaign.name}'",
+        changes={"template_id": str(campaign.template_id), "total_recipients": count},
+        source_portal="job_portal",
+    )
     await db.commit()
     return _campaign_to_out(campaign, template.name)
 
@@ -414,7 +460,7 @@ async def update_email_campaign(
     campaign_id: str,
     body: EmailCampaignUpdate,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_super_admin_or_permission("email_campaigns")),
+    admin: User = Depends(require_super_admin_or_permission("email_campaigns")),
 ):
     campaign = (await db.execute(select(EmailCampaign).where(EmailCampaign.id == campaign_id))).scalar_one_or_none()
     if not campaign:
@@ -446,6 +492,16 @@ async def update_email_campaign(
     campaign.total_recipients = await count_audience(db, audience_type, campaign.audience_filter)
 
     template = (await db.execute(select(EmailTemplate).where(EmailTemplate.id == campaign.template_id))).scalar_one_or_none()
+    await log_audit_event(
+        db,
+        admin,
+        action="UPDATE",
+        entity_type="email_campaign",
+        entity_id=str(campaign.id),
+        entity_name=campaign.name,
+        description=f"Updated email campaign '{campaign.name}'",
+        source_portal="job_portal",
+    )
     await db.commit()
     return _campaign_to_out(campaign, template.name if template else None)
 
@@ -454,13 +510,25 @@ async def update_email_campaign(
 async def delete_email_campaign(
     campaign_id: str,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_super_admin_or_permission("email_campaigns")),
+    admin: User = Depends(require_super_admin_or_permission("email_campaigns")),
 ):
     campaign = (await db.execute(select(EmailCampaign).where(EmailCampaign.id == campaign_id))).scalar_one_or_none()
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
     if campaign.status == CampaignStatus.running:
         raise HTTPException(status_code=400, detail="Cannot delete a running campaign")
+    campaign_name = campaign.name
+    campaign_id_str = str(campaign.id)
+    await log_audit_event(
+        db,
+        admin,
+        action="DELETE",
+        entity_type="email_campaign",
+        entity_id=campaign_id_str,
+        entity_name=campaign_name,
+        description=f"Deleted email campaign '{campaign_name}'",
+        source_portal="job_portal",
+    )
     await db.delete(campaign)
 
 
@@ -468,7 +536,7 @@ async def delete_email_campaign(
 async def send_email_campaign(
     campaign_id: str,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_super_admin_or_permission("email_campaigns")),
+    admin: User = Depends(require_super_admin_or_permission("email_campaigns")),
 ):
     campaign = (await db.execute(select(EmailCampaign).where(EmailCampaign.id == campaign_id))).scalar_one_or_none()
     if not campaign:
@@ -485,6 +553,17 @@ async def send_email_campaign(
     campaign.status = CampaignStatus.queued
     campaign.job_id = job_id
     campaign.total_recipients = count
+    await log_audit_event(
+        db,
+        admin,
+        action="STATUS_CHANGE",
+        entity_type="email_campaign",
+        entity_id=str(campaign.id),
+        entity_name=campaign.name,
+        description=f"Queued email campaign '{campaign.name}' to send to {count} recipients",
+        changes={"status": CampaignStatus.queued.value, "job_id": job_id},
+        source_portal="job_portal",
+    )
     await db.commit()
 
     from app.shared.services.celery_tasks import broadcast_bulk_email_task

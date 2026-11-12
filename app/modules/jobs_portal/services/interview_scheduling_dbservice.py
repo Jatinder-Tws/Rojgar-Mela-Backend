@@ -16,6 +16,7 @@ from app.shared.models.user import User
 from app.modules.jobs_portal.models.job import JobPosting
 from app.shared.models.notification import NotificationType
 from app.shared.services.notification_service import create_notification
+from app.shared.services.audit_service import log_audit_event
 from app.modules.jobs_portal.schemas.interviews import InterviewCreate, InterviewOut, InterviewOutcomeUpdate
 from app.modules.jobs_portal.schemas.interview_scheduling import ProviderInterviewSettingsUpdate
 from app.modules.jobs_portal.services.interview_flow import auto_schedule_block_reason
@@ -237,7 +238,19 @@ async def create_interview(
     db.add(interview)
 
     application.status = ApplicationStatus.interviewing
-    
+
+    await db.flush()
+    await log_audit_event(
+        db,
+        provider,
+        action="CREATE",
+        entity_type="interview",
+        entity_id=str(interview.id),
+        entity_name=interview.title or job.title,
+        description=f"Scheduled interview for '{job.title}'",
+        changes={"application_id": str(application.id), "scheduled_at": scheduled_at.isoformat()},
+        source_portal="job_portal",
+    )
     await db.commit()
     await db.refresh(interview)
 
@@ -394,6 +407,17 @@ async def record_interview_outcome(
                     seeker_email_row.first_name or "there",
                 )
 
+    await log_audit_event(
+        db,
+        provider,
+        action="STATUS_CHANGE",
+        entity_type="interview",
+        entity_id=str(interview.id),
+        entity_name=interview.title,
+        description=f"Recorded interview outcome: {body.outcome}",
+        changes={"outcome": body.outcome, "status": InterviewStatus.completed.value},
+        source_portal="job_portal",
+    )
     await db.commit()
     await db.refresh(interview)
 

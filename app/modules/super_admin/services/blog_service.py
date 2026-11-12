@@ -7,6 +7,8 @@ from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.super_admin.models.blog_post import BlogPost
+from app.shared.models.user import User
+from app.shared.services.audit_service import log_audit_event
 from app.modules.super_admin.schemas.blog_admin import (
     BlogPostCreate,
     BlogPostUpdate,
@@ -139,7 +141,12 @@ async def get_blog_post_by_slug(db: AsyncSession, slug: str, increment_view: boo
     return post
 
 
-async def create_blog_post(db: AsyncSession, data: BlogPostCreate, created_by_id: Optional[str] = None) -> BlogPost:
+async def create_blog_post(
+    db: AsyncSession,
+    data: BlogPostCreate,
+    created_by_id: Optional[str] = None,
+    actor: Optional[User] = None,
+) -> BlogPost:
     raw_slug = data.slug or slugify(data.title)
     unique_slug = await ensure_unique_slug(db, raw_slug)
 
@@ -176,12 +183,28 @@ async def create_blog_post(db: AsyncSession, data: BlogPostCreate, created_by_id
         updated_at=datetime.utcnow(),
     )
     db.add(post)
+    await log_audit_event(
+        db,
+        actor,
+        action="CREATE",
+        entity_type="blog",
+        entity_id=str(post.id),
+        entity_name=post.title,
+        description=f"Created blog post '{post.title}'",
+        changes={"status": resolved_status, "slug": unique_slug},
+        source_portal="job_portal",
+    )
     await db.commit()
     await db.refresh(post)
     return post
 
 
-async def update_blog_post(db: AsyncSession, blog_id: str, data: BlogPostUpdate) -> Optional[BlogPost]:
+async def update_blog_post(
+    db: AsyncSession,
+    blog_id: str,
+    data: BlogPostUpdate,
+    actor: Optional[User] = None,
+) -> Optional[BlogPost]:
     post = await get_blog_post_by_id(db, blog_id)
     if not post:
         return None
@@ -216,15 +239,41 @@ async def update_blog_post(db: AsyncSession, blog_id: str, data: BlogPostUpdate)
         setattr(post, key, value)
 
     post.updated_at = datetime.utcnow()
+    await log_audit_event(
+        db,
+        actor,
+        action="UPDATE",
+        entity_type="blog",
+        entity_id=str(post.id),
+        entity_name=post.title,
+        description=f"Updated blog post '{post.title}'",
+        source_portal="job_portal",
+    )
     await db.commit()
     await db.refresh(post)
     return post
 
 
-async def delete_blog_post(db: AsyncSession, blog_id: str) -> bool:
+async def delete_blog_post(
+    db: AsyncSession,
+    blog_id: str,
+    actor: Optional[User] = None,
+) -> bool:
     post = await get_blog_post_by_id(db, blog_id)
     if not post:
         return False
+    title = post.title
+    post_id = str(post.id)
+    await log_audit_event(
+        db,
+        actor,
+        action="DELETE",
+        entity_type="blog",
+        entity_id=post_id,
+        entity_name=title,
+        description=f"Deleted blog post '{title}'",
+        source_portal="job_portal",
+    )
     await db.delete(post)
     await db.commit()
     return True

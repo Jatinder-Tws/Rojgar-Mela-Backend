@@ -231,6 +231,17 @@ def _ordered(column, sort_dir: Optional[str]):
     return clause.nulls_last()
 
 
+def _seeker_job_fair_count_expr():
+    from app.modules.jobs_portal.models.job_fair import JobFairSeeker
+
+    return (
+        select(func.count(JobFairSeeker.id))
+        .where(JobFairSeeker.seeker_id == User.id)
+        .correlate(User)
+        .scalar_subquery()
+    )
+
+
 def _seeker_sort_column(sort_by: Optional[str]):
     key = (sort_by or "created_at").strip().lower()
     columns = {
@@ -239,6 +250,11 @@ def _seeker_sort_column(sort_by: Optional[str]):
         "role": User.job_role,
         "email": User.email,
         "created_at": User.created_at,
+        "status": User.is_verified,
+        "last_active_at": User.last_login_at,
+        "industries": func.coalesce(User.industry, User.preferred_job_sector),
+        "job_fair_participation": _seeker_job_fair_count_expr(),
+        # profile_completion_percentage is computed in Python — see list_seekers.
     }
     return columns.get(key, User.created_at)
 
@@ -251,6 +267,8 @@ def _provider_sort_column(sort_by: Optional[str]):
         "role": User.company_name,
         "email": User.email,
         "created_at": User.created_at,
+        "status": User.is_verified,
+        "last_active_at": User.last_login_at,
     }
     return columns.get(key, User.created_at)
 
@@ -766,17 +784,58 @@ def _parse_admin_post_count(value: Optional[str]) -> Optional[int]:
     return count
 
 
+def _job_audit_snapshot(job: JobPosting) -> dict:
+    """Compact job fields for audit before/after diffs."""
+    job_type = getattr(job, "job_type", None)
+    if job_type is not None and hasattr(job_type, "value"):
+        job_type = job_type.value
+    elif job_type is not None:
+        job_type = str(job_type)
+    skills = getattr(job, "required_skills", None)
+    return {
+        "title": job.title,
+        "location": job.location,
+        "industry": job.industry,
+        "job_type": job_type,
+        "salary_range": job.salary_range,
+        "experience_required": job.experience_required,
+        "post_count": job.post_count,
+        "is_active": bool(job.is_active),
+        "ai_interview_enabled": bool(getattr(job, "ai_interview_enabled", False)),
+        "selection_threshold": getattr(job, "selection_threshold", None),
+        "shift": getattr(job, "shift", None),
+        "employment_type": getattr(job, "employment_type", None),
+        "perks": getattr(job, "perks", None),
+        "posted_by_name": getattr(job, "posted_by_name", None),
+        "required_skills": list(skills) if skills is not None else None,
+        "description_len": len(job.description or ""),
+    }
+
+
+def _audit_field_diff(before: dict, after: dict) -> dict:
+    changed = {}
+    for key in sorted(set(before.keys()) | set(after.keys())):
+        old = before.get(key)
+        new = after.get(key)
+        if old != new:
+            changed[key] = {"from": old, "to": new}
+    return changed
+
+
 async def update_platform_job(
     db: AsyncSession,
     job_id: str,
     body: AdminJobUpdate,
     admin: User,
     background_tasks: BackgroundTasks,
+    request=None,
 ) -> AdminJobDetailResponse:
     result = await db.execute(select(JobPosting).where(JobPosting.id == job_id))
     job = result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+
+    before = _job_audit_snapshot(job)
 
     post_count = _parse_admin_post_count(body.post_count)
     update_payload = JobUpdate(
@@ -806,6 +865,12 @@ async def update_platform_job(
     if body.posted_by_name is not None:
         job.posted_by_name = body.posted_by_name.strip() or None
 
+    after = _job_audit_snapshot(job)
+    field_diff = _audit_field_diff(before, after)
+    if "description_len" in field_diff:
+        field_diff["description"] = {"from": "(previous text)", "to": "(updated text)"}
+        del field_diff["description_len"]
+
     actor_label = f"{(admin.first_name or '').strip()} {(admin.last_name or '').strip()}".strip() or admin.email
     from app.shared.services.audit_service import log_audit_event
 
@@ -817,6 +882,13 @@ async def update_platform_job(
         entity_id=str(job.id),
         entity_name=job.title,
         description=f"Admin/supervisor ({actor_label}) updated job posting: '{job.title}'",
+        changes={
+            "fields_changed": list(field_diff.keys()),
+            "diff": field_diff,
+            "content_changed": bool(content_changed),
+        },
+        request=request,
+        source_portal="job_portal",
     )
     await db.commit()
     await db.refresh(job)
@@ -854,6 +926,7 @@ async def delete_platform_job(
         entity_id=str(job.id),
         entity_name=job.title,
         description=f"Admin/supervisor ({actor_label}) deleted job posting: '{job.title}'",
+        source_portal="job_portal",
     )
     await db.delete(job)
     await db.commit()
@@ -885,6 +958,7 @@ async def deactivate_platform_job(
         entity_name=job.title,
         description=f"Admin/supervisor ({actor_label}) closed job posting: '{job.title}'",
         changes={"is_active": False},
+        source_portal="job_portal",
     )
     await db.commit()
     schedule_cleanup(background_tasks, job)
@@ -918,6 +992,7 @@ async def activate_platform_job(
         entity_name=job.title,
         description=f"Admin/supervisor ({actor_label}) activated job posting: '{job.title}'",
         changes={"is_active": True},
+        source_portal="job_portal",
     )
     await db.commit()
     _queue_job_processing(background_tasks, str(job.id))
@@ -1202,6 +1277,7 @@ async def update_platform_application_status(
             "provider_id": str(job.provider_id) if job else None,
             "acted_for_provider": True,
         },
+        source_portal="job_portal",
         force=True,
     )
 
@@ -1368,6 +1444,7 @@ async def shortlist_platform_candidate(
             "provider_id": str(job.provider_id),
             "acted_for_provider": True,
         },
+        source_portal="job_portal",
         force=True,
     )
 
@@ -1587,21 +1664,26 @@ async def list_seekers(
         count_q = count_q.join(JobFairSeeker, JobFairSeeker.seeker_id == User.id).where(JobFairSeeker.job_fair_id == job_fair_id)
         select_q = select_q.join(JobFairSeeker, JobFairSeeker.seeker_id == User.id).where(JobFairSeeker.job_fair_id == job_fair_id)
 
+    sort_key = (sort_by or "created_at").strip().lower()
     ordered = select_q.order_by(_ordered(_seeker_sort_column(sort_by), sort_dir), User.id.desc())
     profile_key = (profile or "").strip().lower()
-    # Matches dashboard alert: completion % < 50 (same calculate_completion formula).
-    if profile_key == "incomplete":
+    # Profile % is computed in Python — load matching rows, sort/filter, then page.
+    needs_profile_scan = profile_key == "incomplete" or sort_key == "profile_completion_percentage"
+    if needs_profile_scan:
         all_rows = (await db.execute(ordered)).all()
-        incomplete_rows = []
+        scored_rows = []
         for user, portfolio in all_rows:
             pct = 0
             if portfolio:
                 pct, _, _ = calculate_completion(portfolio, user)
-            if pct < 50:
-                incomplete_rows.append((user, portfolio, pct))
-        total = len(incomplete_rows)
+            if profile_key == "incomplete" and pct >= 50:
+                continue
+            scored_rows.append((user, portfolio, pct))
+        if sort_key == "profile_completion_percentage":
+            scored_rows.sort(key=lambda row: row[2], reverse=_sort_desc(sort_dir))
+        total = len(scored_rows)
         offset = (page - 1) * page_size
-        page_slice = incomplete_rows[offset: offset + page_size]
+        page_slice = scored_rows[offset: offset + page_size]
         user_ids = [user.id for user, _, _ in page_slice]
         has_resume_ids = await _seeker_has_resume_ids(db, user_ids)
         last_active = await _last_active_map(db, user_ids)
@@ -1706,7 +1788,11 @@ def _queue_seeker_match_refresh(user_id: str) -> None:
         logger.warning("Could not queue seeker match refresh for %s", user_id, exc_info=True)
 
 
-async def create_seeker(body: AdminSeekerCreate, db: AsyncSession) -> AdminUserOut:
+async def create_seeker(
+    body: AdminSeekerCreate,
+    db: AsyncSession,
+    actor: Optional[User] = None,
+) -> AdminUserOut:
     phone = _normalize_phone(body.phone)
     if len(phone) != 10:
         raise HTTPException(status_code=400, detail="Phone must be 10 digits")
@@ -1728,6 +1814,18 @@ async def create_seeker(body: AdminSeekerCreate, db: AsyncSession) -> AdminUserO
     portfolio = Portfolio(user_id=user.id)
     apply_seeker_profile_fields(user, portfolio, seeker_profile_payload(body, exclude_unset=False))
     db.add(portfolio)
+    from app.shared.services.audit_service import log_audit_event
+    await log_audit_event(
+        db,
+        actor,
+        action="CREATE",
+        entity_type="seeker",
+        entity_id=str(user.id),
+        entity_name=_user_display_name(user),
+        description=f"Created seeker '{_user_display_name(user)}' ({user.email})",
+        changes={"email": user.email, "phone": phone, "industry": user.industry, "job_role": user.job_role},
+        source_portal="job_portal",
+    )
     await db.commit()
     await db.refresh(user)
     await _email_seeker_credentials(db, user, pwd)
@@ -1909,7 +2007,12 @@ async def get_seeker_detail(user_id: str, db: AsyncSession) -> AdminSeekerDetail
     )
 
 
-async def update_seeker(user_id: str, body: AdminSeekerUpdate, db: AsyncSession) -> AdminUserOut:
+async def update_seeker(
+    user_id: str,
+    body: AdminSeekerUpdate,
+    db: AsyncSession,
+    actor: Optional[User] = None,
+) -> AdminUserOut:
     user = await _get_role_user(db, user_id, UserRole.seeker)
     new_password = body.password if body.password else None
     await _apply_user_update(db, user, body)
@@ -1925,6 +2028,21 @@ async def update_seeker(user_id: str, body: AdminSeekerUpdate, db: AsyncSession)
         portfolio = Portfolio(user_id=user.id)
         db.add(portfolio)
     apply_seeker_profile_fields(user, portfolio, seeker_profile_payload(body, exclude_unset=True))
+    safe_changes = {k: v for k, v in updates.items() if k != "password"}
+    if new_password:
+        safe_changes["password_reset"] = True
+    from app.shared.services.audit_service import log_audit_event
+    await log_audit_event(
+        db,
+        actor,
+        action="UPDATE",
+        entity_type="seeker",
+        entity_id=str(user.id),
+        entity_name=_user_display_name(user),
+        description=f"Updated seeker '{_user_display_name(user)}' ({user.email})",
+        changes=safe_changes or None,
+        source_portal="job_portal",
+    )
     await db.commit()
     await db.refresh(user)
     if new_password:
@@ -1966,24 +2084,77 @@ async def upload_seeker_resume(user_id: str, file, background_tasks, db: AsyncSe
     return _user_to_admin_out(user, "seeker", has_resume=has_resume)
 
 
-async def delete_seeker(user_id: str, db: AsyncSession) -> None:
+async def delete_seeker(
+    user_id: str,
+    db: AsyncSession,
+    actor: Optional[User] = None,
+) -> None:
     user = await _get_role_user(db, user_id, UserRole.seeker)
+    snapshot_name = _user_display_name(user)
+    snapshot_email = user.email
+    from app.shared.services.audit_service import log_audit_event
+    await log_audit_event(
+        db,
+        actor,
+        action="DELETE",
+        entity_type="seeker",
+        entity_id=str(user.id),
+        entity_name=snapshot_name,
+        description=f"Deleted seeker '{snapshot_name}' ({snapshot_email})",
+        source_portal="job_portal",
+    )
     await _hard_delete_user(db, user)
 
 
-async def set_seeker_password(user_id: str, body: AdminSetPasswordRequest, db: AsyncSession) -> AdminUserOut:
+async def set_seeker_password(
+    user_id: str,
+    body: AdminSetPasswordRequest,
+    db: AsyncSession,
+    actor: Optional[User] = None,
+) -> AdminUserOut:
     user = await _get_role_user(db, user_id, UserRole.seeker)
     user.hashed_password = await async_hash_password(body.password)
+    from app.shared.services.audit_service import log_audit_event
+    await log_audit_event(
+        db,
+        actor,
+        action="UPDATE",
+        entity_type="seeker",
+        entity_id=str(user.id),
+        entity_name=_user_display_name(user),
+        description=f"Reset password for seeker '{_user_display_name(user)}' ({user.email})",
+        changes={"password_reset": True},
+        source_portal="job_portal",
+    )
     await db.commit()
     await db.refresh(user)
     return _user_to_admin_out(user, "seeker")
 
 
-async def bulk_import_seekers(content: bytes, filename: str) -> BulkImportJobStarted:
+async def bulk_import_seekers(
+    content: bytes,
+    filename: str,
+    actor: Optional[User] = None,
+    db: Optional[AsyncSession] = None,
+) -> BulkImportJobStarted:
     import uuid
     job_id = str(uuid.uuid4())
     _create_job(job_id, total=0, role="seeker")
     _start_background_import(job_id, content, UserRole.seeker, filename=filename or "")
+    if db is not None:
+        from app.shared.services.audit_service import log_audit_event
+        await log_audit_event(
+            db,
+            actor,
+            action="IMPORT",
+            entity_type="seeker",
+            entity_id=job_id,
+            entity_name=filename or "seekers_import",
+            description=f"Started seeker bulk import job ({filename or 'upload'})",
+            changes={"job_id": job_id, "filename": filename or ""},
+            source_portal="job_portal",
+        )
+        await db.commit()
     return BulkImportJobStarted(job_id=job_id)
 
 
@@ -2064,7 +2235,11 @@ def _apply_provider_company_fields(user: User, body) -> None:
         user.company_reviews = reviews
 
 
-async def create_provider(body: AdminProviderCreate, db: AsyncSession) -> AdminUserOut:
+async def create_provider(
+    body: AdminProviderCreate,
+    db: AsyncSession,
+    actor: Optional[User] = None,
+) -> AdminUserOut:
     phone = _normalize_phone(body.phone)
     if len(phone) != 10:
         raise HTTPException(status_code=400, detail="Phone must be 10 digits")
@@ -2083,6 +2258,19 @@ async def create_provider(body: AdminProviderCreate, db: AsyncSession) -> AdminU
     )
     _apply_provider_company_fields(user, body)
     db.add(user)
+    await db.flush()
+    from app.shared.services.audit_service import log_audit_event
+    await log_audit_event(
+        db,
+        actor,
+        action="CREATE",
+        entity_type="provider",
+        entity_id=str(user.id),
+        entity_name=user.company_name or _user_display_name(user),
+        description=f"Created provider '{_user_display_name(user)}' ({user.email})",
+        changes={"email": user.email, "company_name": user.company_name},
+        source_portal="job_portal",
+    )
     await db.commit()
     await db.refresh(user)
     return _user_to_admin_out(user, "provider")
@@ -2238,12 +2426,33 @@ async def get_provider_detail(user_id: str, db: AsyncSession) -> AdminProviderDe
     )
 
 
-async def update_provider(user_id: str, body: AdminProviderUpdate, db: AsyncSession) -> AdminUserOut:
+async def update_provider(
+    user_id: str,
+    body: AdminProviderUpdate,
+    db: AsyncSession,
+    actor: Optional[User] = None,
+) -> AdminUserOut:
     user = await _get_role_user(db, user_id, UserRole.provider)
+    updates = body.model_dump(exclude_unset=True)
     await _apply_user_update(db, user, body)
     if body.company_type is not None:
         user.company_type = CompanyType(body.company_type) if body.company_type else None
     _apply_provider_company_fields(user, body)
+    safe_changes = {k: v for k, v in updates.items() if k != "password"}
+    if updates.get("password"):
+        safe_changes["password_reset"] = True
+    from app.shared.services.audit_service import log_audit_event
+    await log_audit_event(
+        db,
+        actor,
+        action="UPDATE",
+        entity_type="provider",
+        entity_id=str(user.id),
+        entity_name=user.company_name or _user_display_name(user),
+        description=f"Updated provider '{_user_display_name(user)}' ({user.email})",
+        changes=safe_changes or None,
+        source_portal="job_portal",
+    )
     await db.commit()
     await db.refresh(user)
     return _user_to_admin_out(user, "provider")
@@ -2304,24 +2513,77 @@ async def delete_provider_gallery_image(user_id: str, image_id: str, db: AsyncSe
     return await company_svc.delete_gallery_image(user, image_id, db)
 
 
-async def delete_provider(user_id: str, db: AsyncSession) -> None:
+async def delete_provider(
+    user_id: str,
+    db: AsyncSession,
+    actor: Optional[User] = None,
+) -> None:
     user = await _get_role_user(db, user_id, UserRole.provider)
+    snapshot_name = user.company_name or _user_display_name(user)
+    snapshot_email = user.email
+    from app.shared.services.audit_service import log_audit_event
+    await log_audit_event(
+        db,
+        actor,
+        action="DELETE",
+        entity_type="provider",
+        entity_id=str(user.id),
+        entity_name=snapshot_name,
+        description=f"Deleted provider '{snapshot_name}' ({snapshot_email})",
+        source_portal="job_portal",
+    )
     await _hard_delete_user(db, user)
 
 
-async def set_provider_password(user_id: str, body: AdminSetPasswordRequest, db: AsyncSession) -> AdminUserOut:
+async def set_provider_password(
+    user_id: str,
+    body: AdminSetPasswordRequest,
+    db: AsyncSession,
+    actor: Optional[User] = None,
+) -> AdminUserOut:
     user = await _get_role_user(db, user_id, UserRole.provider)
     user.hashed_password = await async_hash_password(body.password)
+    from app.shared.services.audit_service import log_audit_event
+    await log_audit_event(
+        db,
+        actor,
+        action="UPDATE",
+        entity_type="provider",
+        entity_id=str(user.id),
+        entity_name=user.company_name or _user_display_name(user),
+        description=f"Reset password for provider '{_user_display_name(user)}' ({user.email})",
+        changes={"password_reset": True},
+        source_portal="job_portal",
+    )
     await db.commit()
     await db.refresh(user)
     return _user_to_admin_out(user, "provider")
 
 
-async def bulk_import_providers(content: bytes, filename: str) -> BulkImportJobStarted:
+async def bulk_import_providers(
+    content: bytes,
+    filename: str,
+    actor: Optional[User] = None,
+    db: Optional[AsyncSession] = None,
+) -> BulkImportJobStarted:
     import uuid
     job_id = str(uuid.uuid4())
     _create_job(job_id, total=0, role="provider")
     _start_background_import(job_id, content, UserRole.provider, filename=filename or "")
+    if db is not None:
+        from app.shared.services.audit_service import log_audit_event
+        await log_audit_event(
+            db,
+            actor,
+            action="IMPORT",
+            entity_type="provider",
+            entity_id=job_id,
+            entity_name=filename or "providers_import",
+            description=f"Started provider bulk import job ({filename or 'upload'})",
+            changes={"job_id": job_id, "filename": filename or ""},
+            source_portal="job_portal",
+        )
+        await db.commit()
     return BulkImportJobStarted(job_id=job_id)
 
 

@@ -92,10 +92,10 @@ async def list_visits(
 @admin_router.post("", response_model=IndustrialVisitAdminOut, status_code=201)
 async def create_visit(
     body: IndustrialVisitCreate,
-    _admin: User = Depends(require_super_admin_or_permission("industrial_visits")),
+    admin: User = Depends(require_super_admin_or_permission("industrial_visits")),
     db: AsyncSession = Depends(get_db),
 ):
-    return await ctrl.admin_create_visit(body, db)
+    return await ctrl.admin_create_visit(body, db, actor=admin)
 
 
 @admin_router.get("/{visit_id}", response_model=IndustrialVisitAdminOut)
@@ -111,19 +111,19 @@ async def get_visit(
 async def update_visit(
     visit_id: str,
     body: IndustrialVisitUpdate,
-    _admin: User = Depends(require_super_admin_or_permission("industrial_visits")),
+    admin: User = Depends(require_super_admin_or_permission("industrial_visits")),
     db: AsyncSession = Depends(get_db),
 ):
-    return await ctrl.admin_update_visit(visit_id, body, db)
+    return await ctrl.admin_update_visit(visit_id, body, db, actor=admin)
 
 
 @admin_router.delete("/{visit_id}", status_code=204)
 async def delete_visit(
     visit_id: str,
-    _admin: User = Depends(require_super_admin_or_permission("industrial_visits")),
+    admin: User = Depends(require_super_admin_or_permission("industrial_visits")),
     db: AsyncSession = Depends(get_db),
 ):
-    await ctrl.admin_delete_visit(visit_id, db)
+    await ctrl.admin_delete_visit(visit_id, db, actor=admin)
 
 
 @admin_router.get("/{visit_id}/students", response_model=IndustrialVisitStudentListResponse)
@@ -166,20 +166,20 @@ async def update_attendance(
     visit_id: str,
     student_id: str,
     body: IndustrialVisitAttendanceUpdate,
-    _admin: User = Depends(require_super_admin_or_permission("industrial_visits")),
+    admin: User = Depends(require_super_admin_or_permission("industrial_visits")),
     db: AsyncSession = Depends(get_db),
 ):
-    return await ctrl.admin_update_attendance(visit_id, student_id, body, db)
+    return await ctrl.admin_update_attendance(visit_id, student_id, body, db, actor=admin)
 
 
 @admin_router.delete("/{visit_id}/students/{student_id}", status_code=204)
 async def delete_student(
     visit_id: str,
     student_id: str,
-    _admin: User = Depends(require_super_admin_or_permission("industrial_visits")),
+    admin: User = Depends(require_super_admin_or_permission("industrial_visits")),
     db: AsyncSession = Depends(get_db),
 ):
-    await ctrl.admin_delete_student(visit_id, student_id, db)
+    await ctrl.admin_delete_student(visit_id, student_id, db, actor=admin)
 
 
 @admin_router.post(

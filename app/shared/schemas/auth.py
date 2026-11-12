@@ -352,6 +352,13 @@ class OnboardingRequest(BaseModel):
     company_size: Optional[str] = None
     preferred_locations: Optional[List[str]] = None
 
+    @field_validator("job_role")
+    @classmethod
+    def validate_job_role(cls, v: Optional[str]) -> Optional[str]:
+        from app.shared.validators.job_role import validate_job_role_value
+
+        return validate_job_role_value(v, required=False)
+
 
 class UpdateSettingsRequest(BaseModel):
     first_name: Optional[str] = None
@@ -377,6 +384,13 @@ class UpdateSettingsRequest(BaseModel):
     google_place_id: Optional[str] = None
     google_maps_url: Optional[str] = None
     preferred_locations: Optional[List[str]] = None
+
+    @field_validator("job_role")
+    @classmethod
+    def validate_job_role(cls, v: Optional[str]) -> Optional[str]:
+        from app.shared.validators.job_role import validate_job_role_value
+
+        return validate_job_role_value(v, required=False)
 
     @field_validator("phone")
     @classmethod

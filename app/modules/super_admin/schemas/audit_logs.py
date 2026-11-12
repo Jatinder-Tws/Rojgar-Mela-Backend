@@ -19,6 +19,7 @@ class AuditLogItem(BaseModel):
     request_method: Optional[str] = None
     ip_address: Optional[str] = None
     user_agent: Optional[str] = None
+    source_portal: Optional[str] = None
     created_at: datetime
 
     @field_serializer("created_at")
@@ -43,5 +44,6 @@ class AuditLogStatsResponse(BaseModel):
     total_all_time: int
     role_counts: Dict[str, int]
     action_counts: Dict[str, int]
+    portal_counts: Dict[str, int] = {}
     top_actors: List[Dict[str, Any]]
     recent_trend: List[Dict[str, Any]]

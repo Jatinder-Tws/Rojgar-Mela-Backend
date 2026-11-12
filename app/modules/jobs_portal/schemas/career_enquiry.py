@@ -242,6 +242,7 @@ class EnquiryPipelineStats(BaseModel):
     total: int = 0
     active: int = 0
     follow_up_due_today: int = 0
+    no_action_yet: int = 0
     visit_scheduled: int = 0
     converted: int = 0
     lost: int = 0

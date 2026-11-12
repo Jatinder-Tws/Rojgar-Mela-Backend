@@ -23,6 +23,7 @@ from app.modules.jobs_portal.schemas.site_announcement import (
     SiteAnnouncementUpdate,
 )
 from app.shared.models.user import User
+from app.shared.services.audit_service import log_audit_event
 
 public_router = APIRouter(prefix="/announcements", tags=["announcements"])
 admin_router = APIRouter(prefix="/super-admin/announcements", tags=["super-admin-announcements"])
@@ -320,7 +321,7 @@ async def enhance_event_banner(
 @admin_router.post("", response_model=SiteAnnouncementOut, status_code=status.HTTP_201_CREATED)
 async def create_announcement(
     body: SiteAnnouncementCreate,
-    _admin: User = Depends(require_super_admin_or_permission("announcements")),
+    admin: User = Depends(require_super_admin_or_permission("announcements")),
     db: AsyncSession = Depends(get_db),
 ):
     row = SiteAnnouncement(
@@ -359,6 +360,17 @@ async def create_announcement(
         from app.modules.jobs_portal.controllers.event_lucky_controller import unique_lucky_slug
         row.lucky_draw_slug = await unique_lucky_slug(db, body.title or body.text[:40])
     db.add(row)
+    await db.flush()
+    await log_audit_event(
+        db,
+        admin,
+        action="CREATE",
+        entity_type="site_announcement",
+        entity_id=str(row.id),
+        entity_name=row.title,
+        description=f"Created site announcement '{row.title}'",
+        source_portal="job_portal",
+    )
     await db.commit()
     await db.refresh(row)
     return row
@@ -464,7 +476,7 @@ async def get_announcement_candidates(
 async def update_announcement(
     announcement_id: str,
     body: SiteAnnouncementUpdate,
-    _admin: User = Depends(require_super_admin_or_permission("announcements")),
+    admin: User = Depends(require_super_admin_or_permission("announcements")),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(select(SiteAnnouncement).where(SiteAnnouncement.id == announcement_id))
@@ -484,6 +496,16 @@ async def update_announcement(
         from app.modules.jobs_portal.controllers.event_lucky_controller import unique_lucky_slug
         row.lucky_draw_slug = await unique_lucky_slug(db, row.title or row.text[:40], exclude_id=row.id)
     row.updated_at = datetime.utcnow()
+    await log_audit_event(
+        db,
+        admin,
+        action="UPDATE",
+        entity_type="site_announcement",
+        entity_id=str(row.id),
+        entity_name=row.title,
+        description=f"Updated site announcement '{row.title}'",
+        source_portal="job_portal",
+    )
     await db.commit()
     await db.refresh(row)
     return row
@@ -492,7 +514,7 @@ async def update_announcement(
 @admin_router.delete("/{announcement_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_announcement(
     announcement_id: str,
-    _admin: User = Depends(require_super_admin_or_permission("announcements")),
+    admin: User = Depends(require_super_admin_or_permission("announcements")),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(select(SiteAnnouncement).where(SiteAnnouncement.id == announcement_id))
@@ -515,6 +537,18 @@ async def delete_announcement(
         .values(announcement_id=None)
     )
 
+    title = row.title
+    row_id = str(row.id)
+    await log_audit_event(
+        db,
+        admin,
+        action="DELETE",
+        entity_type="site_announcement",
+        entity_id=row_id,
+        entity_name=title,
+        description=f"Deleted site announcement '{title}'",
+        source_portal="job_portal",
+    )
     await db.delete(row)
     await db.commit()
 

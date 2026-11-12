@@ -9,9 +9,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.modules.jobs_portal.models.ai_coach import AICoachSession
 from app.shared.models.user import User
 from app.modules.jobs_portal.services.ai_coach_service import AICoachService
-from app.modules.jobs_portal.services.ai_coach_credits_service import AICoachCreditsService
+from app.modules.jobs_portal.services.ai_coach_credits_service import (
+    AICoachCreditsService,
+    CREDIT_RATE_PER_MINUTE,
+)
 from app.modules.jobs_portal.services.ai_coach_service import INSUFFICIENT_GRADE_MESSAGE
 from app.shared.services.gemini_resilient import GeminiServiceUnavailable
+
+_INSUFFICIENT_CREDITS_DETAIL = (
+    f"Insufficient credits. Minimum {CREDIT_RATE_PER_MINUTE} credits "
+    "(1 minute) required to start an interview practice session."
+)
 
 
 async def get_credit_balance(user: User, db: AsyncSession) -> dict:
@@ -33,12 +41,12 @@ async def start_coach_session(
 ) -> dict:
     AICoachCreditsService.verify_seeker_role(user)
     
-    # Check minimum 1 credit requirement
+    # Check minimum first-minute credit requirement
     account = await AICoachCreditsService.get_or_create_account(db, user)
-    if account.balance < 1:
+    if account.balance < CREDIT_RATE_PER_MINUTE:
         raise HTTPException(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
-            detail="Insufficient credits. Minimum 1 credit required to start an interview practice session."
+            detail=_INSUFFICIENT_CREDITS_DETAIL,
         )
         
     try:
@@ -71,10 +79,10 @@ async def start_speak_coach_session(
     AICoachCreditsService.verify_seeker_role(user)
 
     account = await AICoachCreditsService.get_or_create_account(db, user)
-    if account.balance < 1:
+    if account.balance < CREDIT_RATE_PER_MINUTE:
         raise HTTPException(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
-            detail="Insufficient credits. Minimum 1 credit required to start an interview practice session.",
+            detail=_INSUFFICIENT_CREDITS_DETAIL,
         )
 
     try:
@@ -114,10 +122,10 @@ async def start_live_coach_session(
     AICoachCreditsService.verify_seeker_role(user)
 
     account = await AICoachCreditsService.get_or_create_account(db, user)
-    if account.balance < 1:
+    if account.balance < CREDIT_RATE_PER_MINUTE:
         raise HTTPException(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
-            detail="Insufficient credits. Minimum 1 credit required to start an interview practice session."
+            detail=_INSUFFICIENT_CREDITS_DETAIL,
         )
 
     session = await AICoachService.initialize_session(
@@ -195,7 +203,10 @@ async def verify_credit_order(
 
 async def get_active_room_session(session_id: str, user: User, db: AsyncSession) -> dict:
     AICoachCreditsService.verify_seeker_role(user)
-    return await AICoachService.get_active_room_session(db, session_id, user.id)
+    room = await AICoachService.get_active_room_session(db, session_id, user.id)
+    if not room or room.get("error"):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+    return room
 
 
 async def expire_coach_session(session_id: str, user: User, db: AsyncSession) -> dict:

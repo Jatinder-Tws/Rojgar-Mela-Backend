@@ -13,6 +13,7 @@ from sqlalchemy.orm import selectinload
 from app.core.config import get_upload_dir
 from app.core.database import get_db
 from app.core.dependencies import require_training_portal_user, require_super_admin_or_permission
+from app.shared.services.audit_service import log_audit_event
 from app.modules.training_portal.models.training_portal_free_course import (
     TrainingPortalFreeCourse,
     TrainingPortalFreeCourseLesson,
@@ -652,6 +653,17 @@ async def import_free_course(
         db.add(course)
         await db.flush()
         db.add_all(_lesson_models(course.id, imported))
+        await log_audit_event(
+            db,
+            current_user,
+            action="CREATE",
+            entity_type="free_course",
+            entity_id=str(course.id),
+            entity_name=course.title,
+            description=f"Imported free course '{course.title}' from YouTube playlist",
+            changes={"source": "youtube", "playlist_id": course.playlist_id, "category": course.category},
+            source_portal="training_portal",
+        )
         await db.commit()
         return _to_out(await _get_course(db, course.id), include_lessons=True)
 
@@ -701,6 +713,17 @@ async def import_free_course(
                 sort_order=0,
                 created_at=now,
             )
+        )
+        await log_audit_event(
+            db,
+            current_user,
+            action="CREATE",
+            entity_type="free_course",
+            entity_id=str(course.id),
+            entity_name=course.title,
+            description=f"Created free course '{course.title}' from PDF/upload",
+            changes={"source": "pdf", "category": course.category},
+            source_portal="training_portal",
         )
         await db.commit()
         return _to_out(await _get_course(db, course.id), include_lessons=True)
@@ -752,6 +775,17 @@ async def import_free_course(
             created_at=now,
         )
     )
+    await log_audit_event(
+        db,
+        current_user,
+        action="CREATE",
+        entity_type="free_course",
+        entity_id=str(course.id),
+        entity_name=course.title,
+        description=f"Created free course '{course.title}' from external resource",
+        changes={"source": source, "category": course.category},
+        source_portal="training_portal",
+    )
     await db.commit()
     return _to_out(await _get_course(db, course.id), include_lessons=True)
 
@@ -786,6 +820,17 @@ async def update_free_course(
     for field, value in data.items():
         setattr(course, field, value)
     course.updated_at = datetime.utcnow()
+    await log_audit_event(
+        db,
+        current_user,
+        action="UPDATE",
+        entity_type="free_course",
+        entity_id=str(course.id),
+        entity_name=course.title,
+        description=f"Updated free course '{course.title}'",
+        changes=data,
+        source_portal="training_portal",
+    )
     await db.commit()
     return _to_out(await _get_course(db, course.id), include_lessons=True)
 
@@ -1040,6 +1085,17 @@ async def delete_free_course(
     db: AsyncSession = Depends(get_db),
 ):
     course = await _get_course(db, course_id, with_lessons=False, with_resources=False)
+    course_title = course.title
+    await log_audit_event(
+        db,
+        current_user,
+        action="DELETE",
+        entity_type="free_course",
+        entity_id=str(course_id),
+        entity_name=course_title,
+        description=f"Deleted free course '{course_title}'",
+        source_portal="training_portal",
+    )
     await db.delete(course)
     await db.commit()
     return None

@@ -73,6 +73,7 @@ async def supervisor_login(
             "permissions_count": len(profile.permissions or []),
         },
         request=request,
+        source_portal="auth",
     )
     await db.commit()
 

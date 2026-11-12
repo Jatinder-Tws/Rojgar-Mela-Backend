@@ -24,7 +24,10 @@ from app.core.database import AsyncSessionLocal
 from app.shared.models.user import User
 from app.modules.jobs_portal.models.ai_coach import AICoachSession
 from app.modules.jobs_portal.services.ai_coach_service import AICoachService
-from app.modules.jobs_portal.services.ai_coach_credits_service import AICoachCreditsService
+from app.modules.jobs_portal.services.ai_coach_credits_service import (
+    AICoachCreditsService,
+    CREDIT_RATE_PER_MINUTE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -389,12 +392,16 @@ async def run_live_session(
                         break
 
             async def credit_deduction_loop() -> None:
-                # Deduct initial 1.5 credits for Minute 1
+                # Deduct first minute up front, then every 60s of call duration
                 async with AsyncSessionLocal() as db:
                     success, balance = await AICoachCreditsService.deduct_heartbeat_credit(
-                        db, seeker_id, session_id, rate=1.5
+                        db, seeker_id, session_id, rate=CREDIT_RATE_PER_MINUTE
                     )
-                    await websocket.send_json({"type": "credit_update", "balance": balance, "deducted": 1.5})
+                    await websocket.send_json({
+                        "type": "credit_update",
+                        "balance": balance,
+                        "deducted": CREDIT_RATE_PER_MINUTE,
+                    })
                     if not success:
                         await websocket.send_json({
                             "type": "error",
@@ -402,14 +409,17 @@ async def run_live_session(
                         })
                         raise _ClientEndedSession()
 
-                # Deduct 1.5 credits every 60 seconds of call duration
                 while True:
                     await asyncio.sleep(60)
                     async with AsyncSessionLocal() as db:
                         success, balance = await AICoachCreditsService.deduct_heartbeat_credit(
-                            db, seeker_id, session_id, rate=1.5
+                            db, seeker_id, session_id, rate=CREDIT_RATE_PER_MINUTE
                         )
-                        await websocket.send_json({"type": "credit_update", "balance": balance, "deducted": 1.5})
+                        await websocket.send_json({
+                            "type": "credit_update",
+                            "balance": balance,
+                            "deducted": CREDIT_RATE_PER_MINUTE,
+                        })
                         if not success:
                             await websocket.send_json({
                                 "type": "error",

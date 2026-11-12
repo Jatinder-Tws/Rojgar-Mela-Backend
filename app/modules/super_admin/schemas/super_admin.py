@@ -134,9 +134,9 @@ class AdminSeekerCreate(AdminUserBase, AdminSeekerProfileFields):
     @field_validator("job_role")
     @classmethod
     def validate_job_role(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError("Job Role is required")
-        return v.strip()
+        from app.shared.validators.job_role import validate_job_role_value
+
+        return validate_job_role_value(v, required=True) or ""
 
 
 class AdminSeekerUpdate(AdminSeekerProfileFields):
@@ -153,12 +153,21 @@ class AdminSeekerUpdate(AdminSeekerProfileFields):
     is_verified: Optional[bool] = None
     onboarding_complete: Optional[bool] = None
 
-    @field_validator("industry", "job_role")
+    @field_validator("industry")
     @classmethod
-    def validate_optional_text_not_blank(cls, v: Optional[str]) -> Optional[str]:
+    def validate_optional_industry_not_blank(cls, v: Optional[str]) -> Optional[str]:
         if v is not None and not v.strip():
             raise ValueError("Field cannot be empty")
         return v.strip() if v else None
+
+    @field_validator("job_role")
+    @classmethod
+    def validate_optional_job_role(cls, v: Optional[str]) -> Optional[str]:
+        from app.shared.validators.job_role import validate_job_role_value
+
+        if v is None:
+            return None
+        return validate_job_role_value(v, required=False)
 
 
 class AdminProviderCreate(AdminUserBase):
@@ -473,7 +482,8 @@ class DashboardAlert(BaseModel):
 class DashboardOverviewItem(BaseModel):
     label: str
     value: int
-    trend: float
+    # Optional: omitted for all-time stock metrics (period % would be misleading).
+    trend: Optional[float] = None
 
 
 class SuperAdminProfileOut(BaseModel):

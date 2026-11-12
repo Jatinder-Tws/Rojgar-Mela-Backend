@@ -1,9 +1,9 @@
 import csv
 import io
 import math
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 from typing import Optional
-from fastapi import HTTPException, Response
+from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +15,9 @@ from app.modules.super_admin.schemas.audit_logs import (
     AuditLogStatsResponse,
 )
 
+# Calendar-day stats use IST; stored timestamps are naive UTC.
+_IST_OFFSET = timedelta(hours=5, minutes=30)
+
 
 _SORT_COLUMNS = {
     "created_at": AuditLog.created_at,
@@ -23,7 +26,64 @@ _SORT_COLUMNS = {
     "action": AuditLog.action,
     "entity_type": AuditLog.entity_type,
     "description": AuditLog.description,
+    "source_portal": AuditLog.source_portal,
 }
+
+
+def _ist_now() -> datetime:
+    """Current instant as naive UTC wall clock."""
+    return datetime.utcnow()
+
+
+def _start_of_today_ist_as_utc_naive() -> datetime:
+    """UTC-naive instant for midnight IST of the current IST calendar day."""
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+    ist_now = now_utc + _IST_OFFSET
+    ist_midnight = datetime.combine(ist_now.date(), time.min)
+    return ist_midnight - _IST_OFFSET
+
+
+def _format_ist_timestamp(dt: Optional[datetime]) -> str:
+    if not dt:
+        return ""
+    ist = dt + _IST_OFFSET
+    return ist.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _apply_filters(
+    query,
+    *,
+    role: Optional[str] = None,
+    action: Optional[str] = None,
+    entity_type: Optional[str] = None,
+    source_portal: Optional[str] = None,
+    search: Optional[str] = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+):
+    if role:
+        query = query.where(AuditLog.actor_role == role.lower().strip())
+    if action:
+        query = query.where(AuditLog.action == action.upper().strip())
+    if entity_type:
+        query = query.where(AuditLog.entity_type == entity_type.lower().strip())
+    if source_portal:
+        query = query.where(AuditLog.source_portal == source_portal.lower().strip())
+    if start_date:
+        query = query.where(AuditLog.created_at >= start_date)
+    if end_date:
+        query = query.where(AuditLog.created_at <= end_date)
+    if search and search.strip():
+        term = f"%{search.strip()}%"
+        query = query.where(
+            or_(
+                AuditLog.actor_name.ilike(term),
+                AuditLog.actor_email.ilike(term),
+                AuditLog.entity_name.ilike(term),
+                AuditLog.description.ilike(term),
+            )
+        )
+    return query
 
 
 async def list_audit_logs(
@@ -31,6 +91,7 @@ async def list_audit_logs(
     role: Optional[str] = None,
     action: Optional[str] = None,
     entity_type: Optional[str] = None,
+    source_portal: Optional[str] = None,
     search: Optional[str] = None,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
@@ -43,33 +104,16 @@ async def list_audit_logs(
     page = max(1, page)
     page_size = min(max(1, page_size), 100)
 
-    query = select(AuditLog)
-
-    if role:
-        query = query.where(AuditLog.actor_role == role.lower().strip())
-
-    if action:
-        query = query.where(AuditLog.action == action.upper().strip())
-
-    if entity_type:
-        query = query.where(AuditLog.entity_type == entity_type.lower().strip())
-
-    if start_date:
-        query = query.where(AuditLog.created_at >= start_date)
-
-    if end_date:
-        query = query.where(AuditLog.created_at <= end_date)
-
-    if search and search.strip():
-        term = f"%{search.strip()}%"
-        query = query.where(
-            or_(
-                AuditLog.actor_name.ilike(term),
-                AuditLog.actor_email.ilike(term),
-                AuditLog.entity_name.ilike(term),
-                AuditLog.description.ilike(term),
-            )
-        )
+    query = _apply_filters(
+        select(AuditLog),
+        role=role,
+        action=action,
+        entity_type=entity_type,
+        source_portal=source_portal,
+        search=search,
+        start_date=start_date,
+        end_date=end_date,
+    )
 
     # Count total matching rows
     count_query = select(func.count()).select_from(query.subquery())
@@ -109,9 +153,9 @@ async def get_audit_log_detail(db: AsyncSession, log_id: str) -> AuditLogItem:
 
 
 async def get_audit_log_stats(db: AsyncSession) -> AuditLogStatsResponse:
-    """Calculates audit metrics and breakdown statistics."""
-    now = datetime.utcnow()
-    start_of_today = datetime.combine(now.date(), time.min)
+    """Calculates audit metrics and breakdown statistics (today = IST calendar day)."""
+    now = _ist_now()
+    start_of_today = _start_of_today_ist_as_utc_naive()
 
     # 1. Total counts
     total_all_time = (await db.execute(select(func.count(AuditLog.id)))).scalar() or 0
@@ -140,7 +184,15 @@ async def get_audit_log_stats(db: AsyncSession) -> AuditLogStatsResponse:
     ).all()
     action_counts = {r[0]: r[1] for r in action_rows if r[0]}
 
-    # 4. Top 5 most active actors
+    # 4. Counts grouped by portal
+    portal_rows = (
+        await db.execute(
+            select(AuditLog.source_portal, func.count(AuditLog.id)).group_by(AuditLog.source_portal)
+        )
+    ).all()
+    portal_counts = {r[0] or "job_portal": r[1] for r in portal_rows}
+
+    # 5. Top 5 most active actors
     top_actor_rows = (
         await db.execute(
             select(
@@ -159,7 +211,7 @@ async def get_audit_log_stats(db: AsyncSession) -> AuditLogStatsResponse:
         for r in top_actor_rows
     ]
 
-    # 5. Last 7 days trend
+    # 6. Last 7 days trend (UTC date buckets; display labels remain calendar dates)
     seven_days_ago = now - timedelta(days=7)
     trend_rows = (
         await db.execute(
@@ -179,6 +231,7 @@ async def get_audit_log_stats(db: AsyncSession) -> AuditLogStatsResponse:
         total_all_time=total_all_time,
         role_counts=role_counts,
         action_counts=action_counts,
+        portal_counts=portal_counts,
         top_actors=top_actors,
         recent_trend=recent_trend,
     )
@@ -189,33 +242,22 @@ async def export_audit_logs_csv(
     role: Optional[str] = None,
     action: Optional[str] = None,
     entity_type: Optional[str] = None,
+    source_portal: Optional[str] = None,
     search: Optional[str] = None,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
 ) -> StreamingResponse:
-    """Exports matching audit logs to a downloadable CSV stream."""
-    query = select(AuditLog)
-
-    if role:
-        query = query.where(AuditLog.actor_role == role.lower().strip())
-    if action:
-        query = query.where(AuditLog.action == action.upper().strip())
-    if entity_type:
-        query = query.where(AuditLog.entity_type == entity_type.lower().strip())
-    if start_date:
-        query = query.where(AuditLog.created_at >= start_date)
-    if end_date:
-        query = query.where(AuditLog.created_at <= end_date)
-    if search and search.strip():
-        term = f"%{search.strip()}%"
-        query = query.where(
-            or_(
-                AuditLog.actor_name.ilike(term),
-                AuditLog.actor_email.ilike(term),
-                AuditLog.entity_name.ilike(term),
-                AuditLog.description.ilike(term),
-            )
-        )
+    """Exports matching audit logs to a downloadable CSV stream (timestamps in IST)."""
+    query = _apply_filters(
+        select(AuditLog),
+        role=role,
+        action=action,
+        entity_type=entity_type,
+        source_portal=source_portal,
+        search=search,
+        start_date=start_date,
+        end_date=end_date,
+    )
 
     query = query.order_by(AuditLog.created_at.desc()).limit(5000)
     result = await db.execute(query)
@@ -224,10 +266,11 @@ async def export_audit_logs_csv(
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow([
-        "Timestamp (UTC)",
+        "Timestamp (IST)",
         "Actor Name",
         "Actor Email",
         "Actor Role",
+        "Portal",
         "Action",
         "Entity Type",
         "Entity ID",
@@ -240,10 +283,11 @@ async def export_audit_logs_csv(
 
     for row in rows:
         writer.writerow([
-            row.created_at.strftime("%Y-%m-%d %H:%M:%S") if row.created_at else "",
+            _format_ist_timestamp(row.created_at),
             row.actor_name or "",
             row.actor_email or "",
             row.actor_role or "",
+            row.source_portal or "",
             row.action or "",
             row.entity_type or "",
             row.entity_id or "",

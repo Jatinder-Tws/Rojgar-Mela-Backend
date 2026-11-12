@@ -87,29 +87,29 @@ async def reply_to_ticket(
 async def update_ticket_status(
     ticket_id: str,
     body: TicketStatusUpdate,
-    _admin: User = Depends(require_super_admin_or_permission("help_desk")),
+    admin: User = Depends(require_super_admin_or_permission("help_desk")),
     db: AsyncSession = Depends(get_db),
 ):
-    return await ctrl_update_status(ticket_id, body, db)
+    return await ctrl_update_status(ticket_id, body, db, actor=admin)
 
 
 @router.patch("/tickets/{ticket_id}", response_model=TicketDetailOut)
 async def update_ticket(
     ticket_id: str,
     body: TicketUpdate,
-    _admin: User = Depends(require_super_admin_or_permission("help_desk")),
+    admin: User = Depends(require_super_admin_or_permission("help_desk")),
     db: AsyncSession = Depends(get_db),
 ):
-    return await ctrl_update_ticket(ticket_id, body, db)
+    return await ctrl_update_ticket(ticket_id, body, db, actor=admin)
 
 
 @router.delete("/tickets/{ticket_id}", status_code=204)
 async def delete_ticket(
     ticket_id: str,
-    _admin: User = Depends(require_super_admin_or_permission("help_desk")),
+    admin: User = Depends(require_super_admin_or_permission("help_desk")),
     db: AsyncSession = Depends(get_db),
 ):
-    await ctrl_delete_ticket(ticket_id, db)
+    await ctrl_delete_ticket(ticket_id, db, actor=admin)
 
 
 @router.patch("/tickets/{ticket_id}/messages/{message_id}", response_model=TicketMessageOut)
@@ -117,7 +117,7 @@ async def edit_ticket_message(
     ticket_id: str,
     message_id: str,
     body: TicketMessageCreate,
-    _admin: User = Depends(require_super_admin_or_permission("help_desk")),
+    admin: User = Depends(require_super_admin_or_permission("help_desk")),
     db: AsyncSession = Depends(get_db),
 ):
     return await ctrl_update_message(ticket_id, message_id, body, db)
@@ -127,10 +127,10 @@ async def edit_ticket_message(
 async def delete_ticket_message(
     ticket_id: str,
     message_id: str,
-    _admin: User = Depends(require_super_admin_or_permission("help_desk")),
+    admin: User = Depends(require_super_admin_or_permission("help_desk")),
     db: AsyncSession = Depends(get_db),
 ):
-    await ctrl_delete_message(ticket_id, message_id, db)
+    await ctrl_delete_message(ticket_id, message_id, db, actor=admin)
 
 
 @router.get("/feedback", response_model=FeedbackListResponse)

@@ -74,6 +74,13 @@ class PortfolioUpdate(BaseModel):
     industry: Optional[str] = None
     job_role: Optional[str] = None
 
+    @field_validator("job_role")
+    @classmethod
+    def validate_job_role(cls, v: Optional[str]) -> Optional[str]:
+        from app.shared.validators.job_role import validate_job_role_value
+
+        return validate_job_role_value(v, required=False)
+
     skills: Optional[List[SkillItem]] = None
     work_experiences: Optional[List[WorkExperienceItem]] = None
     education: Optional[List[EducationItem]] = None

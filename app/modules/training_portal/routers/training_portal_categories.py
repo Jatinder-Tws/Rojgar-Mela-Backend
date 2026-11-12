@@ -17,6 +17,7 @@ from app.modules.training_portal.schemas.training_portal_category import (
     TrainingPortalCategoryOut,
 )
 from app.core.dependencies import require_super_admin, require_training_portal_user, require_super_admin_or_permission
+from app.shared.services.audit_service import log_audit_event
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +109,17 @@ async def create_category(
         updated_at=now,
     )
     db.add(category)
+    await log_audit_event(
+        db,
+        current_user,
+        action="CREATE",
+        entity_type="category",
+        entity_id=str(category.id),
+        entity_name=category.name,
+        description=f"Created course category '{category.name}'",
+        changes={"name": category.name, "sort_order": sort_order},
+        source_portal="training_portal",
+    )
     await db.commit()
     await db.refresh(category)
     return await _category_out(db, category)
@@ -150,6 +162,17 @@ async def update_category(
         category.name = new_name
         category.updated_at = datetime.utcnow()
 
+    await log_audit_event(
+        db,
+        current_user,
+        action="UPDATE",
+        entity_type="category",
+        entity_id=str(category.id),
+        entity_name=category.name,
+        description=f"Updated course category '{category.name}'",
+        changes={"name": category.name},
+        source_portal="training_portal",
+    )
     await db.commit()
     await db.refresh(category)
     return await _category_out(db, category)
@@ -179,6 +202,18 @@ async def delete_category(
             detail="Cannot delete category while courses are assigned to it",
         )
 
+    category_name = category.name
+    category_id_snapshot = category.id
+    await log_audit_event(
+        db,
+        current_user,
+        action="DELETE",
+        entity_type="category",
+        entity_id=str(category_id_snapshot),
+        entity_name=category_name,
+        description=f"Deleted course category '{category_name}'",
+        source_portal="training_portal",
+    )
     await db.delete(category)
     await db.commit()
     return None

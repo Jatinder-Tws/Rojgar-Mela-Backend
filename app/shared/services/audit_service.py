@@ -8,6 +8,18 @@ from app.shared.models.user import User
 
 logger = logging.getLogger(__name__)
 
+SOURCE_PORTAL_JOB = "job_portal"
+SOURCE_PORTAL_TRAINING = "training_portal"
+SOURCE_PORTAL_AUTH = "auth"
+SOURCE_PORTAL_SYSTEM = "system"
+
+_VALID_SOURCE_PORTALS = {
+    SOURCE_PORTAL_JOB,
+    SOURCE_PORTAL_TRAINING,
+    SOURCE_PORTAL_AUTH,
+    SOURCE_PORTAL_SYSTEM,
+}
+
 
 def extract_client_ip(request: Optional[Request]) -> Optional[str]:
     """
@@ -49,6 +61,26 @@ def extract_client_ip(request: Optional[Request]) -> Optional[str]:
     return None
 
 
+def infer_source_portal(
+    request_path: Optional[str] = None,
+    source_portal: Optional[str] = None,
+) -> str:
+    """Resolve source_portal from explicit override or request path prefixes."""
+    if source_portal:
+        normalized = source_portal.strip().lower()
+        if normalized in _VALID_SOURCE_PORTALS:
+            return normalized
+
+    path = (request_path or "").lower()
+    if path.startswith("/training-portal") or path.startswith("/google-calendar"):
+        return SOURCE_PORTAL_TRAINING
+    if path.startswith("/auth") or path.startswith("/supervisor/login"):
+        return SOURCE_PORTAL_AUTH
+    if path.startswith("/superadmin") and "/login" in path:
+        return SOURCE_PORTAL_AUTH
+    return SOURCE_PORTAL_JOB
+
+
 async def log_audit_event(
     db: AsyncSession,
     actor: Optional[User],
@@ -66,25 +98,18 @@ async def log_audit_event(
     actor_name_override: Optional[str] = None,
     actor_role_override: Optional[str] = None,
     actor_email_override: Optional[str] = None,
-    force: bool = False,
+    source_portal: Optional[str] = None,
+    force: bool = False,  # retained for call-site compatibility; no longer excludes actors
 ) -> Optional[AuditLog]:
     """
-    Records an operational action in the audit_logs table.
-    
-    IMPORTANT:
-    Super-Admin actions (is_super_admin == True or role == 'superadmin')
-    are EXCLUDED by default. Pass force=True for high-risk hiring actions
-    where an audit trail is required even when a super-admin acts.
+    Records an operational action in the audit_logs table for every role,
+    including Super Admin. Failures are logged and swallowed so product
+    mutations are never blocked by audit persistence issues.
+
+    ``force`` is accepted for backward compatibility with older call sites
+    and has no filtering effect.
     """
-    if actor is not None and not force:
-        # Strict Super-Admin exclusion check
-        if getattr(actor, "is_super_admin", False):
-            return None
-        role_val = getattr(actor, "role", None)
-        if hasattr(role_val, "value"):
-            role_val = role_val.value
-        if str(role_val).lower() in ("superadmin", "super_admin"):
-            return None
+    _ = force  # compatibility shim
 
     # Derive actor details
     actor_id = getattr(actor, "id", None) if actor else None
@@ -104,6 +129,11 @@ async def log_audit_event(
     elif actor:
         role_val = getattr(actor, "role", None)
         actor_role = role_val.value if hasattr(role_val, "value") else str(role_val or "user")
+        if getattr(actor, "is_super_admin", False) and str(actor_role).lower() not in (
+            "superadmin",
+            "super_admin",
+        ):
+            actor_role = "superadmin"
     else:
         actor_role = "system"
 
@@ -123,6 +153,8 @@ async def log_audit_event(
         if not user_agent:
             user_agent = request.headers.get("user-agent", "")[:290]
 
+    resolved_portal = infer_source_portal(request_path=request_path, source_portal=source_portal)
+
     try:
         log_entry = AuditLog(
             actor_id=str(actor_id) if actor_id else None,
@@ -139,6 +171,7 @@ async def log_audit_event(
             request_method=request_method,
             ip_address=ip_address,
             user_agent=user_agent,
+            source_portal=resolved_portal,
         )
         db.add(log_entry)
         # Flush so the log entry is prepared with the current transaction

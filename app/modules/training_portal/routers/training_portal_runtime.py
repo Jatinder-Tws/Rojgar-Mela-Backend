@@ -785,9 +785,21 @@ async def update_payment_settings(
     db: AsyncSession = Depends(get_db),
 ):
     row = await _get_or_create_payment_settings(db)
-    for field, value in body.model_dump(exclude_unset=True).items():
+    update_fields = body.model_dump(exclude_unset=True)
+    for field, value in update_fields.items():
         setattr(row, field, value)
     row.updated_at = datetime.utcnow()
+    await log_audit_event(
+        db,
+        current_user,
+        action="UPDATE",
+        entity_type="payment_settings",
+        entity_id=str(row.id),
+        entity_name="Training payment settings",
+        description="Updated training portal payment method settings",
+        changes=update_fields,
+        source_portal="training_portal",
+    )
     await db.commit()
     return payment_settings_to_out(row)
 
@@ -1102,7 +1114,18 @@ async def bulk_delete_students(
     await db.execute(
         delete(TrainingPortalCandidateNotification).where(TrainingPortalCandidateNotification.candidate_email.in_(emails))
     )
-    
+
+    await log_audit_event(
+        db,
+        current_user,
+        action="DELETE",
+        entity_type="enrollment",
+        entity_id=None,
+        entity_name=f"{len(emails)} student record(s)",
+        description=f"Bulk deleted enrollments and related records for {len(emails)} student(s)",
+        changes={"emails": emails, "enrollment_ids": enrollment_ids, "count": len(emails)},
+        source_portal="training_portal",
+    )
     await db.commit()
     return {"status": "ok", "message": f"Successfully deleted records for {len(emails)} student(s)."}
 
@@ -1561,6 +1584,7 @@ async def create_enrollment(
             "balance_due": body.balance_due,
             "batch_name": batch_name,
         },
+        source_portal="training_portal",
     )
     await db.commit()
 
@@ -1654,6 +1678,9 @@ async def update_enrollment(
     if not enrollment:
         raise HTTPException(status_code=404, detail="Enrollment not found")
 
+    prev_status = enrollment.status
+    prev_certificate = bool(enrollment.is_certificate_issued)
+
     if body.batch_id is not None:
         enrollment.batch_id = body.batch_id or None
     if body.batch_name is not None:
@@ -1682,6 +1709,36 @@ async def update_enrollment(
         enrollment.is_certificate_issued = body.is_certificate_issued
 
     enrollment.updated_at = datetime.utcnow()
+
+    audit_action = "UPDATE"
+    audit_description = f"Updated enrollment for {enrollment.candidate_name}: {enrollment.title}"
+    audit_changes: dict = {}
+    if body.is_certificate_issued is not None and body.is_certificate_issued and not prev_certificate:
+        audit_action = "CERTIFICATE_ISSUE"
+        audit_description = f"Issued certificate for {enrollment.candidate_name} — {enrollment.title}"
+        audit_changes["is_certificate_issued"] = True
+    elif body.status is not None and body.status != prev_status:
+        audit_action = "STATUS_CHANGE"
+        audit_description = (
+            f"Changed enrollment status from '{prev_status}' to '{body.status}' "
+            f"for {enrollment.candidate_name}"
+        )
+        audit_changes["status"] = {"from": prev_status, "to": body.status}
+    else:
+        patch = body.model_dump(exclude_unset=True)
+        audit_changes = dict(patch)
+
+    await log_audit_event(
+        db,
+        current_user,
+        action=audit_action,
+        entity_type="enrollment",
+        entity_id=str(enrollment.id),
+        entity_name=f"{enrollment.candidate_name} — {enrollment.title}",
+        description=audit_description,
+        changes=audit_changes or None,
+        source_portal="training_portal",
+    )
     await db.commit()
     return enrollment_to_out(enrollment)
 
@@ -1827,6 +1884,28 @@ async def record_offline_payment(
             notes=body.notes or default_notes,
             created_by_id=current_user.id,
         )
+    await log_audit_event(
+        db,
+        current_user,
+        action="PAYMENT_RECORD",
+        entity_type="enrollment",
+        entity_id=str(enrollment.id),
+        entity_name=f"{enrollment.candidate_name} — {enrollment.title}",
+        description=(
+            f"Recorded offline payment ₹{payment_amt:.2f}"
+            + (f" and discount ₹{discount_amt:.2f}" if discount_amt > 0 else "")
+            + f" for {enrollment.candidate_name}"
+        ),
+        changes={
+            "payment_amount": payment_amt,
+            "discount_amount": discount_amt,
+            "payment_mode": body.payment_mode,
+            "balance_due": enrollment.balance_due,
+            "paid_amount": enrollment.paid_amount,
+            "payment_status": enrollment.payment_status,
+        },
+        source_portal="training_portal",
+    )
     await db.commit()
 
     # Receipt email only when money was collected
@@ -1957,6 +2036,25 @@ async def record_refund(
         notes=refund_note,
         created_by_id=current_user.id,
     )
+    await log_audit_event(
+        db,
+        current_user,
+        action="REFUND",
+        entity_type="enrollment",
+        entity_id=str(enrollment.id),
+        entity_name=f"{enrollment.candidate_name} — {enrollment.title}",
+        description=f"Recorded refund of ₹{refund_amount:.2f} for {enrollment.candidate_name} via {body.refund_mode}",
+        changes={
+            "refund_amount": refund_amount,
+            "refund_mode": body.refund_mode,
+            "refund_via_gateway": body.refund_via_gateway,
+            "paid_amount_after": enrollment.paid_amount,
+            "balance_due": enrollment.balance_due,
+            "payment_status": enrollment.payment_status,
+            "enrollment_status": enrollment.status,
+        },
+        source_portal="training_portal",
+    )
     await db.commit()
     return enrollment_to_out(enrollment)
 
@@ -2040,6 +2138,7 @@ async def create_batch(
         entity_name=batch.batch_name,
         description=f"Created batch '{batch.batch_name}' (Instructor: {batch.instructor_name or 'Unassigned'}, Seats: {batch.max_seats})",
         changes={"batch_name": batch.batch_name, "instructor_name": batch.instructor_name, "start_date": batch.start_date, "max_seats": batch.max_seats},
+        source_portal="training_portal",
     )
 
     await db.commit()
@@ -2064,6 +2163,17 @@ async def assign_students_to_batch(
         raise HTTPException(status_code=400, detail=f"Cannot assign more than {MAX_BATCH_STUDENTS} students at once")
 
     await _assign_enrollments_to_batch(db, batch, body.enrollment_ids, background_tasks)
+    await log_audit_event(
+        db,
+        current_user,
+        action="ASSIGN",
+        entity_type="batch",
+        entity_id=str(batch.id),
+        entity_name=batch.batch_name,
+        description=f"Assigned {len(body.enrollment_ids)} student(s) to batch '{batch.batch_name}'",
+        changes={"enrollment_ids": body.enrollment_ids, "count": len(body.enrollment_ids)},
+        source_portal="training_portal",
+    )
     await db.commit()
     return await batch_to_out(db, batch)
 
@@ -2149,6 +2259,7 @@ async def update_batch(
         entity_name=batch.batch_name,
         description=f"Updated batch '{batch.batch_name}'",
         changes={"batch_name": batch.batch_name, "instructor_name": batch.instructor_name, "status": batch.status},
+        source_portal="training_portal",
     )
 
     await db.commit()
@@ -2180,6 +2291,7 @@ async def delete_batch(
         entity_id=str(batch_id),
         entity_name=batch_name_snapshot,
         description=f"Deleted batch '{batch_name_snapshot}'",
+        source_portal="training_portal",
     )
     await db.delete(batch)
     await db.commit()
@@ -2522,6 +2634,22 @@ async def create_class_session(
         created_by_id=current_user.id,
     )
     db.add(session)
+    await log_audit_event(
+        db,
+        current_user,
+        action="CREATE",
+        entity_type="class_session",
+        entity_id=str(session.id),
+        entity_name=session.title,
+        description=f"Scheduled class session '{session.title}' ({session.date}, {session.start_time})",
+        changes={
+            "batch_id": session.batch_id,
+            "instructor_name": session.instructor_name,
+            "date": session.date,
+            "schedule_type": session.schedule_type,
+        },
+        source_portal="training_portal",
+    )
     await db.commit()
 
     # Trigger Notifications
@@ -2627,6 +2755,17 @@ async def update_class_session(
     for field, value in updates.items():
         setattr(session, field, value)
     session.updated_at = datetime.utcnow()
+    await log_audit_event(
+        db,
+        current_user,
+        action="UPDATE",
+        entity_type="class_session",
+        entity_id=str(session.id),
+        entity_name=session.title,
+        description=f"Updated class session '{session.title}'",
+        changes=updates,
+        source_portal="training_portal",
+    )
     await db.commit()
     background_tasks.add_task(run_class_sync, session.id)
     return session_to_out(session)
@@ -2736,6 +2875,8 @@ async def delete_class_session(
     if not session:
         raise HTTPException(status_code=404, detail="Class session not found")
 
+    session_title_snapshot = session.title
+    session_id_primary = session.id
     sessions_to_delete = [session]
     if scope in ("series", "recurring", "all"):
         if session.batch_id:
@@ -2760,6 +2901,24 @@ async def delete_class_session(
         if cancel_snapshot:
             background_tasks.add_task(run_class_cancel, cancel_snapshot)
 
+    await log_audit_event(
+        db,
+        current_user,
+        action="DELETE",
+        entity_type="class_session",
+        entity_id=str(session_id_primary),
+        entity_name=session_title_snapshot,
+        description=(
+            f"Deleted class session '{session_title_snapshot}'"
+            + (f" (scope: {scope}, {len(sessions_to_delete)} session(s))" if len(sessions_to_delete) > 1 else "")
+        ),
+        changes={
+            "scope": scope,
+            "deleted_count": len(sessions_to_delete),
+            "session_ids": [s.id for s in sessions_to_delete],
+        },
+        source_portal="training_portal",
+    )
     await db.commit()
     return None
 
@@ -2863,6 +3022,17 @@ async def start_class_session(
     session.started_at = now
     session.ended_at = None
     session.updated_at = now
+    await log_audit_event(
+        db,
+        current_user,
+        action="SESSION_START",
+        entity_type="class_session",
+        entity_id=str(session.id),
+        entity_name=session.title,
+        description=f"Started live class '{session.title}' on {today.isoformat()}",
+        changes={"occurrence_date": today.isoformat(), "live_status": "live"},
+        source_portal="training_portal",
+    )
     await db.commit()
     out = session_to_out_for_date(session, today, now)
     try:
@@ -3094,6 +3264,7 @@ async def complete_class_session(
             "late": sum(1 for e in body.attendance if e.status == "late"),
             "on_leave": sum(1 for e in body.attendance if e.status == "on_leave"),
         },
+        source_portal="training_portal",
     )
 
     await db.commit()
@@ -3161,6 +3332,17 @@ async def update_class_session_report(
     if (session.live_occurrence_date or "").strip() == occurrence_date:
         session.session_report = report_text
     session.updated_at = datetime.utcnow()
+    await log_audit_event(
+        db,
+        current_user,
+        action="UPDATE",
+        entity_type="class_session",
+        entity_id=str(session.id),
+        entity_name=session.title,
+        description=f"Updated session report for '{session.title}' on {occurrence_date}",
+        changes={"occurrence_date": occurrence_date, "has_report": bool(report_text)},
+        source_portal="training_portal",
+    )
     await db.commit()
 
     today = today_ist()
@@ -3438,6 +3620,7 @@ async def create_student_leave_request(
         entity_name=f"Student Leave ({leave.date})",
         description=f"Student applied for leave on {leave.date}. Reason: {reason[:100]}",
         changes={"date": leave.date, "reason": reason, "batch_name": leave.batch_name},
+        source_portal="training_portal",
     )
     await db.commit()
 
@@ -3523,6 +3706,7 @@ async def create_teacher_leave_request(
         entity_name=f"Teacher Leave ({leave.date})",
         description=f"Teacher {teacher_name} applied for leave on {leave.date}. Reason: {reason[:100]}",
         changes={"date": leave.date, "reason": reason, "batch_name": leave.batch_name},
+        source_portal="training_portal",
     )
     await db.commit()
 
@@ -3609,6 +3793,7 @@ async def review_leave_request(
         entity_name=f"Leave Review ({leave.date})",
         description=f"{reviewer_role.title()} {new_status} leave request for {leave.candidate_name or leave.teacher_name} on {leave.date}",
         changes={"status": new_status, "note": body.review_note},
+        source_portal="training_portal",
     )
     await db.commit()
     return leave_to_out(leave)
@@ -3743,6 +3928,7 @@ async def create_behavior_report(
             "flagged": flagged,
             "comments": comments,
         },
+        source_portal="training_portal",
     )
     await db.commit()
 
@@ -3780,6 +3966,17 @@ async def resolve_behavior_report(
 
     report.flagged_for_review = False
     report.updated_at = datetime.utcnow()
+    await log_audit_event(
+        db,
+        current_user,
+        action="BEHAVIOR_RESOLVE",
+        entity_type="behavior_report",
+        entity_id=str(report.id),
+        entity_name=report.candidate_name or report.candidate_email,
+        description=f"Resolved behavior report review flag for {report.candidate_name or report.candidate_email}",
+        changes={"flagged_for_review": False},
+        source_portal="training_portal",
+    )
     await db.commit()
     return behavior_report_to_out(report)
 
@@ -4279,6 +4476,27 @@ async def verify_payment(
         enrollment.token_paid_at = datetime.utcnow()
         enrollment.venue_visit_deadline = enrollment.token_paid_at + timedelta(days=settings.TRAINING_TOKEN_VENUE_VISIT_DAYS)
 
+    await log_audit_event(
+        db,
+        current_user,
+        action="PAYMENT_VERIFY",
+        entity_type="enrollment",
+        entity_id=str(enrollment.id),
+        entity_name=f"{enrollment.candidate_name} — {enrollment.title}",
+        description=(
+            f"Verified Razorpay payment of ₹{order.amount_paise / 100.0:.2f} "
+            f"({order.payment_purpose}) for {enrollment.candidate_name}"
+        ),
+        changes={
+            "order_id": order.id,
+            "payment_purpose": order.payment_purpose,
+            "amount": order.amount_paise / 100.0,
+            "provider_payment_id": body.provider_payment_id,
+            "enrollment_status": enrollment.status,
+            "payment_status": enrollment.payment_status,
+        },
+        source_portal="training_portal",
+    )
     await db.commit()
 
     payment_txn_result = await db.execute(
@@ -4406,6 +4624,23 @@ async def razorpay_webhook(request: Request, db: AsyncSession = Depends(get_db))
                 severity="danger",
             )
         )
+        await log_audit_event(
+            db,
+            None,
+            action="PAYMENT_FAILED",
+            entity_type="enrollment",
+            entity_id=str(order.enrollment_id),
+            entity_name=order.candidate_email,
+            description=f"Razorpay webhook recorded failed payment for order {order.provider_order_id or order.id}",
+            changes={
+                "order_id": order.id,
+                "provider_order_id": order.provider_order_id,
+                "event": payment_info.get("event"),
+            },
+            actor_role_override="system",
+            source_portal="system",
+            request=request,
+        )
         await db.commit()
         return {"status": "failed_recorded"}
 
@@ -4420,6 +4655,27 @@ async def razorpay_webhook(request: Request, db: AsyncSession = Depends(get_db))
         provider_transaction_id=payment_info["provider_payment_id"],
         reference_order_id=order.id,
         created_by_id=None,
+    )
+    await log_audit_event(
+        db,
+        None,
+        action="PAYMENT_VERIFY",
+        entity_type="enrollment",
+        entity_id=str(enrollment.id),
+        entity_name=f"{enrollment.candidate_name} — {enrollment.title}",
+        description=(
+            f"Razorpay webhook confirmed payment of ₹{order.amount_paise / 100.0:.2f} "
+            f"for {enrollment.candidate_name}"
+        ),
+        changes={
+            "order_id": order.id,
+            "provider_payment_id": payment_info.get("provider_payment_id"),
+            "amount": order.amount_paise / 100.0,
+            "payment_purpose": order.payment_purpose,
+        },
+        actor_role_override="system",
+        source_portal="system",
+        request=request,
     )
     await db.commit()
     return {"status": "ok"}

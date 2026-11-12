@@ -15,6 +15,9 @@ from app.modules.training_portal.services.training_portal_payment_service import
 
 logger = logging.getLogger(__name__)
 
+# Single source of truth for AI Coach minute billing (text/speak heartbeat + live loop).
+CREDIT_RATE_PER_MINUTE = 1.5
+
 
 def _checkout_key_id(is_mock: bool) -> Optional[str]:
     """Key id for Razorpay Checkout — must match the key that created the order."""
@@ -36,6 +39,22 @@ def _order_response_payload(order: CreditPurchaseOrder, *, is_mock: bool) -> Dic
         "is_mock": is_mock,
         "status": order.status,
     }
+
+
+def _is_mock_payment(provider_order_id: str, provider_payment_id: str, provider_signature: str) -> bool:
+    return (
+        (provider_order_id or "").startswith("order_mock_")
+        or (provider_payment_id or "").startswith("pay_mock_")
+        or provider_signature == "mock_signature"
+    )
+
+
+def _is_production_like() -> bool:
+    """Coach-only guard: real Razorpay keys or a non-local frontend URL."""
+    if razorpay_configured():
+        return True
+    fe = (settings.FRONTEND_URL or "").strip().lower()
+    return bool(fe) and "localhost" not in fe and "127.0.0.1" not in fe
 
 
 # Credit top-up packages configuration
@@ -89,7 +108,11 @@ class AICoachCreditsService:
 
     @classmethod
     async def deduct_heartbeat_credit(
-        cls, db: AsyncSession, seeker_id: str, session_id: str, rate: float = 1.5
+        cls,
+        db: AsyncSession,
+        seeker_id: str,
+        session_id: str,
+        rate: float = CREDIT_RATE_PER_MINUTE,
     ) -> Tuple[bool, float]:
         stmt = select(UserCreditAccount).where(UserCreditAccount.user_id == seeker_id)
         res = await db.execute(stmt)
@@ -203,6 +226,16 @@ class AICoachCreditsService:
                 "credits_added": order.credits,
                 "new_balance": account.balance,
             }
+
+        # Coach-only: never fulfill mock payments when Razorpay/prod-like is active.
+        # Shared training_portal verify helper is intentionally left unchanged.
+        if _is_mock_payment(provider_order_id, provider_payment_id, provider_signature) and _is_production_like():
+            order.status = "failed"
+            await db.commit()
+            raise HTTPException(
+                status_code=400,
+                detail="Mock payment is not allowed in this environment. Complete a real Razorpay checkout.",
+            )
 
         # Signature check
         is_valid = verify_razorpay_signature(provider_order_id, provider_payment_id, provider_signature)

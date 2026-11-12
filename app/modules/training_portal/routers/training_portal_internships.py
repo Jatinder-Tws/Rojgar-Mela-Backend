@@ -16,6 +16,7 @@ from app.modules.training_portal.schemas.training_portal_internship import (
     TrainingPortalInternshipOut,
 )
 from app.core.dependencies import require_super_admin, require_training_portal_user, require_super_admin_or_permission
+from app.shared.services.audit_service import log_audit_event
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,17 @@ async def create_portal_internship(
         updated_at=now,
     )
     db.add(internship)
+    await log_audit_event(
+        db,
+        current_user,
+        action="CREATE",
+        entity_type="internship",
+        entity_id=str(internship.id),
+        entity_name=internship.title,
+        description=f"Created internship '{internship.title}'",
+        changes={"title": internship.title, "venue": internship.venue, "status": internship.status},
+        source_portal="training_portal",
+    )
     await db.commit()
     await db.refresh(internship)
     return _to_out(internship)
@@ -133,6 +145,17 @@ async def update_portal_internship(
         setattr(internship, field, value)
     internship.updated_at = datetime.utcnow()
 
+    await log_audit_event(
+        db,
+        current_user,
+        action="UPDATE",
+        entity_type="internship",
+        entity_id=str(internship.id),
+        entity_name=internship.title,
+        description=f"Updated internship '{internship.title}'",
+        changes=update_data,
+        source_portal="training_portal",
+    )
     await db.commit()
     await db.refresh(internship)
     return _to_out(internship)
@@ -150,6 +173,18 @@ async def delete_portal_internship(
     internship = result.scalar_one_or_none()
     if not internship:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Internship not found")
+    internship_title = internship.title
+    internship_id_snapshot = internship.id
+    await log_audit_event(
+        db,
+        current_user,
+        action="DELETE",
+        entity_type="internship",
+        entity_id=str(internship_id_snapshot),
+        entity_name=internship_title,
+        description=f"Deleted internship '{internship_title}'",
+        source_portal="training_portal",
+    )
     await db.delete(internship)
     await db.commit()
     return None

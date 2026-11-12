@@ -18,6 +18,8 @@ from app.modules.super_admin.services.college_importer_service import (
     import_colleges_excel, slugify
 )
 from app.modules.super_admin.services.college_lookup import college_identity_filter
+from app.shared.models.user import User
+from app.shared.services.audit_service import log_audit_event
 from sqlalchemy.exc import IntegrityError
 
 logger = logging.getLogger(__name__)
@@ -97,7 +99,11 @@ async def get_college_detail_ctrl(db: AsyncSession, id_or_slug: str) -> CollegeD
     return CollegeDetailOut.model_validate(college)
 
 
-async def create_college_ctrl(db: AsyncSession, payload: CollegeCreate) -> CollegeDetailOut:
+async def create_college_ctrl(
+    db: AsyncSession,
+    payload: CollegeCreate,
+    actor: Optional[User] = None,
+) -> CollegeDetailOut:
     # Check if college with name exists
     stmt = select(College).where(func.lower(College.name) == payload.name.strip().lower())
     existing = (await db.execute(stmt)).scalar_one_or_none()
@@ -169,11 +175,26 @@ async def create_college_ctrl(db: AsyncSession, payload: CollegeCreate) -> Colle
     for f_in in payload.faculty or []:
         db.add(CollegeFaculty(college_id=college.id, **f_in.model_dump()))
 
+    await log_audit_event(
+        db,
+        actor,
+        action="CREATE",
+        entity_type="college",
+        entity_id=str(college.id),
+        entity_name=college.name,
+        description=f"Created college/university '{college.name}'",
+        source_portal="job_portal",
+    )
     await db.commit()
     return await get_college_detail_ctrl(db, college.id)
 
 
-async def update_college_ctrl(db: AsyncSession, college_id: str, payload: CollegeUpdate) -> CollegeDetailOut:
+async def update_college_ctrl(
+    db: AsyncSession,
+    college_id: str,
+    payload: CollegeUpdate,
+    actor: Optional[User] = None,
+) -> CollegeDetailOut:
     stmt = (
         select(College)
         .where(College.id == college_id)
@@ -264,20 +285,46 @@ async def update_college_ctrl(db: AsyncSession, college_id: str, payload: Colleg
         if v is not None:
             setattr(college, k, v)
 
+    await log_audit_event(
+        db,
+        actor,
+        action="UPDATE",
+        entity_type="college",
+        entity_id=str(college.id),
+        entity_name=college.name,
+        description=f"Updated college/university '{college.name}'",
+        source_portal="job_portal",
+    )
     await db.commit()
     return await get_college_detail_ctrl(db, college.id)
 
 
-async def delete_college_ctrl(db: AsyncSession, college_id: str) -> dict:
+async def delete_college_ctrl(
+    db: AsyncSession,
+    college_id: str,
+    actor: Optional[User] = None,
+) -> dict:
     stmt = select(College).where(College.id == college_id)
     res = await db.execute(stmt)
     college = res.scalar_one_or_none()
     if not college:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="College not found")
 
+    college_name = college.name
+    college_id_str = str(college.id)
+    await log_audit_event(
+        db,
+        actor,
+        action="DELETE",
+        entity_type="college",
+        entity_id=college_id_str,
+        entity_name=college_name,
+        description=f"Deleted college/university '{college_name}'",
+        source_portal="job_portal",
+    )
     await db.delete(college)
     await db.commit()
-    return {"success": True, "message": f"University '{college.name}' deleted successfully."}
+    return {"success": True, "message": f"University '{college_name}' deleted successfully."}
 
 
 async def import_colleges_file_ctrl(db: AsyncSession, file: UploadFile) -> ExcelImportSummary:

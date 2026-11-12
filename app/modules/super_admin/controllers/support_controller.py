@@ -23,6 +23,7 @@ from app.modules.super_admin.models.support_ticket import (
 )
 from app.modules.super_admin.models.contact_inquiry import ContactInquiry
 from app.shared.models.user import User
+from app.shared.services.audit_service import log_audit_event
 from app.modules.super_admin.schemas.support import (
     FeedbackCreate,
     FeedbackListResponse,
@@ -867,15 +868,35 @@ async def admin_update_message(
     return _message_to_out(msg, author)
 
 
-async def admin_delete_message(ticket_id: str, message_id: str, db: AsyncSession) -> None:
+async def admin_delete_message(
+    ticket_id: str,
+    message_id: str,
+    db: AsyncSession,
+    actor: Optional[User] = None,
+) -> None:
     ticket = await _get_ticket_admin(ticket_id, db)
     msg = await _get_message(ticket.id, message_id, db)
+    await log_audit_event(
+        db,
+        actor,
+        action="DELETE",
+        entity_type="support_ticket",
+        entity_id=str(ticket.id),
+        entity_name=ticket.ticket_number or ticket.subject,
+        description=f"Deleted message on support ticket {ticket.ticket_number or ticket.id}",
+        source_portal="job_portal",
+    )
     await db.delete(msg)
     ticket.updated_at = datetime.utcnow()
     await db.commit()
 
 
-async def admin_update_ticket(ticket_id: str, body: TicketUpdate, db: AsyncSession) -> TicketDetailOut:
+async def admin_update_ticket(
+    ticket_id: str,
+    body: TicketUpdate,
+    db: AsyncSession,
+    actor: Optional[User] = None,
+) -> TicketDetailOut:
     ticket = await _get_ticket_admin(ticket_id, db)
     if body.subject is not None:
         ticket.subject = body.subject.strip()
@@ -893,12 +914,38 @@ async def admin_update_ticket(ticket_id: str, body: TicketUpdate, db: AsyncSessi
     if body.subject is None and body.description is None:
         raise HTTPException(status_code=400, detail="Nothing to update")
     ticket.updated_at = datetime.utcnow()
+    await log_audit_event(
+        db,
+        actor,
+        action="UPDATE",
+        entity_type="support_ticket",
+        entity_id=str(ticket.id),
+        entity_name=ticket.ticket_number or ticket.subject,
+        description=f"Updated support ticket {ticket.ticket_number or ticket.id}",
+        source_portal="job_portal",
+    )
     await db.commit()
     return await admin_get_ticket(ticket.id, db)
 
 
-async def admin_delete_ticket(ticket_id: str, db: AsyncSession) -> None:
+async def admin_delete_ticket(
+    ticket_id: str,
+    db: AsyncSession,
+    actor: Optional[User] = None,
+) -> None:
     ticket = await _get_ticket_admin(ticket_id, db)
+    ticket_number = ticket.ticket_number or ticket.subject
+    ticket_id_str = str(ticket.id)
+    await log_audit_event(
+        db,
+        actor,
+        action="DELETE",
+        entity_type="support_ticket",
+        entity_id=ticket_id_str,
+        entity_name=ticket_number,
+        description=f"Deleted support ticket {ticket_number}",
+        source_portal="job_portal",
+    )
     await db.delete(ticket)
     await db.commit()
 
@@ -907,6 +954,7 @@ async def admin_update_ticket_status(
     ticket_id: str,
     body: TicketStatusUpdate,
     db: AsyncSession,
+    actor: Optional[User] = None,
 ) -> TicketOut:
     ticket = await _get_ticket_admin(ticket_id, db)
     try:
@@ -914,6 +962,7 @@ async def admin_update_ticket_status(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid status")
 
+    old_status = ticket.status
     ticket.status = new_status
     ticket.updated_at = datetime.utcnow()
     if new_status in (TicketStatus.resolved, TicketStatus.closed):
@@ -937,6 +986,20 @@ async def admin_update_ticket_status(
             severity="success" if new_status in (TicketStatus.resolved, TicketStatus.closed) else "info"
         )
 
+    await log_audit_event(
+        db,
+        actor,
+        action="STATUS_CHANGE",
+        entity_type="support_ticket",
+        entity_id=str(ticket.id),
+        entity_name=ticket.ticket_number or ticket.subject,
+        description=f"Changed support ticket {ticket.ticket_number or ticket.id} status to {new_status.value}",
+        changes={
+            "from_status": old_status.value if hasattr(old_status, "value") else str(old_status),
+            "to_status": new_status.value,
+        },
+        source_portal="job_portal",
+    )
     await db.commit()
     await db.refresh(ticket)
 

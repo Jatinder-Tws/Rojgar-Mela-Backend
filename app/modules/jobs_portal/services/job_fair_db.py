@@ -11,7 +11,7 @@ try:
 except Exception:
     IST = timezone(timedelta(hours=5, minutes=30))
 
-from sqlalchemy import select, or_, func, exists, and_
+from sqlalchemy import Date, cast, case, select, or_, func, exists, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.jobs_portal.models.job_fair import JobFair, JobFairCompany, JobFairSeeker
@@ -22,6 +22,7 @@ from app.modules.jobs_portal.schemas.job_fair import (
     JobFairPublicCatalogResponse,
 )
 from app.shared.models.user import User
+from app.shared.services.audit_service import log_audit_event
 
 
 async def slug_exists_db(
@@ -59,15 +60,29 @@ async def list_job_fairs_db(
     count_q = select(func.count()).select_from(q.subquery())
     total = (await db.execute(count_q)).scalar() or 0
 
-    # Sort
+    # Sort. Status uses IST calendar-day rank (Completed < Live < Upcoming).
     order_map = {
         "date_desc": JobFair.date.desc(),
         "title_asc": JobFair.title.asc(),
         "title_desc": JobFair.title.desc(),
         "date_asc": JobFair.date.asc(),
+        "location_asc": JobFair.location.asc(),
+        "location_desc": JobFair.location.desc(),
+        "visibility_asc": JobFair.is_active.asc(),
+        "visibility_desc": JobFair.is_active.desc(),
     }
+    if sort_by in {"status_asc", "status_desc"}:
+        today_ist = datetime.now(IST).date()
+        fair_day = cast(JobFair.date, Date)
+        status_rank = case(
+            (fair_day < today_ist, 0),
+            (fair_day == today_ist, 1),
+            else_=2,
+        )
+        order_map["status_asc"] = status_rank.asc()
+        order_map["status_desc"] = status_rank.desc()
     order_clause = order_map.get(sort_by, JobFair.date.asc())
-    q = q.order_by(order_clause)
+    q = q.order_by(order_clause, JobFair.id.asc())
 
     # Paginate
     q = q.limit(page_size).offset((page - 1) * page_size)
@@ -379,6 +394,7 @@ async def create_job_fair_db(
     industries: Optional[list[str]] = None,
     event_profile: Optional[dict] = None,
     created_by_id: Optional[str] = None,
+    actor: Optional[User] = None,
 ) -> JobFairOut:
     # created_by_id is ignored since it is not defined in the JobFair model / DB schema
     fair = JobFair(
@@ -393,6 +409,17 @@ async def create_job_fair_db(
         event_profile=event_profile,
     )
     db.add(fair)
+    await db.flush()
+    await log_audit_event(
+        db,
+        actor,
+        action="CREATE",
+        entity_type="job_fair",
+        entity_id=str(fair.id),
+        entity_name=fair.title,
+        description=f"Created job fair '{fair.title}'",
+        source_portal="job_portal",
+    )
     await db.commit()
     await db.refresh(fair)
     return JobFairOut.model_validate(fair)
@@ -411,6 +438,7 @@ async def update_job_fair_db(
     banner_image_url: Optional[str] = None,
     industries: Optional[list[str]] = None,
     event_profile: Optional[dict] = None,
+    actor: Optional[User] = None,
 ) -> Optional[JobFairOut]:
     fair = await db.get(JobFair, fair_id)
     if not fair:
@@ -436,22 +464,51 @@ async def update_job_fair_db(
         fair.event_profile = event_profile
 
     fair.updated_at = datetime.utcnow()
+    await log_audit_event(
+        db,
+        actor,
+        action="UPDATE",
+        entity_type="job_fair",
+        entity_id=str(fair.id),
+        entity_name=fair.title,
+        description=f"Updated job fair '{fair.title}'",
+        source_portal="job_portal",
+    )
     await db.commit()
     await db.refresh(fair)
     return JobFairOut.model_validate(fair)
 
 
 async def set_job_fair_banner_db(
-    db: AsyncSession, fair_id: str, banner_image_url: str
+    db: AsyncSession,
+    fair_id: str,
+    banner_image_url: str,
+    actor: Optional[User] = None,
 ) -> Optional[JobFairOut]:
     return await update_job_fair_db(
-        db, fair_id, banner_image_url=banner_image_url
+        db, fair_id, banner_image_url=banner_image_url, actor=actor
     )
 
 
-async def delete_job_fair_db(db: AsyncSession, fair_id: str) -> bool:
+async def delete_job_fair_db(
+    db: AsyncSession,
+    fair_id: str,
+    actor: Optional[User] = None,
+) -> bool:
     fair = await db.get(JobFair, fair_id)
     if fair:
+        title = fair.title
+        fair_id_str = str(fair.id)
+        await log_audit_event(
+            db,
+            actor,
+            action="DELETE",
+            entity_type="job_fair",
+            entity_id=fair_id_str,
+            entity_name=title,
+            description=f"Deleted job fair '{title}'",
+            source_portal="job_portal",
+        )
         await db.delete(fair)
         await db.commit()
         return True

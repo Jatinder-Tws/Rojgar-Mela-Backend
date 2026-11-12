@@ -23,6 +23,7 @@ from app.core.dependencies import (
     hash_password,
 )
 from app.shared.services.email_service import send_welcome_email
+from app.shared.services.audit_service import log_audit_event
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/training-portal/teachers", tags=["Training Portal Teachers"])
@@ -211,6 +212,17 @@ async def create_portal_teacher(
         is_active=teacher.status == "active" and teacher.login_active,
     )
 
+    await log_audit_event(
+        db,
+        current_user,
+        action="CREATE",
+        entity_type="teacher",
+        entity_id=str(teacher.id),
+        entity_name=teacher.name,
+        description=f"Created training portal teacher '{teacher.name}'",
+        changes={"name": teacher.name, "email": teacher.email, "status": teacher.status},
+        source_portal="training_portal",
+    )
     await db.commit()
     await db.refresh(teacher)
     background_tasks.add_task(
@@ -297,6 +309,18 @@ async def update_portal_teacher(
             is_active=teacher.status == "active" and teacher.login_active,
         )
 
+    audit_changes = {k: v for k, v in update_data.items() if k != "login_password"}
+    await log_audit_event(
+        db,
+        current_user,
+        action="UPDATE",
+        entity_type="teacher",
+        entity_id=str(teacher.id),
+        entity_name=teacher.name,
+        description=f"Updated training portal teacher '{teacher.name}'",
+        changes=audit_changes or None,
+        source_portal="training_portal",
+    )
     await db.commit()
     await db.refresh(teacher)
     return _to_out(teacher)
@@ -329,6 +353,18 @@ async def delete_portal_teacher(
         if login_user:
             login_user.is_verified = False
 
+    teacher_name = teacher.name
+    teacher_id_snapshot = teacher.id
+    await log_audit_event(
+        db,
+        current_user,
+        action="DELETE",
+        entity_type="teacher",
+        entity_id=str(teacher_id_snapshot),
+        entity_name=teacher_name,
+        description=f"Deleted training portal teacher '{teacher_name}'",
+        source_portal="training_portal",
+    )
     await db.delete(teacher)
     await db.commit()
     return None

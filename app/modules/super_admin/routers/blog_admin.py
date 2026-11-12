@@ -126,7 +126,7 @@ async def create_admin_blog(
     admin: User = Depends(require_super_admin_or_permission("blogs")),
 ):
     """Create a new blog post."""
-    post = await blog_service.create_blog_post(db, data, created_by_id=admin.id)
+    post = await blog_service.create_blog_post(db, data, created_by_id=admin.id, actor=admin)
     return post
 
 
@@ -138,7 +138,7 @@ async def update_admin_blog(
     admin: User = Depends(require_super_admin_or_permission("blogs")),
 ):
     """Update an existing blog post."""
-    post = await blog_service.update_blog_post(db, blog_id, data)
+    post = await blog_service.update_blog_post(db, blog_id, data, actor=admin)
     if not post:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Blog post not found")
     return post
@@ -151,7 +151,7 @@ async def delete_admin_blog(
     admin: User = Depends(require_super_admin_or_permission("blogs")),
 ):
     """Delete a blog post."""
-    success = await blog_service.delete_blog_post(db, blog_id)
+    success = await blog_service.delete_blog_post(db, blog_id, actor=admin)
     if not success:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Blog post not found")
     return {"message": "Blog post deleted successfully", "id": blog_id}

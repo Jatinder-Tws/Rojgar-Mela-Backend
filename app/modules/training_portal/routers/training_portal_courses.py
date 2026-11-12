@@ -21,6 +21,7 @@ from app.modules.training_portal.schemas.training_portal_course import (
     PublicPaidCourseListOut,
 )
 from app.core.dependencies import require_super_admin, require_training_portal_user, require_super_admin_or_permission
+from app.shared.services.audit_service import log_audit_event
 
 logger = logging.getLogger(__name__)
 
@@ -313,6 +314,17 @@ async def create_portal_course(
         updated_at=now,
     )
     db.add(course)
+    await log_audit_event(
+        db,
+        current_user,
+        action="CREATE",
+        entity_type="course",
+        entity_id=str(course.id),
+        entity_name=course.title,
+        description=f"Created training course '{course.title}'",
+        changes={"title": course.title, "category": course.category, "status": course.status, "fee": course.fee},
+        source_portal="training_portal",
+    )
     await db.commit()
     await db.refresh(course)
     return await _course_out(db, course)
@@ -348,6 +360,17 @@ async def update_portal_course(
         setattr(course, field, value)
     course.updated_at = datetime.utcnow()
 
+    await log_audit_event(
+        db,
+        current_user,
+        action="UPDATE",
+        entity_type="course",
+        entity_id=str(course.id),
+        entity_name=course.title,
+        description=f"Updated training course '{course.title}'",
+        changes=update_data,
+        source_portal="training_portal",
+    )
     await db.commit()
     await db.refresh(course)
     return await _course_out(db, course)
@@ -363,6 +386,18 @@ async def delete_portal_course(
     course = result.scalar_one_or_none()
     if not course:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Course not found")
+    course_title = course.title
+    course_id_snapshot = course.id
+    await log_audit_event(
+        db,
+        current_user,
+        action="DELETE",
+        entity_type="course",
+        entity_id=str(course_id_snapshot),
+        entity_name=course_title,
+        description=f"Deleted training course '{course_title}'",
+        source_portal="training_portal",
+    )
     await db.delete(course)
     await db.commit()
     return None

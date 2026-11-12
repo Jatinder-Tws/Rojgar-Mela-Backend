@@ -248,7 +248,12 @@ async def _run_bulk_import_job_inner(
                     jr_val = _pick_first_value(
                         row, "job_role", "preferred_job_sector", "preferred_job", "preferred_sector"
                     )
-                    user.job_role = jr_val if jr_val and not jr_val.strip().isdigit() and len(jr_val.strip()) >= 2 else None
+                    try:
+                        from app.shared.validators.job_role import validate_job_role_value
+
+                        user.job_role = validate_job_role_value(jr_val, required=False)
+                    except ValueError:
+                        user.job_role = None
 
                     jt = _pick_first_value(row, "job_type")
                     if jt:

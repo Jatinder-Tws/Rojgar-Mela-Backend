@@ -89,6 +89,7 @@ async def export_enquiries(
     draw_date: Optional[str] = None,
     created_from: Optional[str] = None,
     created_to: Optional[str] = None,
+    no_action: Optional[str] = None,
     _admin: User = Depends(require_super_admin_or_permission("enquiries")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -103,6 +104,7 @@ async def export_enquiries(
         draw_date=draw_date,
         created_from=created_from,
         created_to=created_to,
+        no_action=no_action,
     )
     return StreamingResponse(
         BytesIO(payload),
@@ -135,6 +137,7 @@ async def list_enquiries(
     draw_date: Optional[str] = None,
     created_from: Optional[str] = None,
     created_to: Optional[str] = None,
+    no_action: Optional[str] = None,
     sort_by: Optional[str] = None,
     sort_dir: Optional[str] = None,
     _admin: User = Depends(require_super_admin_or_permission("enquiries")),
@@ -155,6 +158,7 @@ async def list_enquiries(
         draw_date=draw_date,
         created_from=created_from,
         created_to=created_to,
+        no_action=no_action,
         sort_by=sort_by,
         sort_dir=sort_dir,
     )
@@ -164,18 +168,18 @@ async def list_enquiries(
 async def update_enquiry_status(
     enquiry_id: str,
     body: CareerEnquiryStatusUpdate,
-    _admin: User = Depends(require_super_admin_or_permission("enquiries")),
+    admin: User = Depends(require_super_admin_or_permission("enquiries")),
     db: AsyncSession = Depends(get_db),
 ):
-    return await ctrl_update_status(enquiry_id, body, db)
+    return await ctrl_update_status(enquiry_id, body, db, actor=admin)
 
 
 @admin_router.delete("/{enquiry_id}", status_code=204)
 async def delete_enquiry(
     enquiry_id: str,
     source: str = Query("career"),
-    _admin: User = Depends(require_super_admin_or_permission("enquiries")),
+    admin: User = Depends(require_super_admin_or_permission("enquiries")),
     db: AsyncSession = Depends(get_db),
 ):
-    await ctrl_delete(enquiry_id, source, db)
+    await ctrl_delete(enquiry_id, source, db, actor=admin)
 

@@ -4,7 +4,7 @@ Business logic lives in controllers/super_admin_controller.py
 """
 from datetime import datetime
 from typing import List, Optional
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -173,10 +173,11 @@ async def update_job(
     job_id: str,
     body: AdminJobUpdate,
     background_tasks: BackgroundTasks,
+    request: Request,
     admin: User = Depends(require_super_admin_or_permission("jobs")),
     db: AsyncSession = Depends(get_db),
 ):
-    return await ctrl_update_platform_job(db, job_id, body, admin, background_tasks)
+    return await ctrl_update_platform_job(db, job_id, body, admin, background_tasks, request=request)
 
 
 @router.delete("/jobs/{job_id}", status_code=204)
@@ -356,7 +357,7 @@ async def list_seeker_industries(
 
 @router.post("/seekers", response_model=AdminUserOut, status_code=201)
 async def create_seeker(body: AdminSeekerCreate, admin: User = Depends(require_super_admin_or_permission("job_seekers")), db: AsyncSession = Depends(get_db)):
-    return await ctrl_create_seeker(body, db)
+    return await ctrl_create_seeker(body, db, actor=admin)
 
 
 @router.post("/seekers/export")
@@ -369,9 +370,13 @@ async def export_seekers(
 
 
 @router.post("/seekers/bulk-import", response_model=BulkImportJobStarted)
-async def bulk_import_seekers(admin: User = Depends(require_super_admin_or_permission("job_seekers")), file: UploadFile = File(...)):
+async def bulk_import_seekers(
+    admin: User = Depends(require_super_admin_or_permission("job_seekers")),
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+):
     content = await file.read()
-    return await ctrl_bulk_import_seekers(content, file.filename)
+    return await ctrl_bulk_import_seekers(content, file.filename, actor=admin, db=db)
 
 
 @router.get("/seekers/{user_id}", response_model=AdminUserOut)
@@ -381,7 +386,7 @@ async def get_seeker(user_id: str, admin: User = Depends(require_super_admin_or_
 
 @router.put("/seekers/{user_id}", response_model=AdminUserOut)
 async def update_seeker(user_id: str, body: AdminSeekerUpdate, admin: User = Depends(require_super_admin_or_permission("job_seekers")), db: AsyncSession = Depends(get_db)):
-    return await ctrl_update_seeker(user_id, body, db)
+    return await ctrl_update_seeker(user_id, body, db, actor=admin)
 
 
 @router.post("/seekers/{user_id}/resume", response_model=AdminUserOut)
@@ -397,12 +402,12 @@ async def upload_seeker_resume(
 
 @router.delete("/seekers/{user_id}", status_code=204)
 async def delete_seeker(user_id: str, admin: User = Depends(require_super_admin_or_permission("job_seekers")), db: AsyncSession = Depends(get_db)):
-    return await ctrl_delete_seeker(user_id, db)
+    return await ctrl_delete_seeker(user_id, db, actor=admin)
 
 
 @router.patch("/seekers/{user_id}/password", response_model=AdminUserOut)
 async def set_seeker_password(user_id: str, body: AdminSetPasswordRequest, admin: User = Depends(require_super_admin_or_permission("job_seekers")), db: AsyncSession = Depends(get_db)):
-    return await ctrl_set_seeker_password(user_id, body, db)
+    return await ctrl_set_seeker_password(user_id, body, db, actor=admin)
 
 
 # ── Job Providers ────────────────────────────────────────────────────────────
@@ -424,7 +429,7 @@ async def list_providers(
 
 @router.post("/providers", response_model=AdminUserOut, status_code=201)
 async def create_provider(body: AdminProviderCreate, admin: User = Depends(require_super_admin_or_permission("job_providers")), db: AsyncSession = Depends(get_db)):
-    return await ctrl_create_provider(body, db)
+    return await ctrl_create_provider(body, db, actor=admin)
 
 
 @router.post("/providers/export")
@@ -437,9 +442,13 @@ async def export_providers(
 
 
 @router.post("/providers/bulk-import", response_model=BulkImportJobStarted)
-async def bulk_import_providers(admin: User = Depends(require_super_admin_or_permission("job_providers")), file: UploadFile = File(...)):
+async def bulk_import_providers(
+    admin: User = Depends(require_super_admin_or_permission("job_providers")),
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+):
     content = await file.read()
-    return await ctrl_bulk_import_providers(content, file.filename)
+    return await ctrl_bulk_import_providers(content, file.filename, actor=admin, db=db)
 
 
 @router.post("/providers/company-lookup", response_model=CompanyLookupResponse)
@@ -475,17 +484,17 @@ async def get_seeker_detail(
 
 @router.put("/providers/{user_id}", response_model=AdminUserOut)
 async def update_provider(user_id: str, body: AdminProviderUpdate, admin: User = Depends(require_super_admin_or_permission("job_providers")), db: AsyncSession = Depends(get_db)):
-    return await ctrl_update_provider(user_id, body, db)
+    return await ctrl_update_provider(user_id, body, db, actor=admin)
 
 
 @router.delete("/providers/{user_id}", status_code=204)
 async def delete_provider(user_id: str, admin: User = Depends(require_super_admin_or_permission("job_providers")), db: AsyncSession = Depends(get_db)):
-    return await ctrl_delete_provider(user_id, db)
+    return await ctrl_delete_provider(user_id, db, actor=admin)
 
 
 @router.patch("/providers/{user_id}/password", response_model=AdminUserOut)
 async def set_provider_password(user_id: str, body: AdminSetPasswordRequest, admin: User = Depends(require_super_admin_or_permission("job_providers")), db: AsyncSession = Depends(get_db)):
-    return await ctrl_set_provider_password(user_id, body, db)
+    return await ctrl_set_provider_password(user_id, body, db, actor=admin)
 
 
 @router.post("/providers/{user_id}/profile-pic", response_model=AdminUserOut)

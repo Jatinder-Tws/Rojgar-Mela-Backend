@@ -3,8 +3,7 @@ Super Admin Audit Logs router – access strictly restricted to Super-Admin.
 """
 from datetime import datetime
 from typing import Optional
-from fastapi import APIRouter, Depends, Query, Response
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -27,28 +26,30 @@ router = APIRouter(prefix="/super-admin/audit-logs", tags=["super-admin-audit-lo
 
 @router.get("", response_model=AuditLogListResponse)
 async def api_list_audit_logs(
-    role: Optional[str] = Query(None, description="Filter by actor role (supervisor, teacher, seeker, provider, student)"),
+    role: Optional[str] = Query(None, description="Filter by actor role (superadmin, supervisor, teacher, seeker, provider, student)"),
     action: Optional[str] = Query(None, description="Filter by action type (CREATE, UPDATE, DELETE, ATTENDANCE_MARK, etc.)"),
     entity_type: Optional[str] = Query(None, description="Filter by entity type (batch, job, application, etc.)"),
+    source_portal: Optional[str] = Query(None, description="Filter by portal (job_portal, training_portal, auth, system)"),
     search: Optional[str] = Query(None, description="Search in name, email, description"),
     start_date: Optional[datetime] = Query(None, description="Start ISO datetime"),
     end_date: Optional[datetime] = Query(None, description="End ISO datetime"),
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=100),
-    sort_by: Optional[str] = Query(None, description="created_at | actor_name | actor_role | action | entity_type | description"),
+    sort_by: Optional[str] = Query(None, description="created_at | actor_name | actor_role | action | entity_type | description | source_portal"),
     sort_dir: Optional[str] = Query(None, description="asc | desc"),
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(require_super_admin),
 ):
     """
     Paginated activity and audit logs view for Super-Admin.
-    Actions performed by Super-Admin are never recorded.
+    Includes Super Admin, Supervisor, Teacher, Provider, Seeker, and Student actions.
     """
     return await list_audit_logs(
         db=db,
         role=role,
         action=action,
         entity_type=entity_type,
+        source_portal=source_portal,
         search=search,
         start_date=start_date,
         end_date=end_date,
@@ -65,7 +66,8 @@ async def api_get_audit_log_stats(
     admin: User = Depends(require_super_admin),
 ):
     """
-    Aggregated metrics and activity counts by user role and action.
+    Aggregated metrics and activity counts by user role, portal, and action.
+    "Today" uses the Asia/Kolkata calendar day.
     """
     return await get_audit_log_stats(db=db)
 
@@ -75,6 +77,7 @@ async def api_export_audit_logs(
     role: Optional[str] = Query(None),
     action: Optional[str] = Query(None),
     entity_type: Optional[str] = Query(None),
+    source_portal: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
     start_date: Optional[datetime] = Query(None),
     end_date: Optional[datetime] = Query(None),
@@ -82,13 +85,14 @@ async def api_export_audit_logs(
     admin: User = Depends(require_super_admin),
 ):
     """
-    Exports filtered audit logs to a CSV stream.
+    Exports filtered audit logs to a CSV stream (timestamps in IST).
     """
     return await export_audit_logs_csv(
         db=db,
         role=role,
         action=action,
         entity_type=entity_type,
+        source_portal=source_portal,
         search=search,
         start_date=start_date,
         end_date=end_date,

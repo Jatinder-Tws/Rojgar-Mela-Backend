@@ -12,7 +12,9 @@ from app.modules.jobs_portal.services.master_industry_service import (
     MasterIndustryOut,
     MasterIndustryUpdate,
 )
-from app.shared.models.master import MasterState, MasterCity, MasterLanguage, MasterRole
+from app.modules.jobs_portal.services import master_role_service as role_svc
+from app.modules.jobs_portal.services.master_role_service import MasterRoleCreate, MasterRoleOut
+from app.shared.models.master import MasterState, MasterCity, MasterLanguage
 from app.shared.models.user import User
 
 router = APIRouter(prefix="/master", tags=["master-data"])
@@ -74,14 +76,22 @@ async def get_languages(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(MasterLanguage).order_by(MasterLanguage.name))
     return result.scalars().all()
 
-@router.get("/roles", response_model=List[MasterItemOut])
+@router.get("/roles", response_model=List[MasterRoleOut])
 async def get_roles(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(MasterRole).order_by(MasterRole.name))
-    return result.scalars().all()
+    return await role_svc.list_roles(db)
 
 
-@router.get("/industries/{industry_id}/roles", response_model=List[MasterItemOut])
+@router.post("/roles", response_model=MasterRoleOut, status_code=status.HTTP_201_CREATED)
+async def create_role(
+    body: MasterRoleCreate,
+    db: AsyncSession = Depends(get_db),
+    _user: User = Depends(require_authenticated),
+):
+    return await role_svc.create_role(db, body)
+
+
+@router.get("/industries/{industry_id}/roles", response_model=List[MasterRoleOut])
 async def get_roles_by_industry(industry_id: int, db: AsyncSession = Depends(get_db)):
-    # MasterRole has no industry_id column today; keep route for API compatibility.
-    _ = (industry_id, db)
-    return []
+    # MasterRole has no industry_id column today; return full list for picker compatibility.
+    _ = industry_id
+    return await role_svc.list_roles(db)

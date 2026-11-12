@@ -24,6 +24,8 @@ from app.modules.jobs_portal.schemas.career_enquiry import (
     UnifiedEnquiryOut,
     normalize_enquiry_status,
 )
+from app.shared.models.user import User
+from app.shared.services.audit_service import log_audit_event
 from app.shared.services.notification_service import notify_super_admins
 
 logger = logging.getLogger(__name__)
@@ -122,6 +124,15 @@ def _sort_desc(sort_dir: Optional[str]) -> bool:
     return (sort_dir or "desc").strip().lower() != "asc"
 
 
+def _idle_aware_sort_dir(sort_by: Optional[str], sort_dir: Optional[str]) -> Optional[str]:
+    """Idle days grow as created_at shrinks, so flip ASC/DESC for idle sorts."""
+    key = (sort_by or "received").strip().lower()
+    if key != "idle":
+        return sort_dir
+    raw = (sort_dir or "desc").strip().lower()
+    return "asc" if raw == "desc" else "desc"
+
+
 def _ordered(column, sort_dir: Optional[str]):
     clause = column.desc() if _sort_desc(sort_dir) else column.asc()
     return clause.nulls_last()
@@ -137,6 +148,8 @@ def _career_sort_column(sort_by: Optional[str]):
         "query": func.coalesce(CareerEnquiry.visitor_query, CareerEnquiry.message),
         "source": func.coalesce(CareerEnquiry.event_title, CareerEnquiry.domain),
         "received": CareerEnquiry.created_at,
+        # Idle age is derived from created_at (direction flipped in _idle_aware_sort_dir).
+        "idle": CareerEnquiry.created_at,
         "status": CareerEnquiry.status,
         "ticket": CareerEnquiry.ticket_number,
         "event": CareerEnquiry.event_title,
@@ -154,6 +167,7 @@ def _contact_sort_column(sort_by: Optional[str]):
         "query": ContactInquiry.message,
         "source": ContactInquiry.subject,
         "received": ContactInquiry.created_at,
+        "idle": ContactInquiry.created_at,
         "status": ContactInquiry.status,
         "ticket": literal(""),
         "event": literal(""),
@@ -163,7 +177,7 @@ def _contact_sort_column(sort_by: Optional[str]):
 
 def _merged_sort_value(item: UnifiedEnquiryOut, sort_by: Optional[str]):
     key = (sort_by or "received").strip().lower()
-    if key == "received":
+    if key in {"received", "idle"}:
         return item.created_at or datetime.min
     values = {
         "name": item.name,
@@ -419,6 +433,12 @@ def _origin_filters(origin: Optional[str]) -> list:
     ]
 
 
+def _wants_no_action(value: Optional[str]) -> bool:
+    if not value:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "untouched"}
+
+
 def _career_filters(
     search: Optional[str] = None,
     status: Optional[str] = None,
@@ -431,6 +451,7 @@ def _career_filters(
     created_from: Optional[str] = None,
     created_to: Optional[str] = None,
     origin: Optional[str] = None,
+    no_action: Optional[str] = None,
 ) -> list:
     filters = []
     if search and search.strip():
@@ -454,7 +475,10 @@ def _career_filters(
                 CareerEnquiry.visitor_query.ilike(term),
             )
         )
-    if status and status.strip() and status.strip() != "all":
+    if _wants_no_action(no_action):
+        filters.append(CareerEnquiry.status.in_(_status_match_values("new")))
+        filters.append(CareerEnquiry.last_contact_date.is_(None))
+    elif status and status.strip() and status.strip() != "all":
         filters.append(CareerEnquiry.status.in_(_status_match_values(status)))
     if domain and domain.strip() and domain.strip() != "all":
         filters.append(CareerEnquiry.domain == domain.strip())
@@ -494,6 +518,7 @@ def _contact_filters(
     follow_up: Optional[str] = None,
     created_from: Optional[str] = None,
     created_to: Optional[str] = None,
+    no_action: Optional[str] = None,
 ) -> list:
     filters = []
     if search and search.strip():
@@ -511,7 +536,10 @@ def _contact_filters(
                 ContactInquiry.preferred_call_time.ilike(term),
             )
         )
-    if status and status.strip() and status.strip() != "all":
+    if _wants_no_action(no_action):
+        filters.append(ContactInquiry.status.in_(_status_match_values("new")))
+        filters.append(ContactInquiry.last_contact_date.is_(None))
+    elif status and status.strip() and status.strip() != "all":
         filters.append(ContactInquiry.status.in_(_status_match_values(status)))
     if objection and objection.strip() and objection.strip() != "all":
         if objection.strip().lower() in {"none", "unset"}:
@@ -550,6 +578,7 @@ async def _list_career_page(
     created_from: Optional[str] = None,
     created_to: Optional[str] = None,
     origin: Optional[str] = None,
+    no_action: Optional[str] = None,
     sort_by: Optional[str] = None,
     sort_dir: Optional[str] = None,
 ) -> Tuple[List[CareerEnquiry], int]:
@@ -565,6 +594,7 @@ async def _list_career_page(
         created_from=created_from,
         created_to=created_to,
         origin=origin,
+        no_action=no_action,
     )
     count_query = select(func.count()).select_from(CareerEnquiry)
     query = select(CareerEnquiry)
@@ -575,7 +605,11 @@ async def _list_career_page(
     total = int((await db.execute(count_query)).scalar() or 0)
     offset = (page - 1) * page_size
     result = await db.execute(
-        query.order_by(_ordered(_career_sort_column(sort_by), sort_dir)).offset(offset).limit(page_size)
+        query.order_by(
+            _ordered(_career_sort_column(sort_by), _idle_aware_sort_dir(sort_by, sort_dir))
+        )
+        .offset(offset)
+        .limit(page_size)
     )
     return list(result.scalars().all()), total
 
@@ -590,6 +624,7 @@ async def _list_contact_page(
     follow_up: Optional[str] = None,
     created_from: Optional[str] = None,
     created_to: Optional[str] = None,
+    no_action: Optional[str] = None,
     sort_by: Optional[str] = None,
     sort_dir: Optional[str] = None,
 ) -> Tuple[List[ContactInquiry], int]:
@@ -600,6 +635,7 @@ async def _list_contact_page(
         follow_up=follow_up,
         created_from=created_from,
         created_to=created_to,
+        no_action=no_action,
     )
     count_query = select(func.count()).select_from(ContactInquiry)
     query = select(ContactInquiry)
@@ -610,7 +646,11 @@ async def _list_contact_page(
     total = int((await db.execute(count_query)).scalar() or 0)
     offset = (page - 1) * page_size
     result = await db.execute(
-        query.order_by(_ordered(_contact_sort_column(sort_by), sort_dir)).offset(offset).limit(page_size)
+        query.order_by(
+            _ordered(_contact_sort_column(sort_by), _idle_aware_sort_dir(sort_by, sort_dir))
+        )
+        .offset(offset)
+        .limit(page_size)
     )
     return list(result.scalars().all()), total
 
@@ -630,6 +670,7 @@ async def _list_all_merged(
     created_from: Optional[str] = None,
     created_to: Optional[str] = None,
     include_contact: bool = True,
+    no_action: Optional[str] = None,
     sort_by: Optional[str] = None,
     sort_dir: Optional[str] = None,
 ) -> CareerEnquiryListResponse:
@@ -645,6 +686,7 @@ async def _list_all_merged(
         draw_date=draw_date,
         created_from=created_from,
         created_to=created_to,
+        no_action=no_action,
     )
     career_query = select(CareerEnquiry)
     if career_filters:
@@ -663,6 +705,7 @@ async def _list_all_merged(
             follow_up=follow_up,
             created_from=created_from,
             created_to=created_to,
+            no_action=no_action,
         )
         contact_query = select(ContactInquiry)
         if contact_filters:
@@ -670,7 +713,10 @@ async def _list_all_merged(
         contact_result = await db.execute(contact_query.order_by(ContactInquiry.created_at.desc()))
         unified.extend(_contact_to_unified(row) for row in contact_result.scalars().all())
 
-    unified.sort(key=lambda item: _merged_sort_value(item, sort_by), reverse=_sort_desc(sort_dir))
+    unified.sort(
+        key=lambda item: _merged_sort_value(item, sort_by),
+        reverse=_sort_desc(_idle_aware_sort_dir(sort_by, sort_dir)),
+    )
     total = len(unified)
     offset = (page - 1) * page_size
     page_items = await _with_email_verified(db, unified[offset : offset + page_size])
@@ -697,6 +743,7 @@ async def admin_list_career_enquiries(
     draw_date: Optional[str] = None,
     created_from: Optional[str] = None,
     created_to: Optional[str] = None,
+    no_action: Optional[str] = None,
     sort_by: Optional[str] = None,
     sort_dir: Optional[str] = None,
 ) -> CareerEnquiryListResponse:
@@ -727,6 +774,7 @@ async def admin_list_career_enquiries(
             created_from=created_from,
             created_to=created_to,
             origin=origin,
+            no_action=no_action,
             sort_by=sort_by,
             sort_dir=sort_dir,
         )
@@ -751,6 +799,7 @@ async def admin_list_career_enquiries(
             follow_up=follow_up,
             created_from=created_from,
             created_to=created_to,
+            no_action=no_action,
             sort_by=sort_by,
             sort_dir=sort_dir,
         )
@@ -776,6 +825,7 @@ async def admin_list_career_enquiries(
         created_from=created_from,
         created_to=created_to,
         include_contact=not career_only_filters,
+        no_action=no_action,
         sort_by=sort_by,
         sort_dir=sort_dir,
     )
@@ -802,6 +852,16 @@ async def admin_enquiry_pipeline_stats(
     by_status = {key: 0 for key in PIPELINE_STATUSES}
     total = 0
     follow_up_due_today = 0
+    no_action_yet = 0
+    no_action_career = [
+        *career_base,
+        CareerEnquiry.status.in_(_status_match_values("new")),
+        CareerEnquiry.last_contact_date.is_(None),
+    ]
+    no_action_contact = [
+        ContactInquiry.status.in_(_status_match_values("new")),
+        ContactInquiry.last_contact_date.is_(None),
+    ]
 
     if include_career:
         total += await _count_model(db, CareerEnquiry, career_base)
@@ -810,6 +870,7 @@ async def admin_enquiry_pipeline_stats(
             CareerEnquiry,
             [*career_base, CareerEnquiry.next_follow_up_date.between(start, end)],
         )
+        no_action_yet += await _count_model(db, CareerEnquiry, no_action_career)
         for status in PIPELINE_STATUSES:
             by_status[status] += await _count_model(
                 db,
@@ -824,6 +885,7 @@ async def admin_enquiry_pipeline_stats(
             ContactInquiry,
             [ContactInquiry.next_follow_up_date.between(start, end)],
         )
+        no_action_yet += await _count_model(db, ContactInquiry, no_action_contact)
         for status in PIPELINE_STATUSES:
             by_status[status] += await _count_model(
                 db,
@@ -836,6 +898,7 @@ async def admin_enquiry_pipeline_stats(
         total=total,
         active=max(active, 0),
         follow_up_due_today=follow_up_due_today,
+        no_action_yet=no_action_yet,
         visit_scheduled=by_status.get("visit_scheduled", 0),
         converted=by_status.get("converted", 0),
         lost=by_status.get("lost", 0),
@@ -847,6 +910,7 @@ async def admin_update_career_enquiry_status(
     enquiry_id: str,
     body: CareerEnquiryStatusUpdate,
     db: AsyncSession,
+    actor: Optional[User] = None,
 ) -> UnifiedEnquiryOut:
     source = body.source or "career"
     raw_status = (body.status or "").strip().lower()
@@ -893,6 +957,18 @@ async def admin_update_career_enquiry_status(
         _apply_follow_up_update(enquiry, body)
         enquiry.updated_at = datetime.utcnow()
 
+        entity_name = enquiry.full_name or enquiry.email or enquiry_id
+        await log_audit_event(
+            db,
+            actor,
+            action="STATUS_CHANGE" if has_status else "UPDATE",
+            entity_type="career_enquiry",
+            entity_id=str(enquiry.id),
+            entity_name=entity_name,
+            description=f"Updated career enquiry for {entity_name}",
+            changes={"status": status} if has_status else None,
+            source_portal="job_portal",
+        )
         await db.commit()
         await db.refresh(enquiry)
         items = await _with_email_verified(db, [_career_to_unified(enquiry)])
@@ -908,6 +984,18 @@ async def admin_update_career_enquiry_status(
     _apply_follow_up_update(inquiry, body)
     inquiry.updated_at = datetime.utcnow()
 
+    entity_name = inquiry.name or inquiry.email or enquiry_id
+    await log_audit_event(
+        db,
+        actor,
+        action="STATUS_CHANGE" if has_status else "UPDATE",
+        entity_type="career_enquiry",
+        entity_id=str(inquiry.id),
+        entity_name=entity_name,
+        description=f"Updated contact enquiry for {entity_name}",
+        changes={"status": status} if has_status else None,
+        source_portal="job_portal",
+    )
     await db.commit()
     await db.refresh(inquiry)
     return _contact_to_unified(inquiry)
@@ -917,6 +1005,7 @@ async def admin_delete_enquiry(
     enquiry_id: str,
     source: str,
     db: AsyncSession,
+    actor: Optional[User] = None,
 ) -> None:
     source_key = (source or "career").strip().lower()
     if source_key not in {"career", "contact"}:
@@ -927,6 +1016,17 @@ async def admin_delete_enquiry(
         enquiry = result.scalar_one_or_none()
         if not enquiry:
             raise HTTPException(status_code=404, detail="Enquiry not found")
+        entity_name = enquiry.full_name or enquiry.email or enquiry_id
+        await log_audit_event(
+            db,
+            actor,
+            action="DELETE",
+            entity_type="career_enquiry",
+            entity_id=str(enquiry.id),
+            entity_name=entity_name,
+            description=f"Deleted career enquiry for {entity_name}",
+            source_portal="job_portal",
+        )
         await db.delete(enquiry)
         await db.commit()
         return
@@ -935,6 +1035,17 @@ async def admin_delete_enquiry(
     inquiry = result.scalar_one_or_none()
     if not inquiry:
         raise HTTPException(status_code=404, detail="Enquiry not found")
+    entity_name = inquiry.name or inquiry.email or enquiry_id
+    await log_audit_event(
+        db,
+        actor,
+        action="DELETE",
+        entity_type="career_enquiry",
+        entity_id=str(inquiry.id),
+        entity_name=entity_name,
+        description=f"Deleted contact enquiry for {entity_name}",
+        source_portal="job_portal",
+    )
     await db.delete(inquiry)
     await db.commit()
 
@@ -1473,6 +1584,7 @@ async def admin_export_enquiries_xlsx(
     draw_date: Optional[str] = None,
     created_from: Optional[str] = None,
     created_to: Optional[str] = None,
+    no_action: Optional[str] = None,
 ) -> bytes:
     from io import BytesIO
 
@@ -1491,6 +1603,7 @@ async def admin_export_enquiries_xlsx(
         draw_date=draw_date,
         created_from=created_from,
         created_to=created_to,
+        no_action=no_action,
     )
     book = Workbook()
     sheet = book.active

@@ -46,6 +46,8 @@ from app.modules.jobs_portal.schemas.industrial_visit import (
     IndustrialVisitStudentOut,
     IndustrialVisitUpdate,
 )
+from app.shared.models.user import User
+from app.shared.services.audit_service import log_audit_event
 from app.modules.jobs_portal.services.industrial_visit_certificate import (
     format_visit_date,
     generate_participation_certificate_pdf,
@@ -540,7 +542,11 @@ async def admin_get_visit(visit_id: str, db: AsyncSession) -> IndustrialVisitAdm
     return _visit_to_admin(visit, stats)
 
 
-async def admin_create_visit(body: IndustrialVisitCreate, db: AsyncSession) -> IndustrialVisitAdminOut:
+async def admin_create_visit(
+    body: IndustrialVisitCreate,
+    db: AsyncSession,
+    actor: Optional[User] = None,
+) -> IndustrialVisitAdminOut:
     slug = await _unique_slug(db, body.title)
     visit = IndustrialVisit(
         title=body.title.strip(),
@@ -552,6 +558,17 @@ async def admin_create_visit(body: IndustrialVisitCreate, db: AsyncSession) -> I
         is_active=body.is_active,
     )
     db.add(visit)
+    await db.flush()
+    await log_audit_event(
+        db,
+        actor,
+        action="CREATE",
+        entity_type="industrial_visit",
+        entity_id=str(visit.id),
+        entity_name=visit.title,
+        description=f"Created industrial visit '{visit.title}'",
+        source_portal="job_portal",
+    )
     await db.commit()
     await db.refresh(visit)
     return _visit_to_admin(visit, IndustrialVisitStats())
@@ -561,6 +578,7 @@ async def admin_update_visit(
     visit_id: str,
     body: IndustrialVisitUpdate,
     db: AsyncSession,
+    actor: Optional[User] = None,
 ) -> IndustrialVisitAdminOut:
     result = await db.execute(select(IndustrialVisit).where(IndustrialVisit.id == visit_id))
     visit = result.scalar_one_or_none()
@@ -579,13 +597,27 @@ async def admin_update_visit(
     if "is_active" in data and data["is_active"] is not None:
         visit.is_active = data["is_active"]
     visit.updated_at = datetime.utcnow()
+    await log_audit_event(
+        db,
+        actor,
+        action="UPDATE",
+        entity_type="industrial_visit",
+        entity_id=str(visit.id),
+        entity_name=visit.title,
+        description=f"Updated industrial visit '{visit.title}'",
+        source_portal="job_portal",
+    )
     await db.commit()
     await db.refresh(visit)
     stats = await _visit_stats(db, visit.id)
     return _visit_to_admin(visit, stats)
 
 
-async def admin_delete_visit(visit_id: str, db: AsyncSession) -> None:
+async def admin_delete_visit(
+    visit_id: str,
+    db: AsyncSession,
+    actor: Optional[User] = None,
+) -> None:
     result = await db.execute(
         select(IndustrialVisit).where(
             IndustrialVisit.id == visit_id,
@@ -595,6 +627,17 @@ async def admin_delete_visit(visit_id: str, db: AsyncSession) -> None:
     visit = result.scalar_one_or_none()
     if not visit:
         raise HTTPException(status_code=404, detail="Industrial visit not found")
+    visit_title = visit.title
+    await log_audit_event(
+        db,
+        actor,
+        action="DELETE",
+        entity_type="industrial_visit",
+        entity_id=str(visit.id),
+        entity_name=visit_title,
+        description=f"Deleted industrial visit '{visit_title}'",
+        source_portal="job_portal",
+    )
     visit.is_deleted = True
     visit.deleted_at = datetime.utcnow()
     visit.is_active = False
@@ -678,6 +721,7 @@ async def admin_update_attendance(
     student_id: str,
     body: IndustrialVisitAttendanceUpdate,
     db: AsyncSession,
+    actor: Optional[User] = None,
 ) -> IndustrialVisitStudentOut:
     result = await db.execute(
         select(IndustrialVisitStudent).where(
@@ -699,6 +743,17 @@ async def admin_update_attendance(
             student.certificate_status = CERTIFICATE_PENDING
             student.certificate_sent_at = None
     student.updated_at = datetime.utcnow()
+    await log_audit_event(
+        db,
+        actor,
+        action="STATUS_CHANGE",
+        entity_type="industrial_visit",
+        entity_id=visit_id,
+        entity_name=student.full_name,
+        description=f"Marked attendance for {student.full_name} on industrial visit",
+        changes={"attendance_status": student.attendance_status},
+        source_portal="job_portal",
+    )
     await db.commit()
     await db.refresh(student)
     return _student_to_out(student)
@@ -708,6 +763,7 @@ async def admin_delete_student(
     visit_id: str,
     student_id: str,
     db: AsyncSession,
+    actor: Optional[User] = None,
 ) -> None:
     result = await db.execute(
         select(IndustrialVisitStudent).where(
@@ -718,6 +774,17 @@ async def admin_delete_student(
     student = result.scalar_one_or_none()
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
+    student_name = student.full_name
+    await log_audit_event(
+        db,
+        actor,
+        action="DELETE",
+        entity_type="industrial_visit",
+        entity_id=visit_id,
+        entity_name=student_name,
+        description=f"Removed student {student_name} from industrial visit",
+        source_portal="job_portal",
+    )
     await db.delete(student)
     await db.commit()
 

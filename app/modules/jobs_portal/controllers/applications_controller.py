@@ -124,6 +124,7 @@ async def apply_to_job(
         entity_name=job.title,
         description=f"Applied for job '{job.title}' at {provider.company_name if provider and provider.company_name else 'Company'}",
         changes={"job_id": str(job.id), "job_title": job.title},
+        source_portal="job_portal",
     )
 
     try:
@@ -560,6 +561,7 @@ async def reject_application(
         entity_name=job.title,
         description=f"Rejected application for '{job.title}'. Reason: {body.rejection_reason or 'None'}",
         changes={"status": "rejected", "rejection_reason": body.rejection_reason},
+        source_portal="job_portal",
     )
     await db.commit()
 
@@ -639,6 +641,7 @@ async def update_application_status(
                 entity_name=job.title,
                 description=f"Shortlisted candidate for '{job.title}'",
                 changes={"new_status": "shortlisted"},
+                source_portal="job_portal",
             )
             await db.commit()
 
@@ -685,6 +688,7 @@ async def update_application_status(
                 entity_name=job.title,
                 description=f"Rejected candidate for '{job.title}'",
                 changes={"new_status": "rejected", "rejection_reason": app.rejection_reason},
+                source_portal="job_portal",
             )
             await db.commit()
 
@@ -718,6 +722,7 @@ async def update_application_status(
                 entity_name=job.title,
                 description=f"Updated candidate application status to '{status}' for '{job.title}'",
                 changes={"new_status": str(status)},
+                source_portal="job_portal",
             )
             await db.commit()
 

@@ -170,6 +170,7 @@ async def create_job_fair(
         banner_image_url=banner_url,
         industries=industries_list,
         created_by_id=admin.id,
+        actor=admin,
     )
 
 
@@ -211,6 +212,7 @@ async def update_job_fair(
         banner_image_url=update_data.get("banner_image_url"),
         industries=update_data.get("industries"),
         event_profile=update_data.get("event_profile"),
+        actor=admin,
     )
     if not updated:
         raise HTTPException(status_code=404, detail="Job Fair not found")
@@ -224,7 +226,7 @@ async def delete_job_fair(
     admin: User = Depends(require_super_admin_or_permission("job_fairs")),
 ):
     """Super Admin: Delete a Job Fair."""
-    if not await delete_job_fair_db(db, id):
+    if not await delete_job_fair_db(db, id, actor=admin):
         raise HTTPException(status_code=404, detail="Job Fair not found")
     return Response(status_code=204)
 
@@ -242,7 +244,7 @@ async def upload_job_fair_banner(
         raise HTTPException(status_code=404, detail="Job Fair not found")
 
     banner_url = await _save_banner_image(banner_image)
-    updated = await set_job_fair_banner_db(db, id, banner_url)
+    updated = await set_job_fair_banner_db(db, id, banner_url, actor=admin)
     if not updated:
         raise HTTPException(status_code=404, detail="Job Fair not found")
     return updated
@@ -776,10 +778,28 @@ async def get_job_fair_companies(
     if sector and sector != "all":
         query = query.where(JobFairCompany.sector == sector)
 
+    company_name_expr = func.coalesce(JobFairCompany.company_name, User.company_name, User.first_name)
+    company_email_expr = func.coalesce(JobFairCompany.email, User.email)
     if sort_by == "name_asc":
-        query = query.order_by(func.coalesce(User.company_name, User.first_name).asc())
+        query = query.order_by(company_name_expr.asc())
     elif sort_by == "name_desc":
-        query = query.order_by(func.coalesce(User.company_name, User.first_name).desc())
+        query = query.order_by(company_name_expr.desc())
+    elif sort_by == "email_asc":
+        query = query.order_by(company_email_expr.asc().nulls_last())
+    elif sort_by == "email_desc":
+        query = query.order_by(company_email_expr.desc().nulls_last())
+    elif sort_by == "sector_asc":
+        query = query.order_by(JobFairCompany.sector.asc().nulls_last())
+    elif sort_by == "sector_desc":
+        query = query.order_by(JobFairCompany.sector.desc().nulls_last())
+    elif sort_by == "department_asc":
+        query = query.order_by(JobFairCompany.department.asc().nulls_last())
+    elif sort_by == "department_desc":
+        query = query.order_by(JobFairCompany.department.desc().nulls_last())
+    elif sort_by == "vacancy_asc":
+        query = query.order_by(JobFairCompany.vacancy.asc().nulls_last())
+    elif sort_by == "vacancy_desc":
+        query = query.order_by(JobFairCompany.vacancy.desc().nulls_last())
     elif sort_by == "date_oldest":
         query = query.order_by(JobFairCompany.registered_at.asc())
     else:
@@ -928,10 +948,23 @@ async def get_job_fair_seekers(
             )
         )
 
+    seeker_name_expr = func.concat(
+        func.coalesce(User.first_name, ""),
+        " ",
+        func.coalesce(User.last_name, ""),
+    )
     if sort_by == "name_asc":
-        query = query.order_by(func.concat(func.coalesce(User.first_name, ""), " ", func.coalesce(User.last_name, "")).asc())
+        query = query.order_by(seeker_name_expr.asc())
     elif sort_by == "name_desc":
-        query = query.order_by(func.concat(func.coalesce(User.first_name, ""), " ", func.coalesce(User.last_name, "")).desc())
+        query = query.order_by(seeker_name_expr.desc())
+    elif sort_by == "email_asc":
+        query = query.order_by(User.email.asc().nulls_last())
+    elif sort_by == "email_desc":
+        query = query.order_by(User.email.desc().nulls_last())
+    elif sort_by == "phone_asc":
+        query = query.order_by(User.phone.asc().nulls_last())
+    elif sort_by == "phone_desc":
+        query = query.order_by(User.phone.desc().nulls_last())
     elif sort_by == "date_oldest":
         query = query.order_by(JobFairSeeker.registered_at.asc())
     else:

@@ -54,6 +54,13 @@ def validate_onboarding_payload(role: UserRole, body: Any) -> None:
                     status_code=400,
                     detail="Invalid job type. Must be 'in_office', 'wfh', or 'hybrid'",
                 ) from exc
+        job_role = getattr(body, "job_role", None)
+        if job_role is not None and str(job_role).strip():
+            from app.shared.validators.job_role import job_role_error
+
+            error = job_role_error(str(job_role), required=False)
+            if error:
+                raise HTTPException(status_code=400, detail=error)
         return
 
     if role == UserRole.provider:

@@ -147,6 +147,7 @@ async def create_job_for_provider(
             "job_type": str(job_type) if job_type else None,
             "provider_id": str(provider.id),
         },
+        source_portal="job_portal",
     )
     await db.commit()
     await db.refresh(job)
@@ -170,6 +171,8 @@ JOB_SORTABLE_COLUMNS = {
     "posted_by_name": JobPosting.posted_by_name,
     "location": JobPosting.location,
     "job_type": JobPosting.job_type,
+    "post_count": JobPosting.post_count,
+    "experience_required": JobPosting.experience_required,
     "created_at": JobPosting.created_at,
     "updated_at": JobPosting.updated_at,
 }
@@ -449,6 +452,7 @@ async def update_job_put(
         entity_id=str(job.id),
         entity_name=job.title,
         description=f"Updated job posting: '{job.title}'",
+        source_portal="job_portal",
     )
     await db.commit()
     await db.refresh(job)
@@ -478,6 +482,7 @@ async def delete_job(
         entity_id=str(job.id),
         entity_name=job.title,
         description=f"Deleted job posting: '{job.title}'",
+        source_portal="job_portal",
     )
     await db.delete(job)
     await db.commit()
@@ -500,6 +505,7 @@ async def deactivate_job(
         entity_name=job.title,
         description=f"Deactivated job posting: '{job.title}'",
         changes={"is_active": False},
+        source_portal="job_portal",
     )
     await db.commit()
     schedule_cleanup(background_tasks, job)
@@ -517,6 +523,7 @@ async def activate_job(job_id: str, user: User, db: AsyncSession) -> None:
         entity_name=job.title,
         description=f"Activated job posting: '{job.title}'",
         changes={"is_active": True},
+        source_portal="job_portal",
     )
     await db.commit()
 

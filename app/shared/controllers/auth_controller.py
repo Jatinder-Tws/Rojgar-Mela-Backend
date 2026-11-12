@@ -448,6 +448,21 @@ async def login(
                 ip_address=ip_address,
                 user_agent=user_agent,
             )
+            await log_audit_event(
+                db,
+                user,
+                action="LOGIN_FAILED",
+                entity_type="session",
+                entity_id=str(user.id),
+                entity_name=f"Login failed ({user.email})",
+                description=f"Failed password login for {user.email}",
+                changes={"method": "password", "status": status},
+                ip_address_override=ip_address,
+                user_agent_override=user_agent,
+                request_path_override="/auth/login",
+                request_method_override="POST",
+                source_portal="auth",
+            )
             await db.commit()
             if status == "blocked":
                 raise HTTPException(
@@ -518,6 +533,7 @@ async def login(
             user_agent_override=user_agent,
             request_path_override="/auth/login",
             request_method_override="POST",
+            source_portal="auth",
         )
         await db.commit()
         await db.refresh(user)

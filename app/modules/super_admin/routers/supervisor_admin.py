@@ -80,36 +80,36 @@ async def api_create_supervisor(
 async def api_update_supervisor(
     supervisor_id: str,
     body: SupervisorUpdateRequest,
-    _admin: User = Depends(require_super_admin),
+    admin: User = Depends(require_super_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    return await update_supervisor(supervisor_id=supervisor_id, body=body, db=db)
+    return await update_supervisor(supervisor_id=supervisor_id, body=body, db=db, actor=admin)
 
 
 @router.patch("/{supervisor_id}/status", response_model=SupervisorItemOut)
 async def api_update_supervisor_status(
     supervisor_id: str,
     body: SupervisorStatusUpdateRequest,
-    _admin: User = Depends(require_super_admin),
+    admin: User = Depends(require_super_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    return await update_supervisor_status(supervisor_id=supervisor_id, body=body, db=db)
+    return await update_supervisor_status(supervisor_id=supervisor_id, body=body, db=db, actor=admin)
 
 
 @router.post("/{supervisor_id}/reset-password")
 async def api_reset_supervisor_password(
     supervisor_id: str,
     body: SupervisorResetPasswordRequest,
-    _admin: User = Depends(require_super_admin),
+    admin: User = Depends(require_super_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    return await reset_supervisor_password(supervisor_id=supervisor_id, body=body, db=db)
+    return await reset_supervisor_password(supervisor_id=supervisor_id, body=body, db=db, actor=admin)
 
 
 @router.delete("/{supervisor_id}")
 async def api_delete_supervisor(
     supervisor_id: str,
-    _admin: User = Depends(require_super_admin),
+    admin: User = Depends(require_super_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    return await delete_supervisor(supervisor_id=supervisor_id, db=db)
+    return await delete_supervisor(supervisor_id=supervisor_id, db=db, actor=admin)

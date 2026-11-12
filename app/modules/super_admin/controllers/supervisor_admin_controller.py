@@ -160,6 +160,22 @@ async def create_supervisor(
         created_by_id=current_admin.id,
     )
     db.add(profile)
+    from app.shared.services.audit_service import log_audit_event
+    await log_audit_event(
+        db,
+        current_admin,
+        action="CREATE",
+        entity_type="supervisor",
+        entity_id=str(user.id),
+        entity_name=f"{user.first_name or ''} {user.last_name or ''}".strip() or user.email,
+        description=f"Created supervisor '{user.email}'",
+        changes={
+            "email": user.email,
+            "department": profile.department,
+            "permissions": valid_perms,
+        },
+        source_portal="job_portal",
+    )
     await db.commit()
     await db.refresh(profile)
     await db.refresh(user)
@@ -184,6 +200,7 @@ async def update_supervisor(
     supervisor_id: str,
     body: SupervisorUpdateRequest,
     db: AsyncSession,
+    actor: Optional[User] = None,
 ) -> SupervisorItemOut:
     query = (
         select(SupervisorProfile, User)
@@ -218,6 +235,18 @@ async def update_supervisor(
     if body.is_active is not None:
         profile.is_active = body.is_active
 
+    from app.shared.services.audit_service import log_audit_event
+    await log_audit_event(
+        db,
+        actor,
+        action="UPDATE",
+        entity_type="supervisor",
+        entity_id=str(user.id),
+        entity_name=f"{user.first_name or ''} {user.last_name or ''}".strip() or user.email,
+        description=f"Updated supervisor '{user.email}'",
+        changes=body.model_dump(exclude_unset=True),
+        source_portal="job_portal",
+    )
     await db.commit()
     await db.refresh(profile)
     await db.refresh(user)
@@ -229,6 +258,7 @@ async def update_supervisor_status(
     supervisor_id: str,
     body: SupervisorStatusUpdateRequest,
     db: AsyncSession,
+    actor: Optional[User] = None,
 ) -> SupervisorItemOut:
     query = (
         select(SupervisorProfile, User)
@@ -247,6 +277,18 @@ async def update_supervisor_status(
     profile, user = row
 
     profile.is_active = body.is_active
+    from app.shared.services.audit_service import log_audit_event
+    await log_audit_event(
+        db,
+        actor,
+        action="STATUS_CHANGE",
+        entity_type="supervisor",
+        entity_id=str(user.id),
+        entity_name=f"{user.first_name or ''} {user.last_name or ''}".strip() or user.email,
+        description=f"Set supervisor '{user.email}' active={body.is_active}",
+        changes={"is_active": body.is_active},
+        source_portal="job_portal",
+    )
     await db.commit()
     await db.refresh(profile)
     await db.refresh(user)
@@ -258,6 +300,7 @@ async def reset_supervisor_password(
     supervisor_id: str,
     body: SupervisorResetPasswordRequest,
     db: AsyncSession,
+    actor: Optional[User] = None,
 ) -> dict:
     query = (
         select(User)
@@ -275,6 +318,18 @@ async def reset_supervisor_password(
         raise HTTPException(status_code=404, detail="Supervisor user not found")
 
     user.hashed_password = hash_password(body.new_password)
+    from app.shared.services.audit_service import log_audit_event
+    await log_audit_event(
+        db,
+        actor,
+        action="UPDATE",
+        entity_type="supervisor",
+        entity_id=str(user.id),
+        entity_name=f"{user.first_name or ''} {user.last_name or ''}".strip() or user.email,
+        description=f"Reset password for supervisor '{user.email}'",
+        changes={"password_reset": True},
+        source_portal="job_portal",
+    )
     await db.commit()
 
     return {"message": "Supervisor password reset successfully"}
@@ -283,6 +338,7 @@ async def reset_supervisor_password(
 async def delete_supervisor(
     supervisor_id: str,
     db: AsyncSession,
+    actor: Optional[User] = None,
 ) -> dict:
     query = (
         select(SupervisorProfile, User)
@@ -300,6 +356,20 @@ async def delete_supervisor(
         raise HTTPException(status_code=404, detail="Supervisor not found")
     profile, user = row
 
+    snapshot_email = user.email
+    snapshot_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or user.email
+    snapshot_id = str(user.id)
+    from app.shared.services.audit_service import log_audit_event
+    await log_audit_event(
+        db,
+        actor,
+        action="DELETE",
+        entity_type="supervisor",
+        entity_id=snapshot_id,
+        entity_name=snapshot_name,
+        description=f"Deleted supervisor '{snapshot_email}'",
+        source_portal="job_portal",
+    )
     await db.delete(user)
     await db.commit()
 

@@ -13,14 +13,10 @@ def _uuid():
 
 class AuditLog(Base):
     """
-    Audit log table for recording actions performed by non-super-admin users:
-    - Supervisor
-    - Teacher / Instructor
-    - Job Seeker
-    - Student / Learner
-    - Job Provider / Employer
+    Immutable activity / audit trail for write actions across portals.
 
-    Note: Super-Admin actions are excluded by design.
+    Actors include Super Admin, Supervisor, Teacher, Job Seeker, Student,
+    Job Provider, and system/webhook actors.
     """
     __tablename__ = "audit_logs"
 
@@ -30,7 +26,7 @@ class AuditLog(Base):
     actor_id = Column(UUID(as_uuid=False), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     actor_name = Column(String(150), nullable=False, default="Unknown User")
     actor_email = Column(String(255), nullable=True, index=True)
-    actor_role = Column(String(50), nullable=False, index=True)  # supervisor, teacher, seeker, provider, student
+    actor_role = Column(String(50), nullable=False, index=True)  # superadmin, supervisor, teacher, seeker, provider, student, system
 
     # Action metadata
     action = Column(String(80), nullable=False, index=True)  # CREATE, UPDATE, DELETE, ATTENDANCE_MARK, ENROLL, APPLICATION_SUBMIT, STATUS_CHANGE, LEAVE_APPLY, PAYMENT_RECORD, etc.
@@ -48,6 +44,9 @@ class AuditLog(Base):
     ip_address = Column(String(60), nullable=True)
     user_agent = Column(String(300), nullable=True)
 
+    # Portal provenance: job_portal | training_portal | auth | system
+    source_portal = Column(String(40), nullable=True, index=True)
+
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
     # Relationships
@@ -56,4 +55,5 @@ class AuditLog(Base):
     __table_args__ = (
         Index("ix_audit_logs_role_created", "actor_role", "created_at"),
         Index("ix_audit_logs_entity", "entity_type", "entity_id"),
+        Index("ix_audit_logs_portal_created", "source_portal", "created_at"),
     )

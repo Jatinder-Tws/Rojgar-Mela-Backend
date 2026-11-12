@@ -682,7 +682,8 @@ async def get_dashboard_analytics(
             {"label": "New Seekers in Period", "value": _fmt(new_seekers_period), "trend": _pct_change(new_seekers_period, new_seekers_prev)},
         ],
         "supervisors": [
-            {"label": "Total Supervisors", "value": _fmt(total_supervisors), "trend": _pct_change(new_supervisors_period, new_supervisors_prev)},
+            # Stock totals have no period % — avoid implying lifetime count grew by new-in-period %.
+            {"label": "Total Supervisors", "value": _fmt(total_supervisors)},
             {"label": "New Supervisors in Period", "value": _fmt(new_supervisors_period), "trend": _pct_change(new_supervisors_period, new_supervisors_prev)},
         ],
         "providers": [
@@ -747,8 +748,9 @@ async def get_dashboard_analytics(
         {"range": "Below 60%", "count": score_dist_row.below_60, "pct": round((score_dist_row.below_60 / total_scored) * 100, 1)},
     ]
 
+    # All-time stock — no period % (period match growth is on the New Matches KPI).
     stat_cards = [
-        {"key": "total_matches", "label": "Total AI Matches", "value": f"{total_matches:,}", "trend": _pct_change(match_stats_row.matches_last_30, match_stats_row.matches_prev_30)},
+        {"key": "total_matches", "label": "Total AI Matches", "value": f"{total_matches:,}"},
     ]
 
     industry_match_analysis = [
@@ -911,9 +913,11 @@ async def get_dashboard_analytics(
     if all_time_rejected > 0:
         system_alerts.append({"level": "info", "message": f"{all_time_rejected} applications were rejected"})
 
+    # Stock cards (Total Users / Providers) omit trend — period % belongs with flow KPIs.
+    # Jobs / Applications values match the same period basis as their trends.
     platform_overview = [
-        {"label": "Total Users", "value": total_seekers + total_providers, "trend": _pct_change(new_regs_today, new_regs_yesterday)},
-        {"label": "Providers", "value": total_providers, "trend": _pct_change(new_providers_period, new_providers_prev)},
+        {"label": "Total Users", "value": total_seekers + total_providers},
+        {"label": "Providers", "value": total_providers},
         {"label": "Jobs", "value": active_jobs, "trend": _pct_change(active_jobs, active_jobs_yesterday)},
         {"label": "Applications", "value": apps_today, "trend": _pct_change(apps_today, apps_yesterday)},
     ]

@@ -171,7 +171,7 @@ async def create_college(
     admin: User = Depends(require_super_admin_or_permission("colleges_manage")),
 ):
     """Create a new college/university record with sub-sections."""
-    return await create_college_ctrl(db, payload)
+    return await create_college_ctrl(db, payload, actor=admin)
 
 
 @router.put("/{college_id}", response_model=CollegeDetailOut)
@@ -182,7 +182,7 @@ async def update_college(
     admin: User = Depends(require_super_admin_or_permission("colleges_manage", "colleges_courses", "colleges_accreditation")),
 ):
     """Update college details, courses, approvals, or EMI plans."""
-    return await update_college_ctrl(db, college_id, payload)
+    return await update_college_ctrl(db, college_id, payload, actor=admin)
 
 
 @router.delete("/{college_id}")
@@ -192,7 +192,7 @@ async def delete_college(
     admin: User = Depends(require_super_admin_or_permission("colleges_manage")),
 ):
     """Delete a college and all cascade-related data."""
-    return await delete_college_ctrl(db, college_id)
+    return await delete_college_ctrl(db, college_id, actor=admin)
 
 
 @router.post("/import-excel", response_model=ExcelImportSummary)

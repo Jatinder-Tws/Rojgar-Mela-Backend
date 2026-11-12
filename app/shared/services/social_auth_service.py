@@ -256,6 +256,7 @@ async def _issue_login(
         user_agent_override=meta.user_agent,
         request_path_override=f"/auth/{profile.provider}",
         request_method_override="POST",
+        source_portal="auth",
     )
     await db.commit()
     await db.refresh(user)
