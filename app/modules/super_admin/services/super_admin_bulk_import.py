@@ -9,6 +9,7 @@ from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.shared.models.user import CompanyType, JobType, User, UserRole
 from app.core.dependencies import hash_password, async_hash_password
+from app.shared.services.account_origin import stamp_creator
 from app.shared.services.email_service import send_job_fair_welcome_email
 from app.modules.super_admin.services.import_job_store import update_job, get_job
 from app.modules.super_admin.services.super_admin_utils import normalize_phone, password_from_csv_row
@@ -127,6 +128,8 @@ async def run_bulk_import_job(
     content: Optional[bytes] = None,
     role: Any = UserRole.seeker,
     file_path: Optional[str] = None,
+    created_by_id: Optional[str] = None,
+    account_origin: Optional[str] = None,
 ) -> None:
     try:
         if file_path and not content:
@@ -140,7 +143,14 @@ async def run_bulk_import_job(
             return
 
         target_role = UserRole(role) if isinstance(role, str) else role
-        await _run_bulk_import_job_inner(job_id, content, target_role, file_path=file_path)
+        await _run_bulk_import_job_inner(
+            job_id,
+            content,
+            target_role,
+            file_path=file_path,
+            created_by_id=created_by_id,
+            account_origin=account_origin,
+        )
     except Exception as exc:
         update_job(job_id, status="failed", message=str(exc), progress=100)
     finally:
@@ -158,6 +168,8 @@ async def _run_bulk_import_job_inner(
     content: bytes,
     role: UserRole,
     file_path: Optional[str] = None,
+    created_by_id: Optional[str] = None,
+    account_origin: Optional[str] = None,
 ) -> None:
     job = get_job(job_id)
     filename = ""
@@ -240,6 +252,11 @@ async def _run_bulk_import_job_inner(
                     is_verified=True,
                     onboarding_complete=True,
                     is_assessment_done=(role == UserRole.seeker),
+                )
+                stamp_creator(
+                    user,
+                    origin=account_origin or "import",
+                    created_by_id=created_by_id,
                 )
                 if role == UserRole.seeker:
                     ind_val = _pick_first_value(row, "industry")

@@ -130,7 +130,8 @@ async def complete_assessment(session_id: str, body: AssessmentComplete, db: Asy
         user = User(
             email=body.email, phone=body.phone, first_name=body.first_name, last_name=body.last_name,
             role=UserRole(body.role) if body.role else UserRole.seeker,
-            is_verified=False, onboarding_complete=False, is_assessment_done=True
+            is_verified=False, onboarding_complete=False, is_assessment_done=True,
+            account_origin="self",
         )
         if body.password:
             user.hashed_password = hash_password(body.password)

@@ -309,6 +309,7 @@ async def _create_user_from_profile(
         onboarding_complete=False,
         is_assessment_done=(role == "seeker"),
         registration_ip=None,
+        account_origin="self",
     )
     if role == "provider":
         user.company_name = (given or (profile.email or "My Company").split("@")[0]).strip() or "My Company"

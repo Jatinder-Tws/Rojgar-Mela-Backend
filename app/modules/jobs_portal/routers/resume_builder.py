@@ -30,6 +30,40 @@ UPLOAD_DIR = Path("uploads/resumes")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
+async def _write_html_to_pdf(html: str, file_path: str) -> None:
+    """
+    Render HTML to PDF. Prefer Playwright Chromium (modern CSS), fall back to xhtml2pdf.
+    """
+    # 1) Playwright — supports colors/layout closer to browser templates
+    try:
+        from playwright.async_api import async_playwright
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            try:
+                page = await browser.new_page()
+                await page.set_content(html, wait_until="load")
+                await page.pdf(
+                    path=file_path,
+                    format="A4",
+                    print_background=True,
+                    margin={"top": "8mm", "right": "8mm", "bottom": "8mm", "left": "8mm"},
+                )
+                return
+            finally:
+                await browser.close()
+    except Exception as e:
+        logger.warning(f"[RESUME_PDF] Playwright PDF failed, falling back to xhtml2pdf: {e}")
+
+    # 2) xhtml2pdf fallback (limited CSS — keep templates simple)
+    from xhtml2pdf import pisa
+
+    with open(file_path, "wb") as f:
+        result = pisa.CreatePDF(html, dest=f)
+        if getattr(result, "err", None):
+            raise RuntimeError("xhtml2pdf failed to render resume PDF")
+
+
 class ResumeBuilderRequest(BaseModel):
     template: str = "modern"  # modern, classic, minimal, creative, executive
     summary_override: Optional[str] = None
@@ -39,8 +73,9 @@ class ResumeBuilderRequest(BaseModel):
 
 
 class AIAssistRequest(BaseModel):
-    section: str  # summary, headline, experience, skills, projects, education, certifications, languages
-    action: Optional[str] = "generate"  # generate, enhance, shorten, ats_optimize, suggest_skills
+    # summary, headline, experience, skills, projects, education, certifications, languages, full_profile
+    section: str
+    action: Optional[str] = "generate"  # generate, enhance, shorten, ats_optimize, suggest_skills, import_profile
     current_text: Optional[str] = None
     custom_instruction: Optional[str] = None
     role: Optional[str] = None
@@ -270,8 +305,8 @@ def _generate_html_resume(resume_text: str, polished_text: str, template: str, u
   .section {{ margin-bottom:22px; }}
   .section h2 {{ font-size:13px; color:#2563eb; border-bottom:2px solid #2563eb; padding-bottom:4px; margin-bottom:12px; text-transform:uppercase; letter-spacing:2px; font-weight:700; }}
   .section p {{ font-size:12px; color:#374151; }}
-  .skills {{ display:flex; flex-wrap:wrap; gap:6px; }}
-  .skill-tag {{ background:linear-gradient(135deg,#eff6ff,#dbeafe); color:#1d4ed8; padding:4px 10px; border-radius:6px; font-size:13px; font-weight:600; border:1px solid #bfdbfe; }}
+  .skills {{ margin-top:2px; }}
+  .skill-tag {{ display:inline-block; background:#eff6ff; color:#1d4ed8; padding:4px 10px; border-radius:6px; font-size:11px; font-weight:600; border:1px solid #bfdbfe; margin:0 6px 6px 0; }}
   .exp-item {{ margin-bottom:14px; padding-left:14px; border-left:3px solid #dbeafe; }}
   .exp-item h3 {{ font-size:14px; font-weight:700; color:#111827; }}
   .exp-item .meta {{ color:#2563eb; font-size:13px; font-weight:500; }}
@@ -479,9 +514,10 @@ def _generate_html_resume(resume_text: str, polished_text: str, template: str, u
         elif template == "minimal":
             html += f'  <div class="section"><h2>Skills</h2><p class="skills-min">{" · ".join(skill_names)}</p></div>\n'
         else:
+            # Trailing space between tags matters for xhtml2pdf (no flex/gap support)
             html += '  <div class="section"><h2>Skills</h2><div class="skills">'
             for sk in skill_names:
-                html += f'<span class="skill-tag">{sk}</span>'
+                html += f'<span class="skill-tag">{sk}</span> '
             html += '</div></div>\n'
 
     if portfolio.work_experiences:
@@ -629,6 +665,40 @@ async def ai_assist_section(
                 '{"language": "Language Name", "proficiency": "Basic / Conversational / Fluent / Native"}. '
                 "Do NOT write any conversational explanation before or after the JSON block."
             ),
+            "full_profile": (
+                "You are a resume data extraction engine for a job platform. "
+                "The user pastes free-form candidate details (notes, profile schema, bio, skills, "
+                "employment history, languages, preferences, contact info, etc.). "
+                "Extract ONLY facts present in the input. Do NOT invent employers, dates, salaries, "
+                "credentials, names, emails, or phone numbers. "
+                "Map content into resume sections. IGNORE admin-only / CRM fields such as document "
+                "verification status, Aadhaar/PAN numbers, police verification, interview scores, "
+                "recruitment pipeline stages, internal notes, and admin actions. "
+                "Housekeeping cleaning tasks (room cleaning, laundry, ironing, etc.) belong in skills. "
+                "Previous employers belong in work_experiences. Languages Known belong in languages. "
+                "Extract Full Name into first_name + last_name (and also full_name). "
+                "Extract Mobile/Phone and Email when present. "
+                "Write a concise professional bio (3-4 sentences) from the facts when a summary is missing. "
+                "You MUST output valid JSON ONLY inside a ```json ... ``` code block with this shape:\n"
+                "{\n"
+                '  "full_name": "Candidate Full Name",\n'
+                '  "first_name": "First",\n'
+                '  "last_name": "Last",\n'
+                '  "email": "email@example.com",\n'
+                '  "phone": "+91XXXXXXXXXX",\n'
+                '  "headline": "short professional headline",\n'
+                '  "bio": "3-4 sentence professional summary",\n'
+                '  "skills": ["skill1", "skill2"],\n'
+                '  "work_experiences": [{"role":"Job Title","company":"Employer","start_date":"YYYY-MM","end_date":"YYYY-MM or Present","description":"• Achievement\\n• Responsibility"}],\n'
+                '  "projects": [{"title":"Project","technologies":["Tech"],"description":"• Detail"}],\n'
+                '  "education": [{"degree":"Degree","field":"Field","institution":"School","end_year":"YYYY"}],\n'
+                '  "certifications": [{"name":"Name","issuer":"Issuer","date":"YYYY"}],\n'
+                '  "languages": [{"language":"Language","proficiency":"Basic|Conversational|Fluent|Native"}],\n'
+                '  "city": "City if present",\n'
+                '  "state": "State if present"\n'
+                "}\n"
+                "Use empty arrays or omit keys when data is absent. Do NOT invent projects or education."
+            ),
         }
 
         system_prompt = system_instructions.get(section, system_instructions["summary"])
@@ -642,27 +712,51 @@ async def ai_assist_section(
             user_prompt_parts.append(f"Current Skills: {', '.join(body.skills)}")
         if body.context:
             try:
-                user_prompt_parts.append(f"Current Structured Section Data:\n{json.dumps(body.context, indent=2)}")
+                if section == "full_profile":
+                    user_prompt_parts.append(
+                        "Existing resume contact (reference only — still extract pasted values; "
+                        "do not invent missing contact fields):\n"
+                        f"{json.dumps(body.context, indent=2)}"
+                    )
+                else:
+                    user_prompt_parts.append(
+                        f"Current Structured Section Data:\n{json.dumps(body.context, indent=2)}"
+                    )
             except Exception:
                 pass
         if body.current_text:
-            user_prompt_parts.append(f"Current Section Text / Content:\n{body.current_text}")
-        if body.custom_instruction:
-            user_prompt_parts.append(
-                f"User Edit Request (Strictly follow this instruction to add, remove, or modify entries in this section):\n"
-                f"{body.custom_instruction}"
+            label = (
+                "Pasted Candidate Details (extract and map into resume JSON):"
+                if section == "full_profile"
+                else "Current Section Text / Content:"
             )
+            user_prompt_parts.append(f"{label}\n{body.current_text}")
+        if body.custom_instruction:
+            if section == "full_profile":
+                user_prompt_parts.append(
+                    f"Additional mapping instructions:\n{body.custom_instruction}"
+                )
+            else:
+                user_prompt_parts.append(
+                    f"User Edit Request (Strictly follow this instruction to add, remove, or modify entries in this section):\n"
+                    f"{body.custom_instruction}"
+                )
         if action == "ats_optimize":
             user_prompt_parts.append("Goal: Optimize strictly for ATS keywords and high recruiter readability.")
         elif action == "shorten":
             user_prompt_parts.append("Goal: Make it exceptionally concise and compact.")
+        elif action == "import_profile" or section == "full_profile":
+            user_prompt_parts.append(
+                "Goal: Parse the pasted details into the full resume JSON schema. Prefer accuracy over completeness."
+            )
 
         full_prompt = f"{system_prompt}\n\n" + "\n".join(user_prompt_parts)
 
+        max_tokens = 4096 if section == "full_profile" else 2048
         response = gemini_client.models.generate_content(
             model=settings.GEMINI_CHAT_MODEL,
             contents=[full_prompt],
-            config={"temperature": 0.2, "max_output_tokens": 2048},
+            config={"temperature": 0.2, "max_output_tokens": max_tokens},
         )
 
         generated_text = (response.text or "").strip()
@@ -683,12 +777,27 @@ async def ai_assist_section(
             except Exception:
                 pass
 
-        # If wrapped in a dictionary, unwrap it to list
-        if isinstance(structured_data, dict):
+        # If wrapped in a dictionary, unwrap it to list (except full_profile which is a multi-section object)
+        if isinstance(structured_data, dict) and section != "full_profile":
             for k in ("items", "entries", "roles", "experience", "work_experiences", "projects", "education", "certifications", "languages"):
                 if k in structured_data and isinstance(structured_data[k], list):
                     structured_data = structured_data[k]
                     break
+
+        if section == "full_profile" and isinstance(structured_data, dict):
+            # Normalize skills to a plain string list for suggested_skills convenience
+            raw_skills = structured_data.get("skills")
+            if isinstance(raw_skills, list):
+                suggested_skills = []
+                for s in raw_skills:
+                    if isinstance(s, str) and s.strip():
+                        suggested_skills.append(s.strip())
+                    elif isinstance(s, dict) and isinstance(s.get("name"), str) and s["name"].strip():
+                        suggested_skills.append(s["name"].strip())
+                suggested_skills = suggested_skills[:30] or None
+            bio = structured_data.get("bio")
+            if isinstance(bio, str) and bio.strip():
+                generated_text = bio.strip()
 
         # Fallback text parser if model returned bullet points instead of JSON
         if structured_data is None and section in ("experience", "projects", "education", "certifications", "languages"):
@@ -864,14 +973,11 @@ async def generate_resume(
     # Generate professional HTML content
     html_content = _generate_html_resume(raw_text, polished_text, body.template, eff_user, eff_portfolio)
 
-    # Convert HTML to PDF using xhtml2pdf
+    # Convert HTML to PDF (Playwright preferred, xhtml2pdf fallback)
     file_id = str(uuid.uuid4())
     filename = f"resume_built_{file_id[:8]}.pdf"
     file_path = str(UPLOAD_DIR / filename)
-    
-    from xhtml2pdf import pisa
-    with open(file_path, "wb") as f:
-        pisa.CreatePDF(html_content, dest=f)
+    await _write_html_to_pdf(html_content, file_path)
 
     # Upsert resume record
     existing_result = await db.execute(
@@ -980,15 +1086,11 @@ async def download_pdf(
     resume_text = _portfolio_to_resume_text(portfolio, user)
     html = _generate_html_resume(resume_text, resume_text, template, user, portfolio)
 
-    # Convert HTML to PDF using xhtml2pdf
     pdf_id = str(uuid.uuid4())[:8]
     filename = f"resume_temp_{pdf_id}.pdf"
     file_path = str(UPLOAD_DIR / filename)
-    
-    from xhtml2pdf import pisa
-    with open(file_path, "wb") as f:
-        pisa.CreatePDF(html, dest=f)
-    
+    await _write_html_to_pdf(html, file_path)
+
     user_name = f"{user.first_name or ''}_{user.last_name or ''}".strip() or "seeker"
     return FileResponse(
         path=file_path,
@@ -1020,10 +1122,7 @@ async def download_resume_post(
     pdf_id = str(uuid.uuid4())[:8]
     filename = f"resume_temp_{pdf_id}.pdf"
     file_path = str(UPLOAD_DIR / filename)
-
-    from xhtml2pdf import pisa
-    with open(file_path, "wb") as f:
-        pisa.CreatePDF(html, dest=f)
+    await _write_html_to_pdf(html, file_path)
 
     user_name = f"{getattr(eff_user, 'first_name', '')}_{getattr(eff_user, 'last_name', '')}".strip() or "seeker"
     return FileResponse(

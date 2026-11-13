@@ -4,9 +4,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.shared.models.user import User
-from app.modules.jobs_portal.schemas.interviews import InterviewCreate, InterviewOut, InterviewOutcomeUpdate
+from app.modules.jobs_portal.schemas.interviews import (
+    InterviewCreate,
+    InterviewOut,
+    InterviewOutcomeUpdate,
+    InterviewReschedule,
+)
 from app.core.dependencies import require_provider, require_verified
-from app.modules.jobs_portal.services.interview_scheduling_dbservice import create_interview, get_user_interviews, record_interview_outcome
+from app.modules.jobs_portal.services.interview_scheduling_dbservice import (
+    create_interview,
+    get_user_interviews,
+    record_interview_outcome,
+    reschedule_interview,
+)
 
 router = APIRouter(prefix="/interviews", tags=["interviews"])
 
@@ -24,6 +34,16 @@ async def get_my_interviews(
     db: AsyncSession = Depends(get_db),
 ):
     return await get_user_interviews(db, user)
+
+
+@router.patch("/{interview_id}/reschedule", response_model=InterviewOut)
+async def reschedule_interview_route(
+    interview_id: str,
+    body: InterviewReschedule,
+    user: User = Depends(require_provider),
+    db: AsyncSession = Depends(get_db),
+):
+    return await reschedule_interview(db, interview_id, body, user)
 
 
 @router.patch("/{interview_id}/outcome", response_model=InterviewOut)

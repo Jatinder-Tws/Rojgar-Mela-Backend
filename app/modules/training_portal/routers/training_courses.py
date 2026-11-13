@@ -539,6 +539,7 @@ async def apply_to_course(
             is_verified=True,  # Auto-verify on registration through application
             onboarding_complete=False,
             is_first_login=True,
+            account_origin="self",
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow()
         )

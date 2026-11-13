@@ -17,7 +17,13 @@ from app.modules.jobs_portal.models.job import JobPosting
 from app.shared.models.notification import NotificationType
 from app.shared.services.notification_service import create_notification
 from app.shared.services.audit_service import log_audit_event
-from app.modules.jobs_portal.schemas.interviews import InterviewCreate, InterviewOut, InterviewOutcomeUpdate
+from app.modules.jobs_portal.schemas.interviews import (
+    INTERVIEW_REASON_LABELS,
+    InterviewCreate,
+    InterviewOut,
+    InterviewOutcomeUpdate,
+    InterviewReschedule,
+)
 from app.modules.jobs_portal.schemas.interview_scheduling import ProviderInterviewSettingsUpdate
 from app.modules.jobs_portal.services.interview_flow import auto_schedule_block_reason
 
@@ -32,6 +38,37 @@ def _to_utc_naive(dt: datetime) -> datetime:
     if dt.tzinfo is None:
         return dt
     return dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def format_outcome_notes(
+    reason_code: Optional[str],
+    notes: Optional[str],
+) -> Optional[str]:
+    """Combine structured reason + free-text notes for storage/display."""
+    parts: List[str] = []
+    if reason_code:
+        parts.append(INTERVIEW_REASON_LABELS.get(reason_code, reason_code))
+    note = (notes or "").strip()
+    if note:
+        parts.append(note)
+    if not parts:
+        return None
+    return ". ".join(parts)
+
+
+async def _interview_out(
+    interview: Interview,
+    provider: User,
+    job_title: Optional[str] = None,
+    seeker_name: Optional[str] = None,
+) -> InterviewOut:
+    item = InterviewOut.model_validate(interview)
+    if job_title is not None:
+        item.job_title = job_title
+    if seeker_name is not None:
+        item.seeker_name = seeker_name
+    item.provider_name = f"{provider.first_name} {provider.last_name}".strip() or None
+    return item
 
 
 async def get_or_create_settings(
@@ -135,15 +172,17 @@ async def load_busy_intervals(
     start_utc: datetime,
     end_utc: datetime,
     slot_duration_minutes: int,
+    exclude_interview_id: Optional[str] = None,
 ) -> List[Tuple[datetime, datetime]]:
-    result = await db.execute(
-        select(Interview.scheduled_at).where(
-            Interview.provider_id == provider_id,
-            Interview.status == InterviewStatus.scheduled,
-            Interview.scheduled_at >= start_utc,
-            Interview.scheduled_at < end_utc,
-        )
+    q = select(Interview.scheduled_at).where(
+        Interview.provider_id == provider_id,
+        Interview.status == InterviewStatus.scheduled,
+        Interview.scheduled_at >= start_utc,
+        Interview.scheduled_at < end_utc,
     )
+    if exclude_interview_id:
+        q = q.where(Interview.id != exclude_interview_id)
+    result = await db.execute(q)
     duration = timedelta(minutes=slot_duration_minutes)
     return [
         (row[0], row[0] + duration)
@@ -342,70 +381,229 @@ async def get_user_interviews(
     return out
 
 
-async def record_interview_outcome(
+async def _require_provider_scheduled_interview(
     db: AsyncSession,
     interview_id: str,
-    body: InterviewOutcomeUpdate,
     provider: User,
-) -> InterviewOut:
+) -> Interview:
     result = await db.execute(select(Interview).where(Interview.id == interview_id))
     interview = result.scalar_one_or_none()
     if not interview:
         raise HTTPException(status_code=404, detail="Interview not found")
     if interview.provider_id != provider.id:
         raise HTTPException(status_code=403, detail="Forbidden")
-    if interview.status == InterviewStatus.completed:
-        raise HTTPException(status_code=409, detail="Interview outcome already recorded")
+    if interview.status != InterviewStatus.scheduled:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Interview is already {interview.status.value}",
+        )
+    return interview
 
-    interview.status = InterviewStatus.completed
-    if body.notes:
+
+async def reschedule_interview(
+    db: AsyncSession,
+    interview_id: str,
+    body: InterviewReschedule,
+    provider: User,
+) -> InterviewOut:
+    interview = await _require_provider_scheduled_interview(db, interview_id, provider)
+    scheduled_at = _to_utc_naive(body.scheduled_at)
+    if scheduled_at < _utc_now_naive():
+        raise HTTPException(status_code=400, detail="Cannot reschedule an interview to the past")
+
+    from app.modules.jobs_portal.services.interview_scheduling_service import assert_slot_available
+
+    settings = await get_or_create_settings(db, provider.id)
+    await assert_slot_available(
+        db,
+        provider.id,
+        scheduled_at,
+        settings.slot_duration_minutes,
+        exclude_interview_id=str(interview.id),
+    )
+
+    if interview.interview_type == InterviewType.video:
+        link = (body.meeting_link if body.meeting_link is not None else interview.meeting_link) or ""
+        if not str(link).strip():
+            raise HTTPException(status_code=400, detail="Meeting link is required for video interviews")
+        interview.meeting_link = str(link).strip()
+    if interview.interview_type == InterviewType.walk_in:
+        loc = (body.location if body.location is not None else interview.location) or ""
+        if not str(loc).strip():
+            raise HTTPException(status_code=400, detail="Location is required for walk-in interviews")
+        interview.location = str(loc).strip()
+
+    previous_at = interview.scheduled_at
+    interview.scheduled_at = scheduled_at
+    if body.scheduled_period is not None:
+        interview.scheduled_period = body.scheduled_period
+    if body.notes and body.notes.strip():
         interview.outcome_notes = body.notes.strip()
+    interview.updated_at = _utc_now_naive()
+
+    await log_audit_event(
+        db,
+        provider,
+        action="UPDATE",
+        entity_type="interview",
+        entity_id=str(interview.id),
+        entity_name=interview.title,
+        description=f"Rescheduled interview '{interview.title}'",
+        changes={
+            "previous_scheduled_at": previous_at.isoformat() if previous_at else None,
+            "scheduled_at": scheduled_at.isoformat(),
+        },
+        source_portal="job_portal",
+    )
+    await db.commit()
+    await db.refresh(interview)
+
+    job_res = await db.execute(select(JobPosting.title).where(JobPosting.id == interview.job_id))
+    job_title = job_res.scalar() or "this role"
+    await create_notification(
+        db=db,
+        user_id=interview.seeker_id,
+        type=NotificationType.match,
+        title="Interview Rescheduled",
+        message=(
+            f"{provider.first_name or 'The recruiter'} rescheduled your interview for '{job_title}'. "
+            "Open your dashboard to see the new date and time."
+        ),
+        related_job_id=str(interview.job_id),
+        related_user_id=str(provider.id),
+        auto_commit=True,
+    )
+
+    seeker_res = await db.execute(
+        select(User.first_name, User.last_name, User.email).where(User.id == interview.seeker_id)
+    )
+    seeker_data = seeker_res.first()
+    s_fn = seeker_data.first_name if seeker_data else "Unknown"
+    s_ln = seeker_data.last_name if seeker_data else "User"
+    s_email = seeker_data.email if seeker_data else None
+    if s_email:
+        try:
+            from app.shared.services.celery_tasks import queue_interview_scheduled_email
+
+            queue_interview_scheduled_email(
+                to_email=s_email,
+                seeker_name=s_fn or "there",
+                job_title=job_title,
+                company_name=provider.company_name
+                or f"{provider.first_name or ''} {provider.last_name or ''}".strip(),
+                scheduled_at=scheduled_at.isoformat(),
+                interview_type=interview.interview_type.value
+                if hasattr(interview.interview_type, "value")
+                else str(interview.interview_type),
+                meeting_link=interview.meeting_link,
+                location=interview.location,
+                agenda=interview.agenda,
+                scheduled_period=interview.scheduled_period,
+                interviewer_name=interview.interviewer_name,
+            )
+        except Exception:
+            logger.exception("Failed to queue interview reschedule email to %s", s_email)
+
+    return await _interview_out(interview, provider, job_title=job_title, seeker_name=f"{s_fn} {s_ln}")
+
+
+async def record_interview_outcome(
+    db: AsyncSession,
+    interview_id: str,
+    body: InterviewOutcomeUpdate,
+    provider: User,
+) -> InterviewOut:
+    interview = await _require_provider_scheduled_interview(db, interview_id, provider)
+
+    outcome_notes = format_outcome_notes(body.reason_code, body.notes)
+    if body.outcome in ("no_show", "cancelled", "rejected") and not outcome_notes:
+        raise HTTPException(
+            status_code=400,
+            detail="Please provide a reason or notes for this outcome",
+        )
+
+    if body.outcome == "selected":
+        interview.status = InterviewStatus.completed
+    elif body.outcome == "rejected":
+        interview.status = InterviewStatus.completed
+    elif body.outcome == "no_show":
+        interview.status = InterviewStatus.no_show
+    else:
+        interview.status = InterviewStatus.cancelled
+
+    interview.outcome_notes = outcome_notes
+    interview.updated_at = _utc_now_naive()
 
     if interview.application_id:
         app_result = await db.execute(select(Application).where(Application.id == interview.application_id))
         application = app_result.scalar_one_or_none()
         if application:
-            note = (body.notes or "").strip()
             if body.outcome == "selected":
                 application.status = ApplicationStatus.selected
                 outcome_title = "Congratulations:"
                 outcome_msg = f"You have been selected after your interview for '{interview.title}'."
-                if note:
-                    outcome_msg = f"{outcome_msg} {note}"
+                if outcome_notes:
+                    outcome_msg = f"{outcome_msg} {outcome_notes}"
                 notif_type = NotificationType.shortlisted
                 outcome_email_title = "Congratulations — You're Selected"
-            else:
+                notify = True
+            elif body.outcome == "rejected":
                 application.status = ApplicationStatus.rejected
-                application.rejection_reason = note or "Not selected after interview"
+                application.rejection_reason = outcome_notes or "Not selected after interview"
                 outcome_title = "Interview Outcome Update:"
-                outcome_msg = f"Thank you for interviewing. Unfortunately you were not selected for '{interview.title}'."
-                if note:
-                    outcome_msg = f"{outcome_msg} {note}"
+                outcome_msg = (
+                    f"Thank you for interviewing. Unfortunately you were not selected for '{interview.title}'."
+                )
+                if outcome_notes:
+                    outcome_msg = f"{outcome_msg} {outcome_notes}"
                 notif_type = NotificationType.rejected
                 outcome_email_title = "Interview Outcome Update"
-
-            await create_notification(
-                db=db,
-                user_id=interview.seeker_id,
-                type=notif_type,
-                title=outcome_title,
-                message=outcome_msg,
-                related_job_id=str(interview.job_id),
-                related_user_id=str(provider.id),
-            )
-            seeker_email_res = await db.execute(
-                select(User.email, User.first_name).where(User.id == interview.seeker_id)
-            )
-            seeker_email_row = seeker_email_res.first()
-            if seeker_email_row and seeker_email_row.email:
-                from app.shared.services.notification_service import queue_notification_email
-
-                queue_notification_email(
-                    seeker_email_row.email,
-                    outcome_email_title,
-                    outcome_msg,
-                    seeker_email_row.first_name or "there",
+                notify = True
+            elif body.outcome == "no_show":
+                # Back to shortlisted so Applied Jobs shows Shortlisted (not Interview),
+                # and recruiter can schedule again.
+                application.status = ApplicationStatus.shortlisted
+                outcome_title = "Interview update:"
+                outcome_msg = (
+                    f"Your interview for '{interview.title}' was marked as not completed "
+                    f"({outcome_notes}). The recruiter may contact you to reschedule."
                 )
+                notif_type = NotificationType.general
+                outcome_email_title = "Interview not completed"
+                notify = True
+            else:
+                application.status = ApplicationStatus.shortlisted
+                outcome_title = "Interview cancelled:"
+                outcome_msg = (
+                    f"Your interview for '{interview.title}' was cancelled ({outcome_notes})."
+                )
+                notif_type = NotificationType.general
+                outcome_email_title = "Interview cancelled"
+                notify = True
+
+            if notify:
+                await create_notification(
+                    db=db,
+                    user_id=interview.seeker_id,
+                    type=notif_type,
+                    title=outcome_title,
+                    message=outcome_msg,
+                    related_job_id=str(interview.job_id),
+                    related_user_id=str(provider.id),
+                )
+                seeker_email_res = await db.execute(
+                    select(User.email, User.first_name).where(User.id == interview.seeker_id)
+                )
+                seeker_email_row = seeker_email_res.first()
+                if seeker_email_row and seeker_email_row.email:
+                    from app.shared.services.notification_service import queue_notification_email
+
+                    queue_notification_email(
+                        seeker_email_row.email,
+                        outcome_email_title,
+                        outcome_msg,
+                        seeker_email_row.first_name or "there",
+                    )
 
     await log_audit_event(
         db,
@@ -415,7 +613,11 @@ async def record_interview_outcome(
         entity_id=str(interview.id),
         entity_name=interview.title,
         description=f"Recorded interview outcome: {body.outcome}",
-        changes={"outcome": body.outcome, "status": InterviewStatus.completed.value},
+        changes={
+            "outcome": body.outcome,
+            "status": interview.status.value,
+            "reason_code": body.reason_code,
+        },
         source_portal="job_portal",
     )
     await db.commit()
@@ -423,12 +625,15 @@ async def record_interview_outcome(
 
     job_res = await db.execute(select(JobPosting.title).where(JobPosting.id == interview.job_id))
     job_title = job_res.scalar()
-    seeker_res = await db.execute(select(User.first_name, User.last_name).where(User.id == interview.seeker_id))
+    seeker_res = await db.execute(
+        select(User.first_name, User.last_name).where(User.id == interview.seeker_id)
+    )
     seeker_data = seeker_res.first()
     s_fn, s_ln = seeker_data if seeker_data else ("Unknown", "User")
 
-    item = InterviewOut.model_validate(interview)
-    item.job_title = job_title
-    item.seeker_name = f"{s_fn} {s_ln}"
-    item.provider_name = f"{provider.first_name} {provider.last_name}"
-    return item
+    return await _interview_out(
+        interview,
+        provider,
+        job_title=job_title,
+        seeker_name=f"{s_fn} {s_ln}",
+    )

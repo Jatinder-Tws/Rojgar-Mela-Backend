@@ -1,7 +1,7 @@
 import uuid
 import enum
 from datetime import datetime
-from sqlalchemy import Boolean, Column, DateTime, Enum, Float, Integer, JSON, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Enum, Float, ForeignKey, Integer, JSON, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -105,6 +105,14 @@ class User(Base):
 
     # Registration audit
     registration_ip = Column(String(45), nullable=True)
+    created_by_id = Column(
+        UUID(as_uuid=False),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    # self | superadmin | supervisor | import | other staff role
+    account_origin = Column(String(32), nullable=True, index=True)
 
     # Login tracking / lockout (social-login PRD)
     last_login_method = Column(String(32), nullable=True)

@@ -1,7 +1,7 @@
 import logging
 from typing import List
 from fastapi import BackgroundTasks, HTTPException
-from sqlalchemy import select, and_, or_
+from sqlalchemy import select, and_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,6 +28,43 @@ EXTERNAL_LISTING_HIRING_DETAIL = (
 def _reject_if_external_listing(job: JobPosting | None) -> None:
     if job is not None and job.is_external_listing:
         raise HTTPException(status_code=400, detail=EXTERNAL_LISTING_HIRING_DETAIL)
+
+
+def assert_can_move_to_applied(
+    current_status: ApplicationStatus | str,
+    *,
+    has_scheduled_interview: bool,
+) -> None:
+    """Guard kanban/list 'move back to Applied' so open interviews / closed apps stay consistent."""
+    current = (
+        current_status
+        if isinstance(current_status, ApplicationStatus)
+        else ApplicationStatus(str(current_status))
+    )
+    if has_scheduled_interview:
+        raise HTTPException(
+            status_code=409,
+            detail="Record the result from Scheduled Interviews. This candidate already has an interview.",
+        )
+    if current in (ApplicationStatus.selected, ApplicationStatus.rejected):
+        raise HTTPException(
+            status_code=400,
+            detail="Closed applications cannot be moved back to Applied",
+        )
+    if current == ApplicationStatus.interviewing:
+        raise HTTPException(
+            status_code=400,
+            detail="Record the interview result from Scheduled Interviews first",
+        )
+    if current not in (
+        ApplicationStatus.shortlisted,
+        ApplicationStatus.auto_applied,
+        ApplicationStatus.applied,
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot set status to applied from '{current.value}'",
+        )
 
 
 def _provider_display_name(provider: User) -> str:
@@ -158,12 +195,7 @@ async def apply_to_job(
             "New Application",
             notif_msg,
         )
-    if provider:
-        try:
-            await auto_schedule_for_application(db, app, provider, job)
-            await db.commit()
-        except Exception:
-            await db.rollback()
+    # Auto-schedule runs after shortlist (not on raw apply) so recruiters review first.
     return ApplicationOut.model_validate(app)
 
 
@@ -303,15 +335,11 @@ async def get_job_applications(job_id: str, user: User, db: AsyncSession) -> Lis
 
 
 async def get_all_external_applications(user: User, db: AsyncSession) -> List[ApplicationOut]:
+    # Only candidates linked to this provider's jobs (never unscoped job_id IS NULL rows).
     result = await db.execute(
         select(ExternalCandidate, JobPosting)
-        .outerjoin(JobPosting, ExternalCandidate.job_id == JobPosting.id)
-        .where(
-            or_(
-                JobPosting.provider_id == user.id,
-                ExternalCandidate.job_id == None,
-            )
-        )
+        .join(JobPosting, ExternalCandidate.job_id == JobPosting.id)
+        .where(JobPosting.provider_id == user.id)
         .order_by(ExternalCandidate.applied_at.desc())
     )
     rows = result.all()
@@ -370,11 +398,21 @@ async def get_shortlisted_applications(user: User, db: AsyncSession) -> List[Sho
     interview_map: dict[str, Interview] = {}
     if app_ids:
         iv_result = await db.execute(
-            select(Interview).where(Interview.application_id.in_(app_ids))
+            select(Interview).where(
+                Interview.application_id.in_(app_ids),
+                Interview.status.in_([InterviewStatus.scheduled, InterviewStatus.completed]),
+            )
         )
         for iv in iv_result.scalars().all():
-            if iv.application_id:
-                interview_map[str(iv.application_id)] = iv
+            if not iv.application_id:
+                continue
+            key = str(iv.application_id)
+            current = interview_map.get(key)
+            if current is None or (
+                iv.status == InterviewStatus.scheduled
+                and current.status != InterviewStatus.scheduled
+            ):
+                interview_map[key] = iv
 
     out = []
     for app, job, seeker in rows:
@@ -631,6 +669,11 @@ async def update_application_status(
         if status == "shortlisted":
             if app.status in (ApplicationStatus.shortlisted, ApplicationStatus.interviewing, ApplicationStatus.selected):
                 raise HTTPException(status_code=409, detail="Candidate is already shortlisted")
+            if app.status == ApplicationStatus.rejected:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Rejected candidates cannot be shortlisted from here",
+                )
             app.status = ApplicationStatus.shortlisted
             await log_audit_event(
                 db,
@@ -709,10 +752,14 @@ async def update_application_status(
                 detail="Select the candidate from Scheduled Interviews after the interview",
             )
 
-        else:
-            app.status = status
-            if ai_feedback:
-                app.ai_feedback = ai_feedback
+        elif status == "applied":
+            assert_can_move_to_applied(
+                app.status,
+                has_scheduled_interview=bool(await _scheduled_interview(db, str(app.id))),
+            )
+            if app.status == ApplicationStatus.applied:
+                return ApplicationOut.model_validate(app)
+            app.status = ApplicationStatus.applied
             await log_audit_event(
                 db,
                 user,
@@ -720,11 +767,17 @@ async def update_application_status(
                 entity_type="application",
                 entity_id=str(app.id),
                 entity_name=job.title,
-                description=f"Updated candidate application status to '{status}' for '{job.title}'",
-                changes={"new_status": str(status)},
+                description=f"Moved candidate back to Applied for '{job.title}'",
+                changes={"new_status": "applied"},
                 source_portal="job_portal",
             )
             await db.commit()
+
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported status '{status}'. Use shortlisted, rejected, or applied.",
+            )
 
         await db.refresh(app)
         return ApplicationOut.model_validate(app)

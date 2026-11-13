@@ -418,11 +418,23 @@ def broadcast_bulk_email_task(campaign_id: str, job_id: Optional[str] = None, is
     retry_kwargs={"max_retries": 3, "countdown": 15},
     retry_backoff=True,
 )
-def process_bulk_candidate_import_task(job_id: str, file_path: str, role: str = "seeker"):
+def process_bulk_candidate_import_task(
+    job_id: str,
+    file_path: str,
+    role: str = "seeker",
+    created_by_id: str | None = None,
+    account_origin: str | None = None,
+):
     """Task for bulk candidate CSV import processing via ai_and_heavy queue."""
     async def _run():
         from app.modules.super_admin.services.super_admin_bulk_import import run_bulk_import_job
-        await run_bulk_import_job(job_id=job_id, file_path=file_path, role=role)
+        await run_bulk_import_job(
+            job_id=job_id,
+            file_path=file_path,
+            role=role,
+            created_by_id=created_by_id,
+            account_origin=account_origin,
+        )
 
     logger.info(f"[Task: process_bulk_candidate_import_task] Processing import job {job_id} for role {role}")
     run_async(_run())

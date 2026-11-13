@@ -222,6 +222,7 @@ async def assert_slot_available(
     provider_id: str,
     scheduled_at: datetime,
     duration_minutes: Optional[int] = None,
+    exclude_interview_id: Optional[str] = None,
 ) -> None:
     try:
         settings = await get_or_create_settings(db, provider_id)
@@ -238,6 +239,7 @@ async def assert_slot_available(
             start - timedelta(days=1),
             end + timedelta(days=1),
             duration,
+            exclude_interview_id=exclude_interview_id,
         )
         if not _is_slot_free(start, end, busy):
             next_slot = await find_next_available_slot(db, provider_id, after=start)

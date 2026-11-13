@@ -13,7 +13,7 @@ from app.modules.jobs_portal.models.job import JobPosting
 from app.shared.models.user import User, UserRole
 from app.shared.models.imported_user_password import ImportedUserPassword
 from app.modules.jobs_portal.schemas.external_candidate import ExternalCandidateCreate, ExternalCandidateOut, ExternalCandidateMatchOut
-from app.core.dependencies import hash_password, generate_secure_password
+from app.core.dependencies import hash_password, generate_secure_password, require_provider
 from app.shared.services.email_service import send_job_fair_welcome_email, send_welcome_email
 from app.modules.jobs_portal.services.public_jobs_service import (
     search_public_jobs,
@@ -142,7 +142,8 @@ async def apply_for_job(
                 address=address,
                 industry=first_industry,
                 job_role=candidate_in.sub_role,
-                is_first_login=True
+                is_first_login=True,
+                account_origin="self",
             )
             db.add(db_user)
             
@@ -537,76 +538,90 @@ async def upload_public_file(
 #     await db.refresh(candidate)
 #     return candidate
 
-@router.put("/shortlist/{candidate_id}",response_model=ExternalCandidateOut)
-async def shortlist_candidate(candidate_id:str,db:AsyncSession=Depends(get_db)):
+async def _require_owned_external_candidate(
+    candidate_id: str,
+    provider: User,
+    db: AsyncSession,
+) -> ExternalCandidate:
+    """Provider may only mutate external candidates linked to their own jobs."""
     result = await db.execute(select(ExternalCandidate).filter(ExternalCandidate.id == candidate_id))
     candidate = result.scalar_one_or_none()
     if not candidate:
         raise HTTPException(status_code=404, detail="Candidate not found")
-    if candidate.job_id:
-        linked_job = await db.execute(select(JobPosting).where(JobPosting.id == candidate.job_id))
-        linked = linked_job.scalar_one_or_none()
-        if linked and linked.is_external_listing:
-            raise HTTPException(
-                status_code=400,
-                detail="This is an official listing. Hiring is not managed on the platform.",
-            )
-    candidate.status = "shortlisted"
-    candidate.updated_at = datetime.utcnow();
-    
-    # Update corresponding Application record
-    from sqlalchemy import update, and_
-    if candidate.job_id:
-        await db.execute(
-            update(Application)
-            .where(
-                and_(
-                    Application.candidate_email == candidate.email,
-                    Application.job_id == candidate.job_id
-                )
-            )
-            .values(status=ApplicationStatus.shortlisted)
+    if not candidate.job_id:
+        raise HTTPException(
+            status_code=400,
+            detail="This candidate is not linked to one of your job postings",
         )
-    
+    linked_job = await db.execute(
+        select(JobPosting).where(
+            JobPosting.id == candidate.job_id,
+            JobPosting.provider_id == provider.id,
+        )
+    )
+    linked = linked_job.scalar_one_or_none()
+    if not linked:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if linked.is_external_listing:
+        raise HTTPException(
+            status_code=400,
+            detail="This is an official listing. Hiring is not managed on the platform.",
+        )
+    return candidate
+
+
+@router.put("/shortlist/{candidate_id}", response_model=ExternalCandidateOut)
+async def shortlist_candidate(
+    candidate_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_provider),
+):
+    candidate = await _require_owned_external_candidate(candidate_id, user, db)
+    candidate.status = "shortlisted"
+    candidate.updated_at = datetime.utcnow()
+
+    from sqlalchemy import update, and_
+
+    await db.execute(
+        update(Application)
+        .where(
+            and_(
+                Application.candidate_email == candidate.email,
+                Application.job_id == candidate.job_id,
+            )
+        )
+        .values(status=ApplicationStatus.shortlisted)
+    )
+
     await db.commit()
     await db.refresh(candidate)
     return candidate
 
+
 @router.put("/reject/{candidate_id}", response_model=ExternalCandidateOut)
-async def reject_candidate(candidate_id: str, db: AsyncSession = Depends(get_db)):
-    """
-    Reject a candidate by ID (Provider only endpoint).
-    """
-    result = await db.execute(select(ExternalCandidate).filter(ExternalCandidate.id == candidate_id))
-    candidate = result.scalar_one_or_none()
-    if not candidate:
-        raise HTTPException(status_code=404, detail="Candidate not found")
-    if candidate.job_id:
-        linked_job = await db.execute(select(JobPosting).where(JobPosting.id == candidate.job_id))
-        linked = linked_job.scalar_one_or_none()
-        if linked and linked.is_external_listing:
-            raise HTTPException(
-                status_code=400,
-                detail="This is an official listing. Hiring is not managed on the platform.",
-            )
-    
+async def reject_candidate(
+    candidate_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_provider),
+):
+    """Reject a candidate by ID (provider-owned jobs only)."""
+    candidate = await _require_owned_external_candidate(candidate_id, user, db)
     candidate.status = "rejected"
     candidate.updated_at = datetime.utcnow()
-    
-    # Update corresponding Application record
+
     from sqlalchemy import update, and_
-    if candidate.job_id:
-        await db.execute(
-            update(Application)
-            .where(
-                and_(
-                    Application.candidate_email == candidate.email,
-                    Application.job_id == candidate.job_id
-                )
+
+    await db.execute(
+        update(Application)
+        .where(
+            and_(
+                Application.candidate_email == candidate.email,
+                Application.job_id == candidate.job_id,
             )
-            .values(status=ApplicationStatus.rejected)
         )
-        
+        .values(status=ApplicationStatus.rejected)
+    )
+
     await db.commit()
     await db.refresh(candidate)
     return candidate

@@ -299,6 +299,11 @@ class AdminSeekerDetailResponse(BaseModel):
     # Job fair participation
     registered_job_fairs: Optional[List[str]] = None
 
+    # Who created this seeker account
+    account_origin: Optional[str] = None
+    created_by_name: Optional[str] = None
+    created_by_label: Optional[str] = None
+
     # Timestamps
     created_at: datetime
     updated_at: Optional[datetime] = None

@@ -251,6 +251,9 @@ class AdminUserOut(BaseModel):
     welcome_email_status: Optional[str] = None
     welcome_email_error: Optional[str] = None
     has_resume: Optional[bool] = None
+    account_origin: Optional[str] = None
+    created_by_name: Optional[str] = None
+    created_by_label: Optional[str] = None
     created_at: datetime
     last_active_at: Optional[datetime] = None
     registered_job_fairs: Optional[List[str]] = None

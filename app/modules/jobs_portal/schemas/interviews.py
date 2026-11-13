@@ -4,7 +4,30 @@ from pydantic import AliasChoices, BaseModel, Field, field_serializer, field_val
 
 InterviewTypeLiteral = Literal["video", "walk_in"]
 InterviewStatusLiteral = Literal["scheduled", "completed", "cancelled", "no_show"]
-InterviewOutcomeLiteral = Literal["selected", "rejected"]
+InterviewOutcomeLiteral = Literal["selected", "rejected", "no_show", "cancelled"]
+InterviewReasonLiteral = Literal[
+    "candidate_no_show",
+    "tech_issue",
+    "candidate_cancelled",
+    "recruiter_cancelled",
+    "position_filled",
+    "skills_gap",
+    "culture_fit",
+    "experience_mismatch",
+    "other",
+]
+
+INTERVIEW_REASON_LABELS: dict[str, str] = {
+    "candidate_no_show": "Candidate did not join",
+    "tech_issue": "Technical issue",
+    "candidate_cancelled": "Candidate cancelled",
+    "recruiter_cancelled": "Recruiter cancelled",
+    "position_filled": "Position filled / on hold",
+    "skills_gap": "Skills gap",
+    "culture_fit": "Culture / team fit",
+    "experience_mismatch": "Experience mismatch",
+    "other": "Other",
+}
 
 
 class InterviewCreate(BaseModel):
@@ -81,5 +104,36 @@ class InterviewOut(BaseModel):
 
 
 class InterviewOutcomeUpdate(BaseModel):
+    """Hire decision or non-completion disposition for a scheduled interview."""
+
     outcome: InterviewOutcomeLiteral
+    reason_code: Optional[InterviewReasonLiteral] = None
     notes: Optional[str] = None
+
+
+class InterviewReschedule(BaseModel):
+    scheduled_at: datetime
+    scheduled_period: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "scheduled_period",
+            "scheduledPeriod",
+            "schedule_period",
+            "schedulePeriod",
+        ),
+    )
+    meeting_link: Optional[str] = None
+    location: Optional[str] = None
+    notes: Optional[str] = None
+
+    @field_validator("scheduled_period", mode="before")
+    @classmethod
+    def normalize_scheduled_period(cls, v: object) -> Optional[str]:
+        if v is None:
+            return None
+        s = str(v).strip().upper()
+        if not s:
+            return None
+        if s in ("AM", "PM"):
+            return s
+        raise ValueError("scheduled_period must be 'AM' or 'PM'")

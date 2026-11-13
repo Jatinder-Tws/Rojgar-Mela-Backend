@@ -138,6 +138,7 @@ async def register(
         onboarding_complete=False,
         is_assessment_done=(body.role == "seeker"),
         hashed_password=await async_hash_password(body.password),
+        account_origin="self",
     )
 
     db.add(user)
@@ -227,6 +228,7 @@ async def send_phone_otp(body: SendPhoneOtpRequest, db: AsyncSession) -> LoginRe
             is_verified=False,
             onboarding_complete=False,
             is_assessment_done=False,
+            account_origin="self",
         )
         db.add(user)
         await db.flush()

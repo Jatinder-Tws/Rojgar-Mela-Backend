@@ -54,7 +54,7 @@ async def import_seekers(file: UploadFile, db: AsyncSession) -> dict:
         new_user = User(
             email=email, first_name=first_name, last_name=last_name,
             phone=clean_value(row.get("Mobile Number")) or "", hashed_password=hashed_pwd,
-            role=UserRole.seeker, is_verified=True,
+            role=UserRole.seeker, is_verified=True, account_origin="import",
             father_or_mother_name=clean_value(row.get("Father's / Mother's Name")),
             gender=clean_value(row.get("Gender")), address=clean_value(row.get("Address")),
             highest_qualification=clean_value(row.get("Highest Qualification")),

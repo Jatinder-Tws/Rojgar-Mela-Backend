@@ -72,6 +72,7 @@ async def _ensure_account(entry: EventLuckyEntry, db: AsyncSession) -> Optional[
         is_first_login=True,
         totp_enabled=False,
         profile_pic_url=entry.photo_url,
+        account_origin="self",
     )
     if role == UserRole.provider:
         user.company_name = (entry.organization or "")[:200]

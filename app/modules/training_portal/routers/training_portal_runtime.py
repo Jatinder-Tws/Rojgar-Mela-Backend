@@ -4752,6 +4752,8 @@ async def admin_register_and_enroll_student(
             highest_qualification=body.qualification,
             address=body.address,
         )
+        from app.shared.services.account_origin import origin_for_actor, stamp_creator
+        stamp_creator(user, origin=origin_for_actor(current_user), created_by_id=str(current_user.id))
         db.add(user)
         await db.commit()
         user_created = True

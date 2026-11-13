@@ -43,10 +43,15 @@ async def get_matched_jobs(user: User, db: AsyncSession) -> List[JobWithMatch]:
             }
 
     results = []
+    seen_job_ids: set[str] = set()
     for job, score, fit_reason, highlights, gaps in rows:
+        job_id_str = str(job.id)
+        if job_id_str in seen_job_ids:
+            continue
+        seen_job_ids.add(job_id_str)
         company = company_by_provider.get(str(job.provider_id), {})
         results.append(JobWithMatch(
-            id=str(job.id),
+            id=job_id_str,
             provider_id=str(job.provider_id),
             title=job.title,
             description=job.description,
@@ -140,10 +145,15 @@ async def get_matched_candidates(
             resumes_map[str(resume.user_id)] = resume
 
     results = []
+    seen_candidate_job_ids: set[str] = set()
     for match in matches:
         seeker = seekers_map.get(str(match.seeker_id))
         if not seeker:
             continue
+        key = f"{match.seeker_id}_{match.job_id}"
+        if key in seen_candidate_job_ids:
+            continue
+        seen_candidate_job_ids.add(key)
         resume = resumes_map.get(str(match.seeker_id))
         seeker_id = str(seeker.id)
         results.append(MatchedCandidateOut(

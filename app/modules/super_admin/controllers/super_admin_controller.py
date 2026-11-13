@@ -54,6 +54,7 @@ from app.modules.jobs_portal.models.portfolio import Portfolio
 from app.modules.jobs_portal.models.resume import Resume
 from app.modules.jobs_portal.models.roadmap import Milestone, Resource, Roadmap
 from app.shared.models.user import CompanyType, JobType, User, UserRole
+from app.shared.services.account_origin import actor_display_name, creator_label, origin_for_actor, stamp_creator
 from app.modules.jobs_portal.controllers.jobs_controller import create_job_for_provider
 from app.modules.jobs_portal.schemas.jobs import JobCreate, JobUpdate
 from app.modules.jobs_portal.services.jobs_service import (
@@ -292,6 +293,7 @@ def _user_to_admin_out(
     registered_job_fairs: Optional[List[str]] = None,
     has_resume: Optional[bool] = None,
     last_active_at: Optional[datetime] = None,
+    created_by_name: Optional[str] = None,
 ) -> AdminUserOut:
     job_type = user.job_type.value if user.job_type and hasattr(user.job_type, "value") else user.job_type
     company_type = user.company_type.value if user.company_type and hasattr(user.company_type, "value") else user.company_type
@@ -319,10 +321,33 @@ def _user_to_admin_out(
         google_maps_url=user.google_maps_url,
         profile_completion_percentage=profile_completion_percentage,
         welcome_email_status=user.welcome_email_status, welcome_email_error=user.welcome_email_error,
-        has_resume=has_resume, created_at=user.created_at,
+        has_resume=has_resume,
+        account_origin=getattr(user, "account_origin", None),
+        created_by_name=created_by_name,
+        created_by_label=creator_label(getattr(user, "account_origin", None), created_by_name),
+        created_at=user.created_at,
         last_active_at=resolved_last_active,
         registered_job_fairs=registered_job_fairs,
     )
+
+
+async def _creator_name_map(db: AsyncSession, users: List[User]) -> dict:
+    ids = list({user.created_by_id for user in users if getattr(user, "created_by_id", None)})
+    if not ids:
+        return {}
+    rows = await db.execute(
+        select(User.id, User.first_name, User.last_name, User.email).where(User.id.in_(ids))
+    )
+    names = {}
+    for uid, first, last, email in rows.all():
+        names[uid] = f"{first or ''} {last or ''}".strip() or email
+    return names
+
+
+async def _creator_name_for(db: AsyncSession, user: User) -> Optional[str]:
+    if not getattr(user, "created_by_id", None):
+        return None
+    return (await _creator_name_map(db, [user])).get(user.created_by_id)
 
 
 async def _last_active_map(db: AsyncSession, user_ids: List[str]) -> dict:
@@ -428,7 +453,12 @@ async def _apply_user_update(db: AsyncSession, user: User, body):
 
 
 def _start_background_import(
-    job_id: str, content: bytes, role: UserRole, filename: str = ""
+    job_id: str,
+    content: bytes,
+    role: UserRole,
+    filename: str = "",
+    created_by_id: Optional[str] = None,
+    account_origin: Optional[str] = None,
 ) -> None:
     import os
     from app.core.config import get_upload_dir
@@ -455,7 +485,9 @@ def _start_background_import(
         f.write(content)
 
     role_str = role.value if hasattr(role, "value") else str(role)
-    process_bulk_candidate_import_task.delay(job_id, tmp_path, role_str)
+    process_bulk_candidate_import_task.delay(
+        job_id, tmp_path, role_str, created_by_id, account_origin,
+    )
 
 
 async def super_admin_login(body: SuperAdminLoginRequest, db: AsyncSession) -> SuperAdminLoginResponse:
@@ -1687,6 +1719,7 @@ async def list_seekers(
         user_ids = [user.id for user, _, _ in page_slice]
         has_resume_ids = await _seeker_has_resume_ids(db, user_ids)
         last_active = await _last_active_map(db, user_ids)
+        creator_names = await _creator_name_map(db, [user for user, _, _ in page_slice])
         items = []
         for user, _portfolio, pct in page_slice:
             jf_titles = await _seeker_job_fair_names(db, user.id)
@@ -1698,6 +1731,7 @@ async def list_seekers(
                     registered_job_fairs=jf_titles,
                     has_resume=user.id in has_resume_ids,
                     last_active_at=last_active.get(user.id),
+                    created_by_name=creator_names.get(user.created_by_id),
                 )
             )
         return AdminUserListResponse(items=items, total=total, page=page, page_size=page_size)
@@ -1708,6 +1742,7 @@ async def list_seekers(
     user_ids = [user.id for user, _ in rows]
     has_resume_ids = await _seeker_has_resume_ids(db, user_ids)
     last_active = await _last_active_map(db, user_ids)
+    creator_names = await _creator_name_map(db, [user for user, _ in rows])
     items = []
     for user, portfolio in rows:
         pct = 0
@@ -1722,6 +1757,7 @@ async def list_seekers(
                 registered_job_fairs=jf_titles,
                 has_resume=user.id in has_resume_ids,
                 last_active_at=last_active.get(user.id),
+                created_by_name=creator_names.get(user.created_by_id),
             )
         )
     return AdminUserListResponse(items=items, total=total or 0, page=page, page_size=page_size)
@@ -1809,6 +1845,11 @@ async def create_seeker(
         salary_range=body.salary_range, experience=body.experience, is_assessment_done=True,
         welcome_email_status="pending",
     )
+    stamp_creator(
+        user,
+        origin=origin_for_actor(actor),
+        created_by_id=str(actor.id) if actor else None,
+    )
     db.add(user)
     await db.flush()
     portfolio = Portfolio(user_id=user.id)
@@ -1831,7 +1872,7 @@ async def create_seeker(
     await _email_seeker_credentials(db, user, pwd)
     await db.refresh(user)
     _queue_seeker_match_refresh(user.id)
-    return _user_to_admin_out(user, "seeker")
+    return _user_to_admin_out(user, "seeker", created_by_name=actor_display_name(actor))
 
 
 async def get_seeker(user_id: str, db: AsyncSession) -> AdminUserOut:
@@ -1845,6 +1886,7 @@ async def get_seeker(user_id: str, db: AsyncSession) -> AdminUserOut:
     return _user_to_admin_out(
         user,
         "seeker",
+        created_by_name=await _creator_name_for(db, user),
         profile_completion_percentage=pct,
         registered_job_fairs=jf_titles,
         has_resume=has_resume,
@@ -1995,6 +2037,9 @@ async def get_seeker_detail(user_id: str, db: AsyncSession) -> AdminSeekerDetail
         languages=languages,
         projects=projects,
         registered_job_fairs=jf_titles,
+        account_origin=user.account_origin,
+        created_by_name=(creator_name := await _creator_name_for(db, user)),
+        created_by_label=creator_label(user.account_origin, creator_name),
         created_at=user.created_at,
         updated_at=user.updated_at,
         last_active_at=(await _last_active_map(db, [user.id])).get(user.id),
@@ -2140,7 +2185,14 @@ async def bulk_import_seekers(
     import uuid
     job_id = str(uuid.uuid4())
     _create_job(job_id, total=0, role="seeker")
-    _start_background_import(job_id, content, UserRole.seeker, filename=filename or "")
+    _start_background_import(
+        job_id,
+        content,
+        UserRole.seeker,
+        filename=filename or "",
+        created_by_id=str(actor.id) if actor else None,
+        account_origin=origin_for_actor(actor) if actor else "import",
+    )
     if db is not None:
         from app.shared.services.audit_service import log_audit_event
         await log_audit_event(
@@ -2602,6 +2654,7 @@ SEEKER_EXPORT_FIELDS: dict[str, str] = {
     "profile_completion_percentage": "Profile Completion %",
     "has_resume": "Has Resume",
     "registered_job_fairs": "Job Fair Participation",
+    "created_by_label": "Created By",
     "is_verified": "Verified",
     "onboarding_complete": "Onboarding Complete",
     "has_password": "Has Password",
@@ -2744,6 +2797,9 @@ async def export_seekers(body: AdminUserExportRequest, db: AsyncSession) -> Stre
     needs_fairs = "registered_job_fairs" in field_keys
     needs_pct = "profile_completion_percentage" in field_keys
     has_resume_ids = await _seeker_has_resume_ids(db, [u.id for u, _ in rows_db]) if needs_resume else set()
+    creator_names = (
+        await _creator_name_map(db, [u for u, _ in rows_db]) if "created_by_label" in field_keys else {}
+    )
 
     export_rows: List[dict] = []
     for user, portfolio in rows_db:
@@ -2759,6 +2815,7 @@ async def export_seekers(body: AdminUserExportRequest, db: AsyncSession) -> Stre
             profile_completion_percentage=pct,
             registered_job_fairs=jf_titles,
             has_resume=(user.id in has_resume_ids) if needs_resume else None,
+            created_by_name=creator_names.get(user.created_by_id),
         )
         export_rows.append({k: _format_export_value(k, admin_out) for k in field_keys})
 
