@@ -1114,7 +1114,7 @@ async def send_candidate_match_email(
             "candidate_location": candidate_location,
             "candidate_skills": candidate_skills,
             "fit_reason": fit_reason,
-            "candidates_url": f"{settings.FRONTEND_URL.rstrip('/')}/provider/jobs/{job_id}/applicants",
+            "candidates_url": f"{settings.FRONTEND_URL.rstrip('/')}/ai-matches?jobId={job_id}",
             "year": datetime.utcnow().year,
             **_support_context(),
         }
