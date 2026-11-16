@@ -20,9 +20,11 @@ from app.shared.services.audit_service import log_audit_event
 from app.modules.jobs_portal.schemas.interviews import (
     INTERVIEW_REASON_LABELS,
     InterviewCreate,
+    InterviewHistoryOut,
     InterviewOut,
     InterviewOutcomeUpdate,
     InterviewReschedule,
+    InterviewTimelineItem,
 )
 from app.modules.jobs_portal.schemas.interview_scheduling import ProviderInterviewSettingsUpdate
 from app.modules.jobs_portal.services.interview_flow import auto_schedule_block_reason
@@ -385,6 +387,8 @@ async def _require_provider_scheduled_interview(
     db: AsyncSession,
     interview_id: str,
     provider: User,
+    allow_completed: bool = False,
+    allow_reschedule: bool = False,
 ) -> Interview:
     result = await db.execute(select(Interview).where(Interview.id == interview_id))
     interview = result.scalar_one_or_none()
@@ -392,6 +396,20 @@ async def _require_provider_scheduled_interview(
         raise HTTPException(status_code=404, detail="Interview not found")
     if interview.provider_id != provider.id:
         raise HTTPException(status_code=403, detail="Forbidden")
+    if allow_reschedule:
+        if interview.status not in (InterviewStatus.scheduled, InterviewStatus.no_show, InterviewStatus.cancelled):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Interview is already {interview.status.value} and cannot be rescheduled",
+            )
+        return interview
+    if allow_completed:
+        if interview.status not in (InterviewStatus.scheduled, InterviewStatus.completed):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Interview is already {interview.status.value}",
+            )
+        return interview
     if interview.status != InterviewStatus.scheduled:
         raise HTTPException(
             status_code=409,
@@ -406,7 +424,7 @@ async def reschedule_interview(
     body: InterviewReschedule,
     provider: User,
 ) -> InterviewOut:
-    interview = await _require_provider_scheduled_interview(db, interview_id, provider)
+    interview = await _require_provider_scheduled_interview(db, interview_id, provider, allow_reschedule=True)
     scheduled_at = _to_utc_naive(body.scheduled_at)
     if scheduled_at < _utc_now_naive():
         raise HTTPException(status_code=400, detail="Cannot reschedule an interview to the past")
@@ -434,12 +452,26 @@ async def reschedule_interview(
         interview.location = str(loc).strip()
 
     previous_at = interview.scheduled_at
+    previous_status = interview.status.value if hasattr(interview.status, "value") else str(interview.status)
     interview.scheduled_at = scheduled_at
     if body.scheduled_period is not None:
         interview.scheduled_period = body.scheduled_period
-    if body.notes and body.notes.strip():
-        interview.outcome_notes = body.notes.strip()
+
+    reschedule_note = (body.notes or "").strip()
+    if reschedule_note:
+        if interview.outcome_notes:
+            interview.outcome_notes = f"{interview.outcome_notes}\n[Rescheduled]: {reschedule_note}"
+        else:
+            interview.outcome_notes = f"[Rescheduled]: {reschedule_note}"
+
+    interview.status = InterviewStatus.scheduled
     interview.updated_at = _utc_now_naive()
+
+    if interview.application_id:
+        app_res = await db.execute(select(Application).where(Application.id == interview.application_id))
+        app_record = app_res.scalar_one_or_none()
+        if app_record and app_record.status != ApplicationStatus.interviewing:
+            app_record.status = ApplicationStatus.interviewing
 
     await log_audit_event(
         db,
@@ -452,6 +484,8 @@ async def reschedule_interview(
         changes={
             "previous_scheduled_at": previous_at.isoformat() if previous_at else None,
             "scheduled_at": scheduled_at.isoformat(),
+            "previous_status": previous_status,
+            "reschedule_note": reschedule_note or None,
         },
         source_portal="job_portal",
     )
@@ -513,7 +547,7 @@ async def record_interview_outcome(
     body: InterviewOutcomeUpdate,
     provider: User,
 ) -> InterviewOut:
-    interview = await _require_provider_scheduled_interview(db, interview_id, provider)
+    interview = await _require_provider_scheduled_interview(db, interview_id, provider, allow_completed=True)
 
     outcome_notes = format_outcome_notes(body.reason_code, body.notes)
     if body.outcome in ("no_show", "cancelled", "rejected") and not outcome_notes:
@@ -526,18 +560,27 @@ async def record_interview_outcome(
         interview.status = InterviewStatus.completed
     elif body.outcome == "rejected":
         interview.status = InterviewStatus.completed
+    elif body.outcome == "completed":
+        interview.status = InterviewStatus.completed
     elif body.outcome == "no_show":
         interview.status = InterviewStatus.no_show
     else:
         interview.status = InterviewStatus.cancelled
 
-    interview.outcome_notes = outcome_notes
+    if outcome_notes:
+        interview.outcome_notes = outcome_notes
     interview.updated_at = _utc_now_naive()
 
     if interview.application_id:
         app_result = await db.execute(select(Application).where(Application.id == interview.application_id))
         application = app_result.scalar_one_or_none()
         if application:
+            notify = False
+            outcome_title = "Interview update:"
+            outcome_msg = ""
+            notif_type = NotificationType.general
+            outcome_email_title = "Interview Update"
+
             if body.outcome == "selected":
                 application.status = ApplicationStatus.selected
                 outcome_title = "Congratulations:"
@@ -559,9 +602,17 @@ async def record_interview_outcome(
                 notif_type = NotificationType.rejected
                 outcome_email_title = "Interview Outcome Update"
                 notify = True
+            elif body.outcome == "completed":
+                outcome_title = "Interview completed:"
+                outcome_msg = (
+                    f"Your interview for '{interview.title}' has been marked as completed."
+                )
+                if outcome_notes:
+                    outcome_msg = f"{outcome_msg} Note: {outcome_notes}"
+                notif_type = NotificationType.general
+                outcome_email_title = "Interview Completed"
+                notify = True
             elif body.outcome == "no_show":
-                # Back to shortlisted so Applied Jobs shows Shortlisted (not Interview),
-                # and recruiter can schedule again.
                 application.status = ApplicationStatus.shortlisted
                 outcome_title = "Interview update:"
                 outcome_msg = (
@@ -617,6 +668,7 @@ async def record_interview_outcome(
             "outcome": body.outcome,
             "status": interview.status.value,
             "reason_code": body.reason_code,
+            "notes": outcome_notes,
         },
         source_portal="job_portal",
     )
@@ -636,4 +688,102 @@ async def record_interview_outcome(
         provider,
         job_title=job_title,
         seeker_name=f"{s_fn} {s_ln}",
+    )
+
+
+async def get_interview_history(
+    db: AsyncSession,
+    interview_id: str,
+    current_user: User,
+) -> InterviewHistoryOut:
+    from sqlalchemy.orm import joinedload
+    from app.shared.models.audit_log import AuditLog
+
+    result = await db.execute(
+        select(Interview)
+        .options(
+            joinedload(Interview.job),
+            joinedload(Interview.seeker),
+            joinedload(Interview.provider),
+        )
+        .where(Interview.id == interview_id)
+    )
+    interview = result.scalar_one_or_none()
+    if not interview:
+        raise HTTPException(status_code=404, detail="Interview not found")
+
+    is_admin = getattr(current_user, "role", None) in ("superadmin", "supervisor")
+    if not is_admin and current_user.id not in (interview.seeker_id, interview.provider_id):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    # Fetch audit logs for this interview
+    audit_res = await db.execute(
+        select(AuditLog)
+        .where(AuditLog.entity_type == "interview", AuditLog.entity_id == interview_id)
+        .order_by(AuditLog.created_at.asc())
+    )
+    audit_logs = audit_res.scalars().all()
+
+    timeline: list[InterviewTimelineItem] = []
+    for log in audit_logs:
+        timeline.append(
+            InterviewTimelineItem(
+                id=str(log.id),
+                action=log.action,
+                actor_name=log.actor_name,
+                actor_role=log.actor_role,
+                description=log.description,
+                created_at=log.created_at,
+                changes=log.changes if isinstance(log.changes, dict) else None,
+            )
+        )
+
+    # Initial fallback if timeline is empty
+    if not timeline:
+        p_name = ""
+        if interview.provider:
+            p_name = (interview.provider.company_name or f"{interview.provider.first_name} {interview.provider.last_name}").strip()
+        timeline.append(
+            InterviewTimelineItem(
+                id=f"init-{interview.id}",
+                action="CREATE",
+                actor_name=p_name or "Provider",
+                actor_role="provider",
+                description=f"Interview scheduled for {interview.title}",
+                created_at=interview.created_at,
+                changes={
+                    "scheduled_at": interview.scheduled_at.isoformat() if interview.scheduled_at else None,
+                    "interview_type": interview.interview_type.value if hasattr(interview.interview_type, "value") else str(interview.interview_type),
+                },
+            )
+        )
+
+    # Fetch previous or other interviews between this seeker and job
+    prev_query = (
+        select(Interview)
+        .options(
+            joinedload(Interview.job),
+            joinedload(Interview.seeker),
+            joinedload(Interview.provider),
+        )
+        .where(
+            Interview.seeker_id == interview.seeker_id,
+            Interview.job_id == interview.job_id,
+            Interview.id != interview.id,
+        )
+        .order_by(Interview.scheduled_at.desc())
+    )
+    prev_res = await db.execute(prev_query)
+    prev_records = prev_res.scalars().all()
+    previous_interviews: list[InterviewOut] = []
+    for p in prev_records:
+        job_t = p.job.title if p.job else "Unknown Job"
+        s_name = f"{p.seeker.first_name} {p.seeker.last_name}" if p.seeker else "Unknown Seeker"
+        out_p = await _interview_out(p, p.provider, job_title=job_t, seeker_name=s_name)
+        previous_interviews.append(out_p)
+
+    return InterviewHistoryOut(
+        interview_id=str(interview.id),
+        timeline=timeline,
+        previous_interviews=previous_interviews,
     )

@@ -6,6 +6,7 @@ from app.core.database import get_db
 from app.shared.models.user import User
 from app.modules.jobs_portal.schemas.interviews import (
     InterviewCreate,
+    InterviewHistoryOut,
     InterviewOut,
     InterviewOutcomeUpdate,
     InterviewReschedule,
@@ -13,6 +14,7 @@ from app.modules.jobs_portal.schemas.interviews import (
 from app.core.dependencies import require_provider, require_verified
 from app.modules.jobs_portal.services.interview_scheduling_dbservice import (
     create_interview,
+    get_interview_history,
     get_user_interviews,
     record_interview_outcome,
     reschedule_interview,
@@ -34,6 +36,15 @@ async def get_my_interviews(
     db: AsyncSession = Depends(get_db),
 ):
     return await get_user_interviews(db, user)
+
+
+@router.get("/{interview_id}/history", response_model=InterviewHistoryOut)
+async def get_interview_history_route(
+    interview_id: str,
+    user: User = Depends(require_verified),
+    db: AsyncSession = Depends(get_db),
+):
+    return await get_interview_history(db, interview_id, user)
 
 
 @router.patch("/{interview_id}/reschedule", response_model=InterviewOut)

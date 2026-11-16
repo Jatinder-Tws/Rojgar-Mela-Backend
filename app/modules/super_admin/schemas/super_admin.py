@@ -700,12 +700,25 @@ class AdminInterviewListItem(BaseModel):
     title: str
     seeker_id: Optional[str] = None
     seeker_name: str
+    seeker_email: Optional[str] = None
+    seeker_phone: Optional[str] = None
     provider_id: Optional[str] = None
     provider_name: str
+    provider_email: Optional[str] = None
+    company_name: Optional[str] = None
     job_id: Optional[str] = None
     job_title: str
+    status: str = "scheduled"
+    interview_type: str = "video"
+    meeting_link: Optional[str] = None
+    location: Optional[str] = None
+    interviewer_name: Optional[str] = None
+    agenda: Optional[str] = None
+    outcome_notes: Optional[str] = None
     scheduled_at: datetime
-    source: str
+    scheduled_period: Optional[str] = None
+    created_at: Optional[datetime] = None
+    source: str = "manual"
 
 
 class AdminAssessmentListItem(BaseModel):

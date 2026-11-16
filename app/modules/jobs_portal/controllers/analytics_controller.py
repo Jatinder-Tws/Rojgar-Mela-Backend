@@ -26,7 +26,12 @@ async def seeker_stats(user: User, db: AsyncSession) -> dict:
     thirty_days_ago = now - timedelta(days=30)
 
     # Perform all independent database operations in parallel
-    matches_res = await db.execute(select(Match.score).where(Match.seeker_id == uid))
+    matches_res = await db.execute(
+        select(func.max(Match.score))
+        .join(JobPosting, JobPosting.id == Match.job_id)
+        .where(Match.seeker_id == uid, JobPosting.is_active == True)
+        .group_by(Match.job_id)
+    )
     apps_res = await db.execute(
         select(Application.status, func.count(Application.id))
         .where(Application.seeker_id == uid)
@@ -44,7 +49,7 @@ async def seeker_stats(user: User, db: AsyncSession) -> dict:
     matched_jobs_res = await db.execute(
         select(JobPosting.required_skills)
         .join(Match, Match.job_id == JobPosting.id)
-        .where(Match.seeker_id == uid)
+        .where(Match.seeker_id == uid, JobPosting.is_active == True)
     )
     portfolio_res = await db.execute(select(Portfolio).where(Portfolio.user_id == uid))
     interviews_res = await db.execute(

@@ -4,7 +4,7 @@ from pydantic import AliasChoices, BaseModel, Field, field_serializer, field_val
 
 InterviewTypeLiteral = Literal["video", "walk_in"]
 InterviewStatusLiteral = Literal["scheduled", "completed", "cancelled", "no_show"]
-InterviewOutcomeLiteral = Literal["selected", "rejected", "no_show", "cancelled"]
+InterviewOutcomeLiteral = Literal["selected", "rejected", "no_show", "cancelled", "completed"]
 InterviewReasonLiteral = Literal[
     "candidate_no_show",
     "tech_issue",
@@ -62,6 +62,7 @@ class InterviewCreate(BaseModel):
         if s in ("AM", "PM"):
             return s
         raise ValueError("scheduled_period must be 'AM' or 'PM'")
+
 
 
 class InterviewOut(BaseModel):
@@ -137,3 +138,32 @@ class InterviewReschedule(BaseModel):
         if s in ("AM", "PM"):
             return s
         raise ValueError("scheduled_period must be 'AM' or 'PM'")
+
+
+class InterviewTimelineItem(BaseModel):
+    id: str
+    action: str
+    actor_name: Optional[str] = None
+    actor_role: Optional[str] = None
+    description: str
+    created_at: datetime
+    changes: Optional[dict] = None
+
+    @field_serializer("created_at", when_used="json")
+    def serialize_dt_as_utc_z(self, value: datetime) -> str:
+        if value.tzinfo is None:
+            dt = value.replace(tzinfo=timezone.utc)
+        else:
+            dt = value.astimezone(timezone.utc)
+        s = dt.isoformat()
+        return s.replace("+00:00", "Z") if s.endswith("+00:00") else s
+
+    class Config:
+        from_attributes = True
+
+
+class InterviewHistoryOut(BaseModel):
+    interview_id: str
+    timeline: list[InterviewTimelineItem] = []
+    previous_interviews: list[InterviewOut] = []
+
