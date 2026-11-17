@@ -92,4 +92,4 @@ async def stream_user_media(user_id: str, media_type: str, user: User = Depends(
 
 @router.get("/{user_id}", response_model=PortfolioOut)
 async def get_user_portfolio(user_id: str, user: User = Depends(require_verified), db: AsyncSession = Depends(get_db)):
-    return await ctrl_get_user_portfolio(user_id, db)
+    return await ctrl_get_user_portfolio(user_id, db, caller=user)

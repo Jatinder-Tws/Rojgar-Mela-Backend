@@ -350,6 +350,8 @@ class OnboardingRequest(BaseModel):
     company_location: Optional[str] = None
     company_address: Optional[str] = None
     company_size: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
     preferred_locations: Optional[List[str]] = None
 
     @field_validator("job_role")

@@ -17,6 +17,7 @@ from app.modules.jobs_portal.services.ai_feedback_service import generate_reject
 from app.shared.services.notification_service import create_notification
 from app.modules.jobs_portal.services.auto_interview_service import auto_schedule_for_application
 from app.shared.services.audit_service import log_audit_event
+from app.shared.services.contact_masking import is_status_shortlisted, mask_email, mask_phone
 
 logger = logging.getLogger(__name__)
 
@@ -274,15 +275,22 @@ async def get_all_applicants(user: User, db: AsyncSession) -> List[ApplicationOu
         app_out.experience_required = job.experience_required
         app_out.salary_range = job.salary_range
         app_out.source_platform = job.source_platform
+
+        is_shortlisted = is_status_shortlisted(app.status)
+        app_out.is_contact_masked = not is_shortlisted
         if seeker:
             app_out.seeker_first_name = seeker.first_name
             app_out.seeker_last_name = seeker.last_name
-            app_out.seeker_email = seeker.email
-            app_out.seeker_phone = seeker.phone
+            app_out.seeker_email = seeker.email if is_shortlisted else mask_email(seeker.email)
+            app_out.seeker_phone = seeker.phone if is_shortlisted else mask_phone(seeker.phone)
             app_out.seeker_profile_pic_url = seeker.profile_pic_url
         else:
             app_out.seeker_first_name = app.candidate_name
             app_out.seeker_last_name = ""
+            app_out.seeker_email = app.candidate_email if is_shortlisted else mask_email(app.candidate_email)
+            app_out.seeker_phone = app.candidate_phone if is_shortlisted else mask_phone(app.candidate_phone)
+            app_out.candidate_email = app.candidate_email if is_shortlisted else mask_email(app.candidate_email)
+            app_out.candidate_phone = app.candidate_phone if is_shortlisted else mask_phone(app.candidate_phone)
         out.append(app_out)
     await _attach_interview_flags(db, out)
     return out
@@ -315,19 +323,24 @@ async def get_job_applications(job_id: str, user: User, db: AsyncSession) -> Lis
         app_out.required_skills = job.required_skills if isinstance(job.required_skills, list) else []
         app_out.ai_interview_enabled = job.ai_interview_enabled
         app_out.source_platform = job.source_platform
+
+        is_shortlisted = is_status_shortlisted(app.status)
+        app_out.is_contact_masked = not is_shortlisted
         if seeker:
             app_out.seeker_first_name = seeker.first_name
             app_out.seeker_last_name = seeker.last_name
-            app_out.seeker_email = seeker.email
-            app_out.seeker_phone = seeker.phone
+            app_out.seeker_email = seeker.email if is_shortlisted else mask_email(seeker.email)
+            app_out.seeker_phone = seeker.phone if is_shortlisted else mask_phone(seeker.phone)
             app_out.seeker_profile_pic_url = seeker.profile_pic_url
         else:
             app_out.seeker_first_name = app.candidate_name
             app_out.seeker_last_name = ""
-            app_out.seeker_email = app.candidate_email
-            app_out.seeker_phone = app.candidate_phone
+            app_out.seeker_email = app.candidate_email if is_shortlisted else mask_email(app.candidate_email)
+            app_out.seeker_phone = app.candidate_phone if is_shortlisted else mask_phone(app.candidate_phone)
             app_out.candidate_experience = app.candidate_experience
             app_out.candidate_resume_url = app.candidate_resume_url
+            app_out.candidate_email = app.candidate_email if is_shortlisted else mask_email(app.candidate_email)
+            app_out.candidate_phone = app.candidate_phone if is_shortlisted else mask_phone(app.candidate_phone)
         app_out.ai_feedback = app.ai_feedback
         out.append(app_out)
     await _attach_interview_flags(db, out)
@@ -345,6 +358,7 @@ async def get_all_external_applications(user: User, db: AsyncSession) -> List[Ap
     rows = result.all()
     out = []
     for candidate, job in rows:
+        is_shortlisted = is_status_shortlisted(candidate.status)
         app_out = ApplicationOut(
             id=str(candidate.id),
             job_id=str(candidate.job_id) if candidate.job_id else "",
@@ -357,11 +371,12 @@ async def get_all_external_applications(user: User, db: AsyncSession) -> List[Ap
             source_platform=job.source_platform if job else None,
             seeker_first_name=candidate.full_name,
             seeker_last_name="",
-            seeker_email=candidate.email,
-            seeker_phone=candidate.phone,
+            seeker_email=candidate.email if is_shortlisted else mask_email(candidate.email),
+            seeker_phone=candidate.phone if is_shortlisted else mask_phone(candidate.phone),
             candidate_name=candidate.full_name,
-            candidate_email=candidate.email,
-            candidate_phone=candidate.phone,
+            candidate_email=candidate.email if is_shortlisted else mask_email(candidate.email),
+            candidate_phone=candidate.phone if is_shortlisted else mask_phone(candidate.phone),
+            is_contact_masked=not is_shortlisted,
             candidate_date_of_birth=candidate.date_of_birth,
             candidate_gender=candidate.gender,
             candidate_experience=candidate.total_experience,

@@ -251,6 +251,8 @@ class MatchedCandidateOut(BaseModel):
     profile_pic_url: Optional[str] = None
     job_id: Optional[str] = None
     provider_interested: bool = False
+    phone: Optional[str] = None
+    is_contact_masked: bool = False
 
 
 class ApplicationCreate(BaseModel):
@@ -312,6 +314,7 @@ class ApplicationOut(BaseModel):
     candidate_gender: Optional[str] = None
     candidate_year_of_passing: Optional[str] = None
     candidate_skills: Optional[str] = None
+    is_contact_masked: bool = False
 
     class Config:
         from_attributes = True

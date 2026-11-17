@@ -116,6 +116,7 @@ class PortfolioOut(BaseModel):
     industry: Optional[str] = None
     job_role: Optional[str] = None
     onboarding_complete: bool = False
+    is_contact_masked: bool = False
 
     skills: Optional[List[SkillItem]] = None
     work_experiences: Optional[List[WorkExperienceItem]] = None
@@ -167,6 +168,7 @@ class CandidateSearchItemOut(BaseModel):
     industry: Optional[str] = None
     application_status: Optional[str] = None
     is_shortlisted: bool = False
+    is_contact_masked: bool = False
 
 
 class CandidateSearchListResponse(BaseModel):

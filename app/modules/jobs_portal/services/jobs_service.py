@@ -20,6 +20,7 @@ POSTING_FORM_KEYS = {
     "engagement",
     "additional_notes",
     "experience_level",
+    "status",
 }
 
 

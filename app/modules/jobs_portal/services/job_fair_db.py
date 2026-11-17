@@ -41,7 +41,7 @@ async def list_job_fairs_db(
     db: AsyncSession,
     *,
     search: Optional[str] = None,
-    sort_by: str = "date_asc",
+    sort_by: str = "date_desc",
     page: int = 1,
     page_size: int = 12,
 ) -> tuple[list[JobFairOut], int]:
@@ -81,8 +81,8 @@ async def list_job_fairs_db(
         )
         order_map["status_asc"] = status_rank.asc()
         order_map["status_desc"] = status_rank.desc()
-    order_clause = order_map.get(sort_by, JobFair.date.asc())
-    q = q.order_by(order_clause, JobFair.id.asc())
+    order_clause = order_map.get(sort_by, JobFair.date.desc())
+    q = q.order_by(order_clause, JobFair.created_at.desc(), JobFair.id.desc())
 
     # Paginate
     q = q.limit(page_size).offset((page - 1) * page_size)

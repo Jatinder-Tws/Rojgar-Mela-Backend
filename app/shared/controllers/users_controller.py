@@ -72,9 +72,34 @@ async def complete_onboarding(
 
     if user.role == UserRole.seeker:
         res = await db.execute(select(Portfolio).where(Portfolio.user_id == user.id))
-        if not res.scalar_one_or_none():
-            db.add(Portfolio(user_id=user.id))
+        portfolio = res.scalar_one_or_none()
+        c_name = getattr(body, "city", None)
+        s_name = getattr(body, "state", None)
+        if not c_name or not s_name:
+            if body.preferred_locations:
+                for loc in body.preferred_locations:
+                    if loc and str(loc).strip():
+                        parts = [p.strip() for p in str(loc).split(",") if p.strip()]
+                        if len(parts) >= 2:
+                            c_name = c_name or parts[0]
+                            s_name = s_name or parts[1]
+                            break
+                        elif len(parts) == 1 and not c_name:
+                            c_name = parts[0]
+        if not portfolio:
+            portfolio = Portfolio(user_id=user.id, city=c_name, state=s_name)
+            db.add(portfolio)
             await db.commit()
+        else:
+            changed = False
+            if c_name and portfolio.city != c_name:
+                portfolio.city = c_name
+                changed = True
+            if s_name and portfolio.state != s_name:
+                portfolio.state = s_name
+                changed = True
+            if changed:
+                await db.commit()
 
     from app.shared.services.celery_tasks import send_welcome_email_task, invalidate_seeker_matches_task
     send_welcome_email_task.delay(user.email, user.first_name or "", role.value)

@@ -13,7 +13,8 @@ from app.modules.jobs_portal.models.portfolio import Portfolio
 from app.shared.models.user import User, UserRole
 from app.modules.jobs_portal.models.external_candidate import ExternalCandidate
 from app.modules.jobs_portal.models.job import JobPosting
-from app.modules.jobs_portal.models.application import Application
+from app.modules.jobs_portal.models.application import Application, ApplicationStatus
+from app.shared.services.contact_masking import is_status_shortlisted, mask_email, mask_phone
 from app.modules.jobs_portal.schemas.portfolio import (
     PortfolioUpdate,
     PortfolioOut,
@@ -75,7 +76,29 @@ def _calculate_completion(portfolio: Portfolio, user: User) -> tuple[int, list, 
     return calculate_completion(portfolio, user)
 
 
+def _extract_city_state_from_user(user: User) -> tuple[Optional[str], Optional[str]]:
+    city, state = None, None
+    if user.preferred_locations and isinstance(user.preferred_locations, list):
+        for loc in user.preferred_locations:
+            if loc and isinstance(loc, str) and loc.strip():
+                parts = [p.strip() for p in loc.split(",") if p.strip()]
+                if len(parts) >= 2:
+                    city, state = parts[0], parts[1]
+                    break
+                elif len(parts) == 1 and not city:
+                    city = parts[0]
+    if (not city or not state) and getattr(user, "address", None):
+        parts = [p.strip() for p in str(user.address).split(",") if p.strip()]
+        if len(parts) >= 2:
+            city = city or parts[0]
+            state = state or parts[1]
+        elif len(parts) == 1 and not city:
+            city = parts[0]
+    return city, state
+
+
 def _portfolio_to_out(portfolio: Optional[Portfolio], user: User) -> dict:
+    inferred_city, inferred_state = _extract_city_state_from_user(user)
     if portfolio is None:
         pct = 0
         json_fields = {
@@ -89,7 +112,9 @@ def _portfolio_to_out(portfolio: Optional[Portfolio], user: User) -> dict:
         portfolio_id = str(user.id)
         created_at = user.created_at
         updated_at = user.created_at
-        headline = bio = date_of_birth = city = state = None
+        headline = bio = date_of_birth = None
+        city = inferred_city
+        state = inferred_state
         linkedin_url = github_url = website_url = None
         total_experience_years = current_company = current_role = None
         intro_video_filename = intro_audio_filename = None
@@ -105,8 +130,8 @@ def _portfolio_to_out(portfolio: Optional[Portfolio], user: User) -> dict:
         bio = portfolio.bio
         date_of_birth = portfolio.date_of_birth
         gender = portfolio.gender or getattr(user, "gender", None)
-        city = portfolio.city
-        state = portfolio.state
+        city = portfolio.city or inferred_city
+        state = portfolio.state or inferred_state
         linkedin_url = portfolio.linkedin_url
         github_url = portfolio.github_url
         website_url = portfolio.website_url
@@ -155,11 +180,23 @@ def _portfolio_to_out(portfolio: Optional[Portfolio], user: User) -> dict:
 async def _get_or_create_portfolio(user: User, db: AsyncSession) -> Portfolio:
     result = await db.execute(select(Portfolio).where(Portfolio.user_id == user.id))
     portfolio = result.scalar_one_or_none()
+    inferred_city, inferred_state = _extract_city_state_from_user(user)
     if not portfolio:
-        portfolio = Portfolio(user_id=user.id)
+        portfolio = Portfolio(user_id=user.id, city=inferred_city, state=inferred_state)
         db.add(portfolio)
         await db.commit()
         await db.refresh(portfolio)
+    else:
+        changed = False
+        if inferred_city and not portfolio.city:
+            portfolio.city = inferred_city
+            changed = True
+        if inferred_state and not portfolio.state:
+            portfolio.state = inferred_state
+            changed = True
+        if changed:
+            await db.commit()
+            await db.refresh(portfolio)
     return portfolio
 
 
@@ -350,8 +387,8 @@ def _registered_to_candidate_item(
         total_experience_years=data.get("total_experience_years"),
         is_active=bool(data.get("onboarding_complete")),
         profile_pic_url=data.get("profile_pic_url"),
-        email=data.get("email"),
-        phone=data.get("phone"),
+        email=data.get("email") if is_shortlisted else mask_email(data.get("email")),
+        phone=data.get("phone") if is_shortlisted else mask_phone(data.get("phone")),
         date_of_birth=data.get("date_of_birth"),
         gender=data.get("gender"),
         skills=skill_names,
@@ -362,6 +399,7 @@ def _registered_to_candidate_item(
         industry=data.get("industry"),
         application_status=app_status,
         is_shortlisted=is_shortlisted,
+        is_contact_masked=not is_shortlisted,
     )
 
 
@@ -397,8 +435,8 @@ def _external_to_candidate_item(
         total_experience_years=exp_years,
         is_active=True,
         profile_pic_url=candidate.profile_picture_url,
-        email=candidate.email,
-        phone=candidate.phone,
+        email=candidate.email if is_shortlisted else mask_email(candidate.email),
+        phone=candidate.phone if is_shortlisted else mask_phone(candidate.phone),
         date_of_birth=candidate.date_of_birth,
         gender=candidate.gender,
         skills=skills,
@@ -409,6 +447,7 @@ def _external_to_candidate_item(
         industry=industry,
         application_status=str(candidate.status or "pending"),
         is_shortlisted=is_shortlisted,
+        is_contact_masked=not is_shortlisted,
     )
 
 
@@ -643,7 +682,7 @@ async def stream_user_media(user_id: str, media_type: str, db: AsyncSession) -> 
     return FileResponse(path, filename=filename)
 
 
-async def get_user_portfolio(user_id: str, db: AsyncSession) -> dict:
+async def get_user_portfolio(user_id: str, db: AsyncSession, caller: Optional[User] = None) -> dict:
     result = await db.execute(select(Portfolio).where(Portfolio.user_id == user_id))
     portfolio = result.scalar_one_or_none()
     if not portfolio:
@@ -652,4 +691,33 @@ async def get_user_portfolio(user_id: str, db: AsyncSession) -> dict:
     target_user = target_result.scalar_one_or_none()
     if not target_user:
         raise HTTPException(status_code=404, detail="User not found")
-    return _portfolio_to_out(portfolio, target_user)
+
+    is_masked = False
+    if caller and getattr(caller, "role", None) == UserRole.provider and str(caller.id) != str(user_id):
+        # Check if caller has shortlisted this seeker for any of their jobs
+        shortlist_stmt = (
+            select(Application.id)
+            .join(JobPosting, Application.job_id == JobPosting.id)
+            .where(
+                JobPosting.provider_id == caller.id,
+                Application.seeker_id == user_id,
+                Application.status.in_([
+                    ApplicationStatus.shortlisted,
+                    ApplicationStatus.interviewing,
+                    ApplicationStatus.selected,
+                ]),
+            )
+            .limit(1)
+        )
+        res = await db.execute(shortlist_stmt)
+        if res.scalar_one_or_none() is None:
+            is_masked = True
+
+    out = _portfolio_to_out(portfolio, target_user)
+    if is_masked:
+        out["email"] = mask_email(target_user.email)
+        out["phone"] = mask_phone(target_user.phone)
+        out["is_contact_masked"] = True
+    else:
+        out["is_contact_masked"] = False
+    return out

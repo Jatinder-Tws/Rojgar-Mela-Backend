@@ -257,13 +257,13 @@ async def list_job_fairs(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
     search: Optional[str] = Query(None),
-    sort_by: Optional[str] = Query("date_asc"),
+    sort_by: Optional[str] = Query("date_desc"),
     page: int = Query(1, ge=1),
     page_size: int = Query(12, ge=1, le=100),
 ):
     """List all Job Fairs with search, sorting, and pagination (open to all authenticated users)."""
     items, total = await list_job_fairs_db(
-        db, search=search, sort_by=sort_by or "date_asc", page=page, page_size=page_size
+        db, search=search, sort_by=sort_by or "date_desc", page=page, page_size=page_size
     )
     return JobFairListResponse(items=items, total=total, page=page, page_size=page_size)
 

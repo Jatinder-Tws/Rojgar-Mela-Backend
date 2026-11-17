@@ -316,7 +316,8 @@ async def run_live_session(
     client = genai.Client(api_key=settings.GOOGLE_API_KEY)
 
     try:
-        async with client.aio.live.connect(model=settings.GEMINI_LIVE_MODEL, config=config) as gemini_session:
+        live_model = settings.GEMINI_LIVE_MODEL or "gemini-2.5-flash-native-audio-latest"
+        async with client.aio.live.connect(model=live_model, config=config) as gemini_session:
             # Kick off the session by prompting Zoya to introduce herself and ask Question 1
             await gemini_session.send_realtime_input(
                 text=f"Hello Zoya! I am candidate {candidate_name}. Please start the session now by introducing yourself as Zoya, asking how I am doing, and asking Question 1 of {QUESTION_COUNT}."
@@ -447,6 +448,13 @@ async def run_live_session(
         pass
     except Exception as e:
         logger.error("AI Coach live session error (session_id=%s): %s", session_id, e)
+        try:
+            await websocket.send_json({
+                "type": "error",
+                "message": f"Live interview connection error: {e}. Please retry or switch to text mode."
+            })
+        except Exception:
+            pass
 
     # --- finalize: Gemini session is fully closed at this point. Opens its own
     # short-lived DB session rather than reusing one held across the whole call. ---

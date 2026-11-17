@@ -7,10 +7,12 @@ from app.modules.jobs_portal.models.job import JobPosting
 from app.modules.jobs_portal.models.match import Match
 from app.modules.jobs_portal.models.provider_interest import ProviderInterest
 from app.modules.jobs_portal.models.resume import Resume
+from app.modules.jobs_portal.models.application import Application, ApplicationStatus
 from app.shared.models.user import User
 from app.shared.models.notification import NotificationType
 from app.modules.jobs_portal.schemas.jobs import JobWithMatch, MatchedCandidateOut
 from app.shared.services.notification_service import create_notification
+from app.shared.services.contact_masking import is_status_shortlisted, mask_email, mask_phone
 
 
 def _provider_display_name(provider: User) -> str:
@@ -197,12 +199,28 @@ async def get_candidate_by_match(match_id: str, user: User, db: AsyncSession) ->
     resume = resume_result.scalar_one_or_none()
     interested_ids = await _provider_interested_seeker_ids(db, str(user.id), [match.seeker_id])
     seeker_id = str(seeker.id)
+    shortlist_stmt = (
+        select(Application.id)
+        .where(
+            Application.seeker_id == seeker.id,
+            Application.job_id == match.job_id,
+            Application.status.in_([
+                ApplicationStatus.shortlisted,
+                ApplicationStatus.interviewing,
+                ApplicationStatus.selected,
+            ]),
+        )
+        .limit(1)
+    )
+    is_shortlisted = (await db.execute(shortlist_stmt)).scalar_one_or_none() is not None
     return MatchedCandidateOut(
         match_id=match.id,
         user_id=seeker.id,
         first_name=seeker.first_name,
         last_name=seeker.last_name,
-        email=seeker.email,
+        email=seeker.email if is_shortlisted else mask_email(seeker.email),
+        phone=seeker.phone if is_shortlisted else mask_phone(seeker.phone),
+        is_contact_masked=not is_shortlisted,
         score=match.score,
         highlights=match.highlights,
         gaps=match.gaps,

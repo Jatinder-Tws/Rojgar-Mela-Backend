@@ -122,7 +122,7 @@ async def register(
         company_name = None
         phone = body.phone
         experience = body.work_status
-        preferred_locations = [body.current_city] if body.work_status == "fresher" and body.current_city else None
+        preferred_locations = [body.current_city.strip()] if body.current_city and body.current_city.strip() else None
 
     user = User(
         first_name=first_name,
@@ -143,6 +143,18 @@ async def register(
 
     db.add(user)
     await db.flush()
+
+    if body.role == "seeker":
+        try:
+            from app.modules.jobs_portal.models.portfolio import Portfolio
+            c_name, s_name = None, None
+            if body.current_city:
+                parts = [p.strip() for p in body.current_city.split(",") if p.strip()]
+                c_name = parts[0] if len(parts) >= 1 else None
+                s_name = parts[1] if len(parts) >= 2 else None
+            db.add(Portfolio(user_id=user.id, city=c_name, state=s_name))
+        except Exception as e:
+            print(f"[REGISTER] Initial portfolio seeding skipped: {e}")
 
     if resume_file and body.role == "seeker":
         try:
