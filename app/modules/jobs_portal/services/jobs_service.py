@@ -118,9 +118,22 @@ async def update_job_service(
 
 async def deactivate_job_service(job: JobPosting):
     job.is_active = False
+    meta = dict(job.source_metadata or {})
+    current = dict(meta.get("posting_form") or {})
+    current["status"] = "closed"
+    meta["posting_form"] = current
+    job.source_metadata = meta
+    flag_modified(job, "source_metadata")
+
 
 async def activate_job_service(job: JobPosting):
     job.is_active = True
+    meta = dict(job.source_metadata or {})
+    current = dict(meta.get("posting_form") or {})
+    current["status"] = "active"
+    meta["posting_form"] = current
+    job.source_metadata = meta
+    flag_modified(job, "source_metadata")
 
 
 def schedule_cleanup(background_tasks, job: JobPosting):

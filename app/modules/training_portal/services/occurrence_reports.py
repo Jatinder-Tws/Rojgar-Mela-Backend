@@ -69,7 +69,7 @@ def get_occurrence_fields(session, occurrence_date: Optional[str]) -> dict[str, 
         entry = dict(reports[date_key])
 
     live = (getattr(session, "live_occurrence_date", None) or "").strip()
-    if date_key and date_key == live:
+    if (date_key and date_key == live) or not date_key:
         # Live columns are source of truth for the active/latest occurrence.
         live_snap = snapshot_session_fields(session)
         for key, value in live_snap.items():
@@ -80,6 +80,19 @@ def get_occurrence_fields(session, occurrence_date: Optional[str]) -> dict[str, 
                 entry[key] = value
             elif key not in entry:
                 entry[key] = value
+
+    # Fallback to session live fields if not specifically populated for occurrence
+    if not entry.get("session_report") and getattr(session, "session_report", None):
+        entry["session_report"] = session.session_report
+    if not entry.get("covered_topic_ids") and getattr(session, "covered_topic_ids", None):
+        entry["covered_topic_ids"] = list(session.covered_topic_ids or [])
+    if not entry.get("attachment_url") and getattr(session, "attachment_url", None):
+        entry["attachment_url"] = session.attachment_url
+        entry["attachment_filename"] = getattr(session, "attachment_filename", None)
+    if not entry.get("late_start_reason") and getattr(session, "late_start_reason", None):
+        entry["late_start_reason"] = session.late_start_reason
+    if not entry.get("early_end_reason") and getattr(session, "early_end_reason", None):
+        entry["early_end_reason"] = session.early_end_reason
 
     return entry
 

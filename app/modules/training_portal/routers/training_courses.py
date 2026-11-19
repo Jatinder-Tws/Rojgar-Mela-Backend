@@ -273,6 +273,18 @@ async def list_courses(
     # Sorting
     if sort_by == "oldest":
         query = query.order_by(TrainingCourse.created_at.asc())
+    elif sort_by == "title_asc":
+        query = query.order_by(TrainingCourse.title.asc())
+    elif sort_by == "title_desc":
+        query = query.order_by(TrainingCourse.title.desc())
+    elif sort_by == "duration_asc":
+        query = query.order_by(TrainingCourse.duration.asc())
+    elif sort_by == "duration_desc":
+        query = query.order_by(TrainingCourse.duration.desc())
+    elif sort_by == "fee_free":
+        query = query.order_by(TrainingCourse.is_paid.asc(), TrainingCourse.created_at.desc())
+    elif sort_by == "fee_paid":
+        query = query.order_by(TrainingCourse.is_paid.desc(), TrainingCourse.created_at.desc())
     else:
         query = query.order_by(TrainingCourse.created_at.desc())
 

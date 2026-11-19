@@ -81,6 +81,13 @@ async def recalculate_batch_progress(db: AsyncSession, batch: TrainingPortalBatc
             TrainingPortalEnrollment.status != "dropped",
         )
     )
+    batch_sessions_res = await db.execute(
+        select(func.count(func.distinct(TrainingPortalAttendanceRecord.occurrence_date)))
+        .select_from(TrainingPortalAttendanceRecord)
+        .where(TrainingPortalAttendanceRecord.batch_id == batch.id)
+    )
+    batch_conducted = int(batch_sessions_res.scalar() or 0)
+
     for enrollment in enrollments_result.scalars().all():
         total_result = await db.execute(
             select(func.count()).select_from(TrainingPortalAttendanceRecord).where(
@@ -95,10 +102,11 @@ async def recalculate_batch_progress(db: AsyncSession, batch: TrainingPortalBatc
             )
         )
         present_count = int(present_result.scalar() or 0)
+        total_classes = max(batch_conducted, total_marked)
         attendance_pct = (
-            round((present_count / total_marked) * 100)
-            if total_marked > 0
-            else enrollment.attendance_percentage
+            round((present_count / total_classes) * 100)
+            if total_classes > 0
+            else 0
         )
         enrollment.attendance_percentage = attendance_pct
         enrollment.completion_percentage = completion_pct

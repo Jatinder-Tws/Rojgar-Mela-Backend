@@ -37,6 +37,16 @@ _RESUME_SIGNAL_RE = re.compile(
     r"bachelor|master|b\.?\s*tech|m\.?\s*tech|linkedin"
     r")\b"
 )
+_REPORT_OR_DOC_RE = re.compile(
+    r"(?i)\b("
+    r"audit\s+report|test\s+report|inspection\s+report|bug\s+report|"
+    r"vulnerability\s+assessment|security\s+audit|code\s+review\s+report|"
+    r"progress\s+report|status\s+report|daily\s+report|weekly\s+report|"
+    r"developer\s+report|meeting\s+minutes|financial\s+statement|"
+    r"tax\s+invoice|commercial\s+invoice|purchase\s+order|quotation|"
+    r"salary\s+slip|pay\s*slip|account\s+statement|bank\s+statement"
+    r")\b"
+)
 # Too-short aliases create false hits inside unrelated words; never harvest these from free text.
 _HARVEST_SKIP = {
     "git", "js", "ts", "py", "ml", "dl", "go", "r", "c", "c#", "c++", "sql", "rest", "node", "java",
@@ -45,12 +55,13 @@ _HARVEST_SKIP = {
 
 def detect_non_resume_document(text: str) -> Optional[str]:
     """
-    Return a short reason when the file looks like an ID/KYC document, not a resume.
+    Return a short reason when the file looks like an ID/KYC document, report, or invoice, not a resume.
     """
     blob = text or ""
     if not blob.strip():
         return None
     id_hits = len(_ID_DOC_RE.findall(blob))
+    report_hits = len(_REPORT_OR_DOC_RE.findall(blob))
     resume_hits = len(_RESUME_SIGNAL_RE.findall(blob))
     lower = blob.lower()
     strong_id = any(
@@ -69,6 +80,10 @@ def detect_non_resume_document(text: str) -> Optional[str]:
         return "identity_document"
     if id_hits >= 1 and resume_hits == 0 and len(blob.split()) < 220:
         return "identity_document"
+    if report_hits >= 1 and resume_hits <= 2:
+        return "report_or_invoice_document"
+    if resume_hits == 0 and len(blob.split()) >= 60 and not EMAIL_RE.search(blob) and not PHONE_RE.search(blob):
+        return "non_resume_document"
     return None
 
 
@@ -206,14 +221,25 @@ def extract_screening_profile(file_path: str, filename: str) -> Dict[str, Any]:
             "or corrupt. Re-upload a text-based PDF or DOCX."
         )
     elif non_resume:
-        method = "identity_document"
+        method = non_resume
         quality = "failed"
         needs_review = True
         error_code = "not_a_resume"
-        error_message = (
-            "This file looks like an identity document (e.g. Aadhaar / PAN / passport), not a resume. "
-            "Upload a CV/resume with skills and work history."
-        )
+        if non_resume == "identity_document":
+            error_message = (
+                "This file looks like an identity document (e.g. Aadhaar / PAN / passport), not a resume. "
+                "Upload a CV/resume with skills and work history."
+            )
+        elif non_resume == "report_or_invoice_document":
+            error_message = (
+                "This file appears to be a report, invoice, or documentation, not a candidate resume. "
+                "Upload a CV/resume with skills and work history."
+            )
+        else:
+            error_message = (
+                "This file does not appear to be a candidate resume. "
+                "Upload a CV/resume with skills and work history."
+            )
 
     excerpt = (raw_text or "")[:2500]
     extraction_meta = {

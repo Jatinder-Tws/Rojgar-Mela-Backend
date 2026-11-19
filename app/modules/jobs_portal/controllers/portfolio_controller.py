@@ -5,7 +5,7 @@ from typing import Optional, List
 
 from fastapi import BackgroundTasks, HTTPException, UploadFile
 from fastapi.responses import FileResponse
-from sqlalchemy import select, or_, and_, cast, String, func, literal, union_all
+from sqlalchemy import select, or_, and_, cast, String, func, literal, union_all, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings, get_upload_dir
@@ -462,6 +462,8 @@ async def search_candidates(
     page_size: int,
     provider: User,
     db: AsyncSession,
+    sort_by: Optional[str] = None,
+    sort_order: Optional[str] = "desc",
 ) -> CandidateSearchListResponse:
     page = max(1, page)
     page_size = min(max(1, page_size), 100)
@@ -491,7 +493,25 @@ async def search_candidates(
         ))
 
     seeker_ids_stmt = (
-        select(User.id.label("record_id"), literal("registered").label("source"), User.created_at.label("sort_at"))
+        select(
+            User.id.label("record_id"),
+            literal("registered").label("source"),
+            User.created_at.label("sort_at"),
+            func.lower(func.concat(func.coalesce(User.first_name, ""), " ", func.coalesce(User.last_name, ""))).label("name_sort"),
+            func.lower(func.coalesce(User.email, "")).label("email_sort"),
+            func.coalesce(User.phone, "").label("phone_sort"),
+            func.lower(func.coalesce(Portfolio.current_role, Portfolio.headline, User.job_role, "")).label("role_sort"),
+            (
+                case((Portfolio.headline.isnot(None), 10), else_=0)
+                + case((Portfolio.bio.isnot(None), 10), else_=0)
+                + case((Portfolio.city.isnot(None), 10), else_=0)
+                + case((Portfolio.current_role.isnot(None), 10), else_=0)
+                + case((Portfolio.skills.isnot(None), 20), else_=0)
+                + case((Portfolio.work_experiences.isnot(None), 20), else_=0)
+                + case((Portfolio.education.isnot(None), 20), else_=0)
+            ).label("completion_sort"),
+            cast(User.onboarding_complete, String).label("status_sort"),
+        )
         .select_from(User)
         .outerjoin(Portfolio, Portfolio.user_id == User.id)
         .where(*seeker_filters)
@@ -523,6 +543,12 @@ async def search_candidates(
             ExternalCandidate.id.label("record_id"),
             literal("external").label("source"),
             ExternalCandidate.applied_at.label("sort_at"),
+            func.lower(func.coalesce(ExternalCandidate.full_name, "")).label("name_sort"),
+            func.lower(func.coalesce(ExternalCandidate.email, "")).label("email_sort"),
+            func.coalesce(ExternalCandidate.phone, "").label("phone_sort"),
+            func.lower(func.coalesce(ExternalCandidate.sub_role, "")).label("role_sort"),
+            literal(0).label("completion_sort"),
+            cast(ExternalCandidate.status, String).label("status_sort"),
         )
         .outerjoin(JobPosting, ExternalCandidate.job_id == JobPosting.id)
         .where(*external_filters)
@@ -531,10 +557,29 @@ async def search_candidates(
     union_stmt = union_all(seeker_ids_stmt, external_ids_stmt).subquery()
     total = await db.scalar(select(func.count()).select_from(union_stmt)) or 0
 
+    sort_column = union_stmt.c.sort_at
+    if sort_by in ("full_name", "name"):
+        sort_column = union_stmt.c.name_sort
+    elif sort_by == "email":
+        sort_column = union_stmt.c.email_sort
+    elif sort_by == "phone":
+        sort_column = union_stmt.c.phone_sort
+    elif sort_by == "role":
+        sort_column = union_stmt.c.role_sort
+    elif sort_by in ("profile_completion_percentage", "completion_percentage", "completion"):
+        sort_column = union_stmt.c.completion_sort
+    elif sort_by == "status":
+        sort_column = union_stmt.c.status_sort
+    elif sort_by in ("created_at", "joined", "sort_at"):
+        sort_column = union_stmt.c.sort_at
+
+    is_asc = (sort_order or "").strip().lower() == "asc"
+    order_clause = sort_column.asc() if is_asc else sort_column.desc()
+
     page_rows = (
         await db.execute(
             select(union_stmt.c.record_id, union_stmt.c.source, union_stmt.c.sort_at)
-            .order_by(union_stmt.c.sort_at.desc())
+            .order_by(order_clause, union_stmt.c.record_id.asc())
             .offset((page - 1) * page_size)
             .limit(page_size)
         )
@@ -683,14 +728,62 @@ async def stream_user_media(user_id: str, media_type: str, db: AsyncSession) -> 
 
 
 async def get_user_portfolio(user_id: str, db: AsyncSession, caller: Optional[User] = None) -> dict:
-    result = await db.execute(select(Portfolio).where(Portfolio.user_id == user_id))
-    portfolio = result.scalar_one_or_none()
-    if not portfolio:
-        raise HTTPException(status_code=404, detail="Portfolio not found")
     target_result = await db.execute(select(User).where(User.id == user_id))
     target_user = target_result.scalar_one_or_none()
     if not target_user:
-        raise HTTPException(status_code=404, detail="User not found")
+        ext_result = await db.execute(select(ExternalCandidate).where(ExternalCandidate.id == user_id))
+        ext_candidate = ext_result.scalar_one_or_none()
+        if ext_candidate:
+            is_shortlisted = str(ext_candidate.status or "").lower() == "shortlisted"
+            if caller and getattr(caller, "role", None) == UserRole.provider:
+                if ext_candidate.job_id:
+                    job_res = await db.execute(
+                        select(JobPosting.id).where(
+                            JobPosting.id == ext_candidate.job_id,
+                            JobPosting.provider_id == caller.id,
+                        )
+                    )
+                    is_shortlisted = bool(job_res.scalar_one_or_none()) and is_shortlisted
+                else:
+                    is_shortlisted = False
+            item_out = _external_to_candidate_item(ext_candidate, is_shortlisted)
+            return {
+                "id": str(ext_candidate.id),
+                "user_id": str(ext_candidate.id),
+                "first_name": item_out.first_name,
+                "last_name": item_out.last_name,
+                "email": item_out.email,
+                "phone": item_out.phone,
+                "headline": item_out.headline,
+                "bio": None,
+                "date_of_birth": item_out.date_of_birth,
+                "gender": item_out.gender,
+                "city": item_out.city,
+                "state": None,
+                "linkedin_url": None,
+                "github_url": None,
+                "website_url": None,
+                "total_experience_years": item_out.total_experience_years,
+                "current_company": None,
+                "current_role": item_out.current_role,
+                "skills": [{"name": s} for s in (item_out.skills or [])],
+                "work_experiences": [],
+                "education": [],
+                "certifications": [],
+                "languages": [],
+                "projects": [],
+                "intro_video_filename": None,
+                "intro_audio_filename": None,
+                "has_intro_video": False,
+                "has_intro_audio": False,
+                "completion_percentage": item_out.completion_percentage,
+                "created_at": item_out.created_at,
+                "updated_at": item_out.created_at,
+                "is_contact_masked": item_out.is_contact_masked,
+            }
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    portfolio = await _get_or_create_portfolio(target_user, db)
 
     is_masked = False
     if caller and getattr(caller, "role", None) == UserRole.provider and str(caller.id) != str(user_id):

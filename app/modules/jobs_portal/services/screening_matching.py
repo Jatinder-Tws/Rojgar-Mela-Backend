@@ -72,7 +72,7 @@ def compute_role_fit(
         return {"score": 0.55, "note": "role_unspecified", "overlap": []}
 
     blob = _candidate_role_blob(profile, evidence_text).lower()
-    overlap = sorted(t for t in focus if t in blob)
+    overlap = sorted(t for t in focus if re.search(rf"\b{re.escape(t)}\b", blob))
     ratio = len(overlap) / max(len(focus), 1)
 
     if ratio >= 0.45:
@@ -123,9 +123,9 @@ def score_candidate_against_jd(
         or ""
     )
     is_non_resume = (
-        document_kind == "identity_document"
-        or extraction_meta.get("error") == "not_a_resume"
-        or extraction_meta.get("method") == "identity_document"
+        document_kind in ("identity_document", "report_or_invoice_document", "non_resume_document")
+        or extraction_meta.get("error") in ("not_a_resume", "identity_document", "empty_or_scanned")
+        or extraction_meta.get("method") in ("identity_document", "report_or_invoice_document", "non_resume_document", "empty", "failed")
         or quality == "failed"
     )
     empty_profile = (
@@ -136,12 +136,14 @@ def score_candidate_against_jd(
     )
 
     # Required skills coverage
-    if required:
+    if is_non_resume or empty_profile:
+        req_score = 0.0
+    elif required:
         req_score = (len(matched_req) + 0.4 * len(partial_req)) / max(len(required), 1)
         req_score = min(1.0, req_score)
     else:
         # No listed skills — lean on role fit; do not invent coverage for empty profiles
-        req_score = 0.0 if empty_profile else (0.2 + 0.35 * role_score)
+        req_score = 0.2 + 0.35 * role_score
 
     # Experience fit — years only matter when role is at least partially related
     cand_years = parse_experience_years(profile.get("experience_years"))
@@ -151,10 +153,11 @@ def score_candidate_against_jd(
         exp_score = 0.0
         exp_note = "no_resume_evidence"
     elif role_score < 0.25:
-        exp_score = 0.05
+        exp_score = 0.0
         exp_note = "experience_not_relevant_to_role"
     elif cand_years is None:
-        exp_score = 0.25
+        # No experience evidence provided in resume — no free baseline points
+        exp_score = 0.0
         exp_note = "experience_unverified"
     elif min_y is not None and cand_years < float(min_y):
         gap = float(min_y) - cand_years
@@ -167,38 +170,41 @@ def score_candidate_against_jd(
         exp_score = 0.55 + 0.45 * role_score
         exp_note = "within_range_role_weighted"
 
-    # Responsibilities — only count tokens that are also role-relevant / not ultra-generic
+    # Responsibilities & Projects — only award points when candidate has actual experience/projects
     jd_desc = (jd.get("description") or "").lower()
-    resp_score = 0.0 if (empty_profile or is_non_resume) else 0.15
-    if not (empty_profile or is_non_resume) and jd_desc and text and role_score >= 0.25:
+    has_work_or_projects = bool(profile.get("experience")) or bool(profile.get("projects"))
+    if empty_profile or is_non_resume or not has_work_or_projects or role_score < 0.25:
+        resp_score = 0.0
+    elif jd_desc and text and role_score >= 0.25:
         tokens = {t for t in re_tokens(jd_desc) if len(t) > 4 and t.lower() not in _STOP}
-        hit = sum(1 for t in tokens if t.lower() in text.lower())
-        resp_score = min(1.0, hit / max(min(len(tokens), 15), 1)) if tokens else 0.2
-        resp_score *= 0.4 + 0.6 * role_score
-    elif role_score < 0.25:
-        resp_score = 0.0 if (empty_profile or is_non_resume) else 0.05
+        hit = sum(1 for t in tokens if re.search(rf"\b{re.escape(t.lower())}\b", text.lower()))
+        resp_score = min(1.0, hit / max(min(len(tokens), 15), 1)) if tokens else 0.0
+        resp_score *= (0.4 + 0.6 * role_score)
+    else:
+        resp_score = 0.0
 
-    if preferred:
+    if is_non_resume or empty_profile:
+        pref_score = 0.0
+    elif preferred:
         pref_score = len(matched_pref) / max(len(preferred), 1)
         if role_score < 0.25:
             pref_score *= 0.25
     else:
-        pref_score = 0.0 if (empty_profile or is_non_resume) else (0.25 * role_score)
+        # No preferred skills specified in JD — no phantom baseline points
+        pref_score = 0.0
 
     edu_req = (jd.get("education_requirements") or "").strip().lower()
     edu_list = profile.get("education") or []
     edu_blob = " ".join(
         str(e.get("degree") if isinstance(e, dict) else e) for e in edu_list
     ).lower()
-    if empty_profile or is_non_resume:
-        # Never award free education points for ID cards / empty extracts
+    if empty_profile or is_non_resume or not edu_blob:
+        # Never award free education points for ID cards, reports, or missing education
         edu_score = 0.0
     elif not edu_req:
         edu_score = 0.2 if edu_blob else 0.0
-    elif edu_blob and any(tok in edu_blob for tok in edu_req.split() if len(tok) > 2):
+    elif any(re.search(rf"\b{re.escape(tok)}\b", edu_blob) for tok in edu_req.split() if len(tok) > 2):
         edu_score = 1.0
-    elif not edu_blob:
-        edu_score = 0.15
     else:
         edu_score = 0.35
 
@@ -215,9 +221,9 @@ def score_candidate_against_jd(
         + W_ROLE_FIT * role_score
     )
 
-    # Hard caps for clear mismatches (prevents "7 years + Agile" looking like ITI fit)
+    # Hard caps for clear mismatches (prevents non-resumes or unrelated profiles scoring high)
     if is_non_resume or empty_profile:
-        overall = min(overall, 3.0)
+        overall = 0.0
     if role["note"] == "role_mismatch":
         overall = min(overall, 22.0)
     if required and len(matched_req) == 0 and len(partial_req) == 0 and role_score < 0.35:

@@ -6,7 +6,8 @@ from typing import List, Optional
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
-from sqlalchemy import and_, exists, select, func, or_
+from sqlalchemy import and_, case, cast, exists, func, Integer, or_, select
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -530,6 +531,8 @@ async def list_free_courses(
     search: Optional[str] = Query(None),
     status_filter: Optional[str] = Query(None, alias="status"),
     source: Optional[str] = Query(None),
+    sort_by: Optional[str] = Query(None),
+    sort_dir: Optional[str] = Query("desc"),
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=100, alias="limit"),
     current_user: User = Depends(require_training_portal_user),
@@ -545,7 +548,147 @@ async def list_free_courses(
         source=source,
         published_only=not is_admin,
     )
-    query = query.order_by(TrainingPortalFreeCourse.created_at.desc())
+    is_asc = (sort_dir or "").strip().lower() == "asc"
+    if sort_by in ("course", "title"):
+        col = func.lower(TrainingPortalFreeCourse.title)
+        query = query.order_by(col.asc() if is_asc else col.desc())
+    elif sort_by == "status":
+        col = TrainingPortalFreeCourse.status
+        query = query.order_by(
+            col.asc() if is_asc else col.desc(),
+            func.lower(TrainingPortalFreeCourse.title).asc(),
+        )
+    elif sort_by == "source":
+        res_cat = (
+            select(
+                case(
+                    (TrainingPortalFreeCourseResource.category == "pdf", "PDF"),
+                    (TrainingPortalFreeCourseResource.category == "video", "YouTube"),
+                    (TrainingPortalFreeCourseResource.category == "github_repo", "GitHub"),
+                    (TrainingPortalFreeCourseResource.category == "book", "Book"),
+                    (TrainingPortalFreeCourseResource.category == "research_paper", "Research Paper"),
+                    (TrainingPortalFreeCourseResource.category == "course", "Course"),
+                    (TrainingPortalFreeCourseResource.category == "guide", "Guide"),
+                    else_="Guide",
+                )
+            )
+            .where(TrainingPortalFreeCourseResource.course_id == TrainingPortalFreeCourse.id)
+            .order_by(TrainingPortalFreeCourseResource.sort_order.asc())
+            .limit(1)
+            .correlate(TrainingPortalFreeCourse)
+            .scalar_subquery()
+        )
+        url_cat = case(
+            (
+                or_(
+                    TrainingPortalFreeCourse.youtube_url.ilike("%.pdf%"),
+                    TrainingPortalFreeCourse.youtube_url.ilike("%training_portal_free_course_files%"),
+                ),
+                "PDF",
+            ),
+            (
+                or_(
+                    TrainingPortalFreeCourse.playlist_id.isnot(None),
+                    TrainingPortalFreeCourse.youtube_url.ilike("%youtube.com%"),
+                    TrainingPortalFreeCourse.youtube_url.ilike("%youtu.be%"),
+                ),
+                "YouTube",
+            ),
+            (TrainingPortalFreeCourse.youtube_url.ilike("%github.com%"), "GitHub"),
+            (TrainingPortalFreeCourse.youtube_url.ilike("%arxiv.org%"), "Research Paper"),
+            (
+                or_(
+                    TrainingPortalFreeCourse.youtube_url.ilike("%huggingface.co%"),
+                    TrainingPortalFreeCourse.youtube_url.ilike("%deeplearning.ai%"),
+                    TrainingPortalFreeCourse.youtube_url.ilike("%coursera.org%"),
+                    TrainingPortalFreeCourse.youtube_url.ilike("%edx.org%"),
+                ),
+                "Course",
+            ),
+            (
+                or_(
+                    TrainingPortalFreeCourse.youtube_url.ilike("%manning.com%"),
+                    TrainingPortalFreeCourse.youtube_url.ilike("%oreilly.com%"),
+                    TrainingPortalFreeCourse.youtube_url.ilike("%github.io%"),
+                ),
+                "Book",
+            ),
+            else_="Guide",
+        )
+        source_label_expr = func.coalesce(res_cat, url_cat)
+        query = query.order_by(
+            source_label_expr.asc() if is_asc else source_label_expr.desc(),
+            func.lower(TrainingPortalFreeCourse.title).asc(),
+        )
+    elif sort_by == "stars":
+        stars_subq = func.coalesce(
+            select(
+                cast(
+                    func.nullif(
+                        func.jsonb_extract_path_text(
+                            cast(TrainingPortalFreeCourseResource.metadata_json, JSONB),
+                            "stars",
+                        ),
+                        "",
+                    ),
+                    Integer,
+                )
+            )
+            .where(
+                TrainingPortalFreeCourseResource.course_id == TrainingPortalFreeCourse.id,
+                TrainingPortalFreeCourseResource.metadata_json.isnot(None),
+            )
+            .limit(1)
+            .correlate(TrainingPortalFreeCourse)
+            .scalar_subquery(),
+            0,
+        )
+        query = query.order_by(
+            stars_subq.asc() if is_asc else stars_subq.desc(),
+            func.lower(TrainingPortalFreeCourse.title).asc(),
+        )
+    elif sort_by == "forks":
+        forks_subq = func.coalesce(
+            select(
+                cast(
+                    func.nullif(
+                        func.jsonb_extract_path_text(
+                            cast(TrainingPortalFreeCourseResource.metadata_json, JSONB),
+                            "forks",
+                        ),
+                        "",
+                    ),
+                    Integer,
+                )
+            )
+            .where(
+                TrainingPortalFreeCourseResource.course_id == TrainingPortalFreeCourse.id,
+                TrainingPortalFreeCourseResource.metadata_json.isnot(None),
+            )
+            .limit(1)
+            .correlate(TrainingPortalFreeCourse)
+            .scalar_subquery(),
+            0,
+        )
+        query = query.order_by(
+            forks_subq.asc() if is_asc else forks_subq.desc(),
+            func.lower(TrainingPortalFreeCourse.title).asc(),
+        )
+    elif sort_by in ("videos", "lesson_count"):
+        videos_subq = (
+            select(func.count(TrainingPortalFreeCourseLesson.id))
+            .where(TrainingPortalFreeCourseLesson.course_id == TrainingPortalFreeCourse.id)
+            .correlate(TrainingPortalFreeCourse)
+            .scalar_subquery()
+        )
+        query = query.order_by(
+            videos_subq.asc() if is_asc else videos_subq.desc(),
+            func.lower(TrainingPortalFreeCourse.title).asc(),
+        )
+    elif sort_by == "created_at":
+        query = query.order_by(TrainingPortalFreeCourse.created_at.asc() if is_asc else TrainingPortalFreeCourse.created_at.desc())
+    else:
+        query = query.order_by(TrainingPortalFreeCourse.created_at.desc())
 
     count_stmt = select(func.count()).select_from(query.order_by(None).subquery())
     total_result = await db.execute(count_stmt)

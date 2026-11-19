@@ -52,13 +52,15 @@ async def search_candidates(
     status: Optional[str] = None,
     gender: Optional[str] = None,
     industry: Optional[str] = None,
+    sort_by: Optional[str] = None,
+    sort_order: Optional[str] = "desc",
     page: int = 1,
     page_size: int = 15,
     provider: User = Depends(require_provider),
     db: AsyncSession = Depends(get_db),
 ):
     return await ctrl_search_candidates(
-        q, title, skills, status, gender, industry, page, page_size, provider, db
+        q, title, skills, status, gender, industry, page, page_size, provider, db, sort_by=sort_by, sort_order=sort_order
     )
 
 

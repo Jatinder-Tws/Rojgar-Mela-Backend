@@ -19,6 +19,8 @@ RUN apt-get update && apt-get install -y \
     fonts-dejavu-core \
     antiword \
     libreoffice-writer-nogui \
+    tesseract-ocr \
+    tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies (remove legacy broken `docx` pkg; use python-docx)
