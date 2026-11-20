@@ -192,28 +192,6 @@ async def _dispatch_portal_notification(
         severity=severity,
     )
     db.add(notif)
-
-    # Bridge to main user notifications table for Seeker / Main Web App
-    if clean_email:
-        try:
-            user_res = await db.execute(
-                select(User.id).where(func.lower(User.email) == clean_email)
-            )
-            user_id = user_res.scalar_one_or_none()
-            if user_id:
-                from app.shared.models.notification import NotificationType
-                from app.shared.services.notification_service import create_notification
-                await create_notification(
-                    db=db,
-                    user_id=str(user_id),
-                    title=title,
-                    message=description,
-                    type=NotificationType.general,
-                    auto_commit=False,
-                )
-        except Exception as e:
-            logger.warning(f"Failed to bridge training notification to user {clean_email}: {e}")
-
     return notif
 
 

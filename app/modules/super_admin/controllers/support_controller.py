@@ -337,45 +337,57 @@ async def create_ticket(body: TicketCreate, user: User, db: AsyncSession) -> Tic
     )
     db.add(initial_msg)
 
-    # Portal Notification to User
-    role_str = "teacher" if _user_role_str(user) == "teacher" else "candidate"
-    await _add_portal_notification(
-        db,
-        email=user.email,
-        role=role_str,
-        notif_type="ticket_created",
-        title="Support Ticket Created",
-        description=f"Your ticket [{ticket.ticket_number}] has been submitted.",
-        detail=ticket.subject,
-        severity="info"
-    )
-
-    # Portal Notification to Admins
-    admin_res = await db.execute(select(User.email).where(User.is_super_admin == True))
-    admin_emails = [r[0] for r in admin_res.all()]
+    is_training_source = (source == TicketSource.training.value)
     role_label = _support_ticket_role_label(user)
-    for admin_email in admin_emails:
+
+    if is_training_source:
+        # Portal Notification to User (Training Portal only)
+        role_str = "teacher" if _user_role_str(user) == "teacher" else "candidate"
         await _add_portal_notification(
             db,
-            email=admin_email,
-            role="admin",
+            email=user.email,
+            role=role_str,
             notif_type="ticket_created",
-            title="New Support Ticket",
-            description=f"[{ticket.ticket_number}] {role_label} {user.email}: {ticket.subject}",
-            detail=ticket.description,
+            title="Support Ticket Created",
+            description=f"Your ticket [{ticket.ticket_number}] has been submitted.",
+            detail=ticket.subject,
             severity="info"
         )
 
-    for supervisor_email in await _helpdesk_supervisor_emails(db):
-        await _add_portal_notification(
+        # Portal Notification to Admins (Training Portal only)
+        admin_res = await db.execute(select(User.email).where(User.is_super_admin == True))
+        admin_emails = [r[0] for r in admin_res.all()]
+        for admin_email in admin_emails:
+            await _add_portal_notification(
+                db,
+                email=admin_email,
+                role="admin",
+                notif_type="ticket_created",
+                title="New Support Ticket",
+                description=f"[{ticket.ticket_number}] {role_label} {user.email}: {ticket.subject}",
+                detail=ticket.description,
+                severity="info"
+            )
+
+        for supervisor_email in await _helpdesk_supervisor_emails(db):
+            await _add_portal_notification(
+                db,
+                email=supervisor_email,
+                role="supervisor",
+                notif_type="new_ticket_created",
+                title="New Support Ticket",
+                description=f"[{ticket.ticket_number}] {role_label} {user.email}: {ticket.subject}",
+                detail=ticket.description,
+                severity="info",
+            )
+    else:
+        # Job Portal Notification to ticket raiser
+        await _safe_notify_user(
             db,
-            email=supervisor_email,
-            role="supervisor",
-            notif_type="new_ticket_created",
-            title="New Support Ticket",
-            description=f"[{ticket.ticket_number}] {role_label} {user.email}: {ticket.subject}",
-            detail=ticket.description,
-            severity="info",
+            user_id=str(user.id),
+            title="Support Ticket Created",
+            message=f"Your ticket [{ticket.ticket_number}] has been submitted.",
+            related_job_id=str(ticket.id),
         )
 
     await db.commit()
@@ -383,43 +395,44 @@ async def create_ticket(body: TicketCreate, user: User, db: AsyncSession) -> Tic
     await db.refresh(initial_msg)
 
     # Post-commit side effects must not fail the create response (ticket already saved)
-    try:
-        await notify_super_admins(
-            db,
-            title="New Support Ticket",
-            message=f"[{ticket.ticket_number}] {role_label} {_user_display_name(user)}: {ticket.subject}",
-            type=NotificationType.general,
-            related_job_id=str(ticket.id),
-            related_user_id=str(user.id),
-        )
-    except Exception as exc:
-        logger.warning("Support admin notify after create failed (non-fatal): %s", exc)
-
-    try:
-        from app.shared.models.supervisor_profile import SupervisorProfile
-
-        supervisor_rows = await db.execute(
-            select(User.id, SupervisorProfile.permissions)
-            .join(SupervisorProfile, SupervisorProfile.user_id == User.id)
-            # User model has no is_active; supervisor profile gate is the source of truth.
-            .where(SupervisorProfile.is_active.is_(True))
-        )
-        for user_id, permissions in supervisor_rows.all():
-            perms = permissions if isinstance(permissions, list) else []
-            if "*" not in perms and "help_desk" not in perms:
-                continue
-            await create_notification(
+    if not is_training_source:
+        try:
+            await notify_super_admins(
                 db,
-                user_id=str(user_id),
                 title="New Support Ticket",
                 message=f"[{ticket.ticket_number}] {role_label} {_user_display_name(user)}: {ticket.subject}",
                 type=NotificationType.general,
                 related_job_id=str(ticket.id),
                 related_user_id=str(user.id),
-                auto_commit=True,
             )
-    except Exception as exc:
-        logger.warning("Support supervisor notify after create failed (non-fatal): %s", exc)
+        except Exception as exc:
+            logger.warning("Support admin notify after create failed (non-fatal): %s", exc)
+
+        try:
+            from app.shared.models.supervisor_profile import SupervisorProfile
+
+            supervisor_rows = await db.execute(
+                select(User.id, SupervisorProfile.permissions)
+                .join(SupervisorProfile, SupervisorProfile.user_id == User.id)
+                # User model has no is_active; supervisor profile gate is the source of truth.
+                .where(SupervisorProfile.is_active.is_(True))
+            )
+            for user_id, permissions in supervisor_rows.all():
+                perms = permissions if isinstance(permissions, list) else []
+                if "*" not in perms and "help_desk" not in perms:
+                    continue
+                await create_notification(
+                    db,
+                    user_id=str(user_id),
+                    title="New Support Ticket",
+                    message=f"[{ticket.ticket_number}] {role_label} {_user_display_name(user)}: {ticket.subject}",
+                    type=NotificationType.general,
+                    related_job_id=str(ticket.id),
+                    related_user_id=str(user.id),
+                    auto_commit=True,
+                )
+        except Exception as exc:
+            logger.warning("Support supervisor notify after create failed (non-fatal): %s", exc)
 
     initial_out = _message_to_out(initial_msg, user)
     await _safe_broadcast_message(db, ticket, initial_out)
@@ -516,32 +529,36 @@ async def add_user_message(ticket_id: str, body: TicketMessageCreate, user: User
         ticket.status = TicketStatus.open
 
     detail_preview = text or attachment_filename or "Screenshot attached"
-    # Portal Notification to Admins
-    admin_res = await db.execute(select(User.email).where(User.is_super_admin == True))
-    admin_emails = [r[0] for r in admin_res.all()]
-    for admin_email in admin_emails:
-        await _add_portal_notification(
-            db,
-            email=admin_email,
-            role="admin",
-            notif_type="ticket_reply",
-            title="Ticket Response Received",
-            description=f"[{ticket.ticket_number}] New reply from {user.email}",
-            detail=detail_preview,
-            severity="info"
-        )
+    is_training_ticket = _normalize_source(getattr(ticket, "source", None)) == TicketSource.training.value
+
+    if is_training_ticket:
+        # Portal Notification to Admins (Training Portal only)
+        admin_res = await db.execute(select(User.email).where(User.is_super_admin == True))
+        admin_emails = [r[0] for r in admin_res.all()]
+        for admin_email in admin_emails:
+            await _add_portal_notification(
+                db,
+                email=admin_email,
+                role="admin",
+                notif_type="ticket_reply",
+                title="Ticket Response Received",
+                description=f"[{ticket.ticket_number}] New reply from {user.email}",
+                detail=detail_preview,
+                severity="info"
+            )
 
     await db.commit()
     await db.refresh(msg)
 
-    await notify_super_admins(
-        db,
-        title="Ticket Reply",
-        message=f"[{ticket.ticket_number}] New reply from {_user_display_name(user)}",
-        type=NotificationType.general,
-        related_job_id=str(ticket.id),
-        related_user_id=str(user.id),
-    )
+    if not is_training_ticket:
+        await notify_super_admins(
+            db,
+            title="Ticket Reply",
+            message=f"[{ticket.ticket_number}] New reply from {_user_display_name(user)}",
+            type=NotificationType.general,
+            related_job_id=str(ticket.id),
+            related_user_id=str(user.id),
+        )
 
     msg_out = _message_to_out(msg, user)
     await _safe_broadcast_message(db, ticket, msg_out)
@@ -818,34 +835,38 @@ async def admin_reply_ticket(
         ticket.status = TicketStatus.in_progress
 
     detail_preview = text or attachment_filename or "Screenshot attached"
-    # Portal Notification to User
-    user_res = await db.execute(select(User).where(User.id == ticket.user_id))
-    t_user = user_res.scalar_one_or_none()
-    if t_user:
-        role_str = "teacher" if _user_role_str(t_user) == "teacher" else "candidate"
-        await _add_portal_notification(
-            db,
-            email=t_user.email,
-            role=role_str,
-            notif_type="ticket_commented",
-            title="Support Team Replied",
-            description=f"Your ticket [{ticket.ticket_number}] has a new reply.",
-            detail=detail_preview,
-            severity="info"
-        )
+    is_training_ticket = _normalize_source(getattr(ticket, "source", None)) == TicketSource.training.value
+
+    if is_training_ticket:
+        # Portal Notification to User (Training Portal only)
+        user_res = await db.execute(select(User).where(User.id == ticket.user_id))
+        t_user = user_res.scalar_one_or_none()
+        if t_user:
+            role_str = "teacher" if _user_role_str(t_user) == "teacher" else "candidate"
+            await _add_portal_notification(
+                db,
+                email=t_user.email,
+                role=role_str,
+                notif_type="ticket_commented",
+                title="Support Team Replied",
+                description=f"Your ticket [{ticket.ticket_number}] has a new reply.",
+                detail=detail_preview,
+                severity="info"
+            )
 
     await db.commit()
     await db.refresh(msg)
 
     msg_out = _message_to_out(msg, admin)
-    await _safe_notify_user(
-        db,
-        user_id=str(ticket.user_id),
-        title="Support Team Replied",
-        message=f"Your ticket [{ticket.ticket_number}] has a new reply from Rojgar Mela Support.",
-        related_user_id=str(admin.id),
-        related_job_id=str(ticket.id),
-    )
+    if not is_training_ticket:
+        await _safe_notify_user(
+            db,
+            user_id=str(ticket.user_id),
+            title="Support Team Replied",
+            message=f"Your ticket [{ticket.ticket_number}] has a new reply from Rojgar Mela Support.",
+            related_user_id=str(admin.id),
+            related_job_id=str(ticket.id),
+        )
     await _safe_broadcast_message(db, ticket, msg_out)
     return msg_out
 
@@ -970,21 +991,24 @@ async def admin_update_ticket_status(
     else:
         ticket.resolved_at = None
 
-    # Portal Notification to User
-    user_res = await db.execute(select(User).where(User.id == ticket.user_id))
-    t_user = user_res.scalar_one_or_none()
-    if t_user:
-        role_str = "teacher" if _user_role_str(t_user) == "teacher" else "candidate"
-        status_label = new_status.value.replace("_", " ").title()
-        await _add_portal_notification(
-            db,
-            email=t_user.email,
-            role=role_str,
-            notif_type="ticket_resolved",
-            title=f"Ticket {status_label}",
-            description=f"Your support ticket [{ticket.ticket_number}] is now {status_label.lower()}.",
-            severity="success" if new_status in (TicketStatus.resolved, TicketStatus.closed) else "info"
-        )
+    is_training_ticket = _normalize_source(getattr(ticket, "source", None)) == TicketSource.training.value
+    status_label = new_status.value.replace("_", " ").title()
+
+    if is_training_ticket:
+        # Portal Notification to User (Training Portal only)
+        user_res = await db.execute(select(User).where(User.id == ticket.user_id))
+        t_user = user_res.scalar_one_or_none()
+        if t_user:
+            role_str = "teacher" if _user_role_str(t_user) == "teacher" else "candidate"
+            await _add_portal_notification(
+                db,
+                email=t_user.email,
+                role=role_str,
+                notif_type="ticket_resolved",
+                title=f"Ticket {status_label}",
+                description=f"Your support ticket [{ticket.ticket_number}] is now {status_label.lower()}.",
+                severity="success" if new_status in (TicketStatus.resolved, TicketStatus.closed) else "info"
+            )
 
     await log_audit_event(
         db,
@@ -1004,19 +1028,20 @@ async def admin_update_ticket_status(
     await db.refresh(ticket)
 
     status_label = new_status.value.replace("_", " ").title()
-    try:
-        await create_notification(
-            db,
-            user_id=str(ticket.user_id),
-            type=NotificationType.general,
-            title=f"Ticket {status_label}",
-            message=f"Your support ticket [{ticket.ticket_number}] is now {status_label.lower()}.",
-            related_job_id=str(ticket.id),
-            email_notification=False,
-            auto_commit=True,
-        )
-    except Exception as exc:
-        logger.warning("Support status notification failed (non-fatal): %s", exc)
+    if not is_training_ticket:
+        try:
+            await create_notification(
+                db,
+                user_id=str(ticket.user_id),
+                type=NotificationType.general,
+                title=f"Ticket {status_label}",
+                message=f"Your support ticket [{ticket.ticket_number}] is now {status_label.lower()}.",
+                related_job_id=str(ticket.id),
+                email_notification=False,
+                auto_commit=True,
+            )
+        except Exception as exc:
+            logger.warning("Support status notification failed (non-fatal): %s", exc)
 
     await broadcast_ticket_update(db, ticket, action="status_changed")
 
