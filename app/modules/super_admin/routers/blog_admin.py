@@ -17,6 +17,7 @@ from app.modules.super_admin.schemas.ai_blog import (
     AIBlogImageGenerateRequest,
 )
 from app.modules.super_admin.schemas.blog_admin import (
+    BlogAuthorListResponse,
     BlogCategoryListResponse,
     BlogPostCreate,
     BlogPostListResponse,
@@ -104,6 +105,16 @@ async def get_admin_categories(
     """List all distinct blog categories and their post counts."""
     categories = await blog_service.get_blog_categories(db, public_only=False)
     return BlogCategoryListResponse(categories=categories)
+
+
+@router.get("/authors", response_model=BlogAuthorListResponse)
+async def get_admin_blog_authors(
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_super_admin_or_permission("blogs")),
+):
+    """List distinct authors used across existing blog posts."""
+    authors = await blog_service.list_distinct_authors(db)
+    return BlogAuthorListResponse(authors=authors)
 
 
 @router.get("/{blog_id}", response_model=BlogPostOut)

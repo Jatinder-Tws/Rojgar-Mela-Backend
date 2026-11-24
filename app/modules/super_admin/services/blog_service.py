@@ -52,10 +52,10 @@ def resolve_publish_status(
     author_avatar: Optional[str],
     cover_image: Optional[str],
 ) -> str:
-    """A post may only be 'published' when it has both an author avatar and a cover
-    image. Otherwise it is forced back to 'draft' so it drops out of public view."""
+    """A post may only be 'published' when it has a cover image. Author avatar
+    is optional since avatar placeholder is supported. Otherwise it is forced back to 'draft'."""
     resolved = status or "published"
-    has_required_media = bool((author_avatar or "").strip()) and bool((cover_image or "").strip())
+    has_required_media = bool((cover_image or "").strip())
     if resolved == "published" and not has_required_media:
         return "draft"
     return resolved
@@ -308,3 +308,38 @@ async def react_to_blog_post(db: AsyncSession, slug: str, reaction_type: str = "
     await db.commit()
     await db.refresh(post)
     return post
+
+
+async def list_distinct_authors(db: AsyncSession) -> List[Dict[str, Any]]:
+    """Return distinct authors used across existing blog posts."""
+    query = (
+        select(
+            BlogPost.author_name,
+            BlogPost.author_role,
+            BlogPost.author_avatar,
+            BlogPost.author_bio,
+            func.count(BlogPost.id).label("posts_count"),
+        )
+        .where(BlogPost.author_name.isnot(None))
+        .where(BlogPost.author_name != "")
+        .group_by(
+            BlogPost.author_name,
+            BlogPost.author_role,
+            BlogPost.author_avatar,
+            BlogPost.author_bio,
+        )
+        .order_by(func.count(BlogPost.id).desc())
+    )
+    result = await db.execute(query)
+    rows = result.all()
+    return [
+        {
+            "name": row[0],
+            "role": row[1] or "",
+            "avatar": normalize_blog_media_url(row[2]) or "",
+            "bio": row[3] or "",
+            "posts_count": row[4],
+        }
+        for row in rows
+        if row[0]
+    ]

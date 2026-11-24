@@ -175,6 +175,18 @@ class BlogCategoryListResponse(BaseModel):
     categories: List[BlogCategoryOut]
 
 
+class BlogAuthorOut(BaseModel):
+    name: str
+    role: Optional[str] = None
+    avatar: Optional[str] = None
+    bio: Optional[str] = None
+    posts_count: int = 0
+
+
+class BlogAuthorListResponse(BaseModel):
+    authors: List[BlogAuthorOut]
+
+
 class BlogSeedResponse(BaseModel):
     message: str
     seeded_count: int

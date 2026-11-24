@@ -3639,7 +3639,7 @@ async def list_leave_requests(
     db: AsyncSession = Depends(get_db),
 ):
     query = select(TrainingPortalLeaveRequest).order_by(TrainingPortalLeaveRequest.created_at.desc())
-    is_admin = getattr(current_user, "is_super_admin", False)
+    is_admin = _has_admin_scope(current_user)
     user_email = (current_user.email or "").lower()
     user_role = getattr(current_user, "role", None)
 
@@ -3882,22 +3882,6 @@ async def create_teacher_leave_request(
     )
 
     # Notify admins
-    admin_res = await db.execute(select(User.email).where(User.is_super_admin == True))
-    admin_emails = [row[0] for row in admin_res.all()]
-    for admin_email in admin_emails:
-        db.add(
-            TrainingPortalCandidateNotification(
-                id=str(uuid.uuid4()),
-                candidate_email=admin_email,
-                recipient_role="admin",
-                notification_type="teacher_leave_submitted",
-                title="Teacher Leave Request",
-                description=f"Teacher {teacher_name} has requested leave for {body.date}.",
-                detail=reason,
-                event_date=body.date,
-                severity="info",
-            )
-        )
     await _notify_admins(
         db=db,
         notification_type="teacher_leave_submitted",
@@ -3927,7 +3911,7 @@ async def review_leave_request(
     if leave.status != "pending":
         raise HTTPException(status_code=400, detail="Leave request already reviewed")
 
-    is_admin = getattr(current_user, "is_super_admin", False)
+    is_admin = _has_admin_scope(current_user)
     user_role = getattr(current_user, "role", None)
     new_status = _leave_status_label(body.status)
 
@@ -3997,7 +3981,7 @@ async def list_behavior_reports(
         TrainingPortalBehaviorReport.report_date.desc(),
         TrainingPortalBehaviorReport.created_at.desc(),
     )
-    is_admin = getattr(current_user, "is_super_admin", False)
+    is_admin = _has_admin_scope(current_user)
     user_role = getattr(current_user, "role", None)
     user_email = (current_user.email or "").strip().lower()
 
@@ -4039,7 +4023,7 @@ async def create_behavior_report(
     db: AsyncSession = Depends(get_db),
 ):
     user_role = getattr(current_user, "role", None)
-    is_admin = getattr(current_user, "is_super_admin", False)
+    is_admin = _has_admin_scope(current_user)
     if user_role != "teacher" and not is_admin:
         raise HTTPException(status_code=403, detail="Only teachers can submit behavior reports")
 
@@ -4189,7 +4173,13 @@ async def list_notifications(
         base_query = base_query.where(
             or_(
                 func.lower(TrainingPortalCandidateNotification.candidate_email) == user_email,
-                TrainingPortalCandidateNotification.recipient_role.in_(["admin", "supervisor"])
+                and_(
+                    TrainingPortalCandidateNotification.recipient_role.in_(["admin", "supervisor"]),
+                    or_(
+                        TrainingPortalCandidateNotification.candidate_email.is_(None),
+                        TrainingPortalCandidateNotification.candidate_email == "",
+                    ),
+                ),
             )
         )
     else:
@@ -4247,7 +4237,13 @@ async def mark_notifications_read(
         query = query.where(
             or_(
                 func.lower(TrainingPortalCandidateNotification.candidate_email) == user_email,
-                TrainingPortalCandidateNotification.recipient_role.in_(["admin", "supervisor"])
+                and_(
+                    TrainingPortalCandidateNotification.recipient_role.in_(["admin", "supervisor"]),
+                    or_(
+                        TrainingPortalCandidateNotification.candidate_email.is_(None),
+                        TrainingPortalCandidateNotification.candidate_email == "",
+                    ),
+                ),
             )
         )
     else:
@@ -4285,7 +4281,13 @@ async def clear_all_notifications(
     if is_admin:
         del_cond = or_(
             func.lower(TrainingPortalCandidateNotification.candidate_email) == user_email,
-            TrainingPortalCandidateNotification.recipient_role.in_(["admin", "supervisor"])
+            and_(
+                TrainingPortalCandidateNotification.recipient_role.in_(["admin", "supervisor"]),
+                or_(
+                    TrainingPortalCandidateNotification.candidate_email.is_(None),
+                    TrainingPortalCandidateNotification.candidate_email == "",
+                ),
+            ),
         )
     else:
         del_cond = and_(
@@ -4319,8 +4321,14 @@ async def delete_notification(
             TrainingPortalCandidateNotification.id == id,
             or_(
                 func.lower(TrainingPortalCandidateNotification.candidate_email) == user_email,
-                TrainingPortalCandidateNotification.recipient_role.in_(["admin", "supervisor"])
-            )
+                and_(
+                    TrainingPortalCandidateNotification.recipient_role.in_(["admin", "supervisor"]),
+                    or_(
+                        TrainingPortalCandidateNotification.candidate_email.is_(None),
+                        TrainingPortalCandidateNotification.candidate_email == "",
+                    ),
+                ),
+            ),
         )
     else:
         match_cond = and_(
@@ -4350,7 +4358,7 @@ async def list_transactions(
     db: AsyncSession = Depends(get_db),
 ):
     query = select(TrainingPortalTransaction).order_by(TrainingPortalTransaction.created_at.desc())
-    is_admin = getattr(current_user, "is_super_admin", False)
+    is_admin = _has_admin_scope(current_user)
     if not is_admin:
         query = query.where(TrainingPortalTransaction.candidate_email == (current_user.email or ""))
     elif candidate_email:
@@ -4375,7 +4383,7 @@ async def get_transaction_invoice(
         raise HTTPException(status_code=404, detail="Transaction not found")
     if transaction.transaction_type != "payment":
         raise HTTPException(status_code=400, detail="Invoice is available only for payment transactions")
-    if transaction.candidate_email != (current_user.email or "") and not getattr(current_user, "is_super_admin", False):
+    if transaction.candidate_email != (current_user.email or "") and not _has_admin_scope(current_user):
         raise HTTPException(status_code=403, detail="Not authorized to view this invoice")
     if not transaction.enrollment_id:
         raise HTTPException(status_code=404, detail="Linked enrollment not found for this transaction")
@@ -4401,7 +4409,7 @@ async def get_latest_enrollment_invoice(
     enrollment = enrollment_result.scalar_one_or_none()
     if not enrollment:
         raise HTTPException(status_code=404, detail="Enrollment not found")
-    if enrollment.candidate_email != (current_user.email or "") and not getattr(current_user, "is_super_admin", False):
+    if enrollment.candidate_email != (current_user.email or "") and not _has_admin_scope(current_user):
         raise HTTPException(status_code=403, detail="Not authorized to view this invoice")
 
     transaction_result = await db.execute(
@@ -4432,7 +4440,7 @@ async def refund_request_eligibility(
     enrollment = result.scalar_one_or_none()
     if not enrollment:
         raise HTTPException(status_code=404, detail="Enrollment not found")
-    if enrollment.candidate_email != (current_user.email or "") and not getattr(current_user, "is_super_admin", False):
+    if enrollment.candidate_email != (current_user.email or "") and not _has_admin_scope(current_user):
         raise HTTPException(status_code=403, detail="Not your enrollment")
     eligible, message = await _is_refund_request_eligible(db, enrollment)
     return {"eligible": eligible, "message": message, "paid_amount": enrollment.paid_amount}
@@ -4445,7 +4453,7 @@ async def list_refund_requests(
     db: AsyncSession = Depends(get_db),
 ):
     query = select(TrainingPortalRefundRequest).order_by(TrainingPortalRefundRequest.requested_at.desc())
-    is_admin = getattr(current_user, "is_super_admin", False)
+    is_admin = _has_admin_scope(current_user)
     if not is_admin:
         query = query.where(TrainingPortalRefundRequest.candidate_email == (current_user.email or ""))
     if status_filter:

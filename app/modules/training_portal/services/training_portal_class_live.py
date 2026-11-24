@@ -29,8 +29,16 @@ ReminderTier = Literal[30, 15]
 
 
 def _parse_time_12h(value: str) -> Optional[time]:
-    raw = (value or "").strip()
-    for fmt in ("%I:%M %p", "%I %p", "%H:%M"):
+    raw = (value or "").strip().replace("\u00a0", " ").replace("\u202f", " ").replace("\u2007", " ")
+    for fmt in (
+        "%I:%M %p",
+        "%I %p",
+        "%H:%M",
+        "%I:%M:%S %p",
+        "%H:%M:%S",
+        "%I:%M%p",
+        "%I%p",
+    ):
         try:
             return datetime.strptime(raw, fmt).time()
         except ValueError:

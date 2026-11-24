@@ -135,8 +135,8 @@ async def list_portal_courses(
 
     is_super_admin = (
         getattr(current_user, "is_super_admin", False)
-        or (hasattr(current_user.role, "value") and current_user.role.value == "superadmin")
-        or (str(current_user.role or "") == "superadmin")
+        or (hasattr(current_user.role, "value") and current_user.role.value in ("superadmin", "supervisor"))
+        or (str(current_user.role or "") in ("superadmin", "supervisor"))
     )
 
     if search and search.strip():
