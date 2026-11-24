@@ -7,6 +7,11 @@ GPT calls are batched to minimize API hits and token usage.
 from __future__ import annotations
 import asyncio
 import json
+import logging
+import random
+import re
+import uuid
+
 from typing import List, Optional, Protocol, runtime_checkable
 
 from openai import AsyncOpenAI
@@ -14,12 +19,19 @@ import google.genai as genai
 from app.core.config import settings
 from app.shared.services.gemini_resilient import GeminiServiceUnavailable, generate_content_resilient
 
+logger = logging.getLogger(__name__)
+
 
 @runtime_checkable
 class AIProvider(Protocol):
     async def embed(self, text: str) -> List[float]: ...
-    async def chat_completion(self, system: str, user: str) -> str: ...
-    async def chat_completion_with_usage(self, system: str, user: str) -> tuple[str, int]: ...
+    async def chat_completion(self, system: str, user: str, temperature: float | None = None) -> str: ...
+    async def chat_completion_with_usage(
+        self, system: str, user: str, temperature: float | None = None
+    ) -> tuple[str, int]: ...
+
+
+DEFAULT_TEMPERATURE = 0.2
 
 
 class GeminiAdapter:
@@ -36,31 +48,25 @@ class GeminiAdapter:
         )
         return response.embeddings[0].values
 
-    async def chat_completion(self, system: str, user: str) -> str:
-        combined_prompt = f"{system}\n\n{user}"
-        response = await generate_content_resilient(
-            [combined_prompt],
-            config={
-                "temperature": 0.2,
-                "max_output_tokens": 8192,
-                "response_mime_type": "application/json",
-            },
-        )
-        return response.text or ""
+    async def chat_completion(self, system: str, user: str, temperature: float | None = None) -> str:
+        text, _ = await self.chat_completion_with_usage(system, user, temperature)
+        return text
 
-    async def chat_completion_with_usage(self, system: str, user: str) -> tuple[str, int]:
+    async def chat_completion_with_usage(
+        self, system: str, user: str, temperature: float | None = None
+    ) -> tuple[str, int]:
         combined_prompt = f"{system}\n\n{user}"
         response = await generate_content_resilient(
             [combined_prompt],
             config={
-                "temperature": 0.2,
+                "temperature": DEFAULT_TEMPERATURE if temperature is None else temperature,
                 "max_output_tokens": 8192,
                 "response_mime_type": "application/json",
             },
         )
         tokens = 0
         if response.usage_metadata:
-            tokens = response.usage_metadata.total_token_count
+            tokens = response.usage_metadata.total_token_count or 0
         return (response.text or ""), tokens
 
 
@@ -79,27 +85,20 @@ class OpenAIAdapter:
         )
         return response.data[0].embedding
 
-    async def chat_completion(self, system: str, user: str) -> str:
-        response = await self._client.chat.completions.create(
-            model=settings.OPENAI_CHAT_MODEL,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            temperature=0.2,
-            max_tokens=8192,
-            response_format={"type": "json_object"},
-        )
-        return response.choices[0].message.content or ""
+    async def chat_completion(self, system: str, user: str, temperature: float | None = None) -> str:
+        text, _ = await self.chat_completion_with_usage(system, user, temperature)
+        return text
 
-    async def chat_completion_with_usage(self, system: str, user: str) -> tuple[str, int]:
+    async def chat_completion_with_usage(
+        self, system: str, user: str, temperature: float | None = None
+    ) -> tuple[str, int]:
         response = await self._client.chat.completions.create(
             model=settings.OPENAI_CHAT_MODEL,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            temperature=0.2,
+            temperature=DEFAULT_TEMPERATURE if temperature is None else temperature,
             max_tokens=8192,
             response_format={"type": "json_object"},
         )
@@ -123,18 +122,21 @@ class HybridAIAdapter:
             # Fallback to OpenAI
             return await self._openai.embed(text)
 
-    async def chat_completion(self, system: str, user: str) -> str:
+    async def chat_completion(self, system: str, user: str, temperature: float | None = None) -> str:
         try:
-            return await self._gemini.chat_completion(system, user)
+            return await self._gemini.chat_completion(system, user, temperature)
         except Exception:
             # Fallback to OpenAI
-            return await self._openai.chat_completion(system, user)
+            return await self._openai.chat_completion(system, user, temperature)
 
-    async def chat_completion_with_usage(self, system: str, user: str) -> tuple[str, int]:
+    async def chat_completion_with_usage(
+        self, system: str, user: str, temperature: float | None = None
+    ) -> tuple[str, int]:
         try:
-            return await self._gemini.chat_completion_with_usage(system, user)
-        except Exception:
-            return await self._openai.chat_completion_with_usage(system, user)
+            return await self._gemini.chat_completion_with_usage(system, user, temperature)
+        except Exception as e:
+            logger.warning("Gemini failed, falling back to OpenAI: %s", e)
+            return await self._openai.chat_completion_with_usage(system, user, temperature)
 
 
 def get_default_questions(domain_interest: str) -> List[dict]:
@@ -218,7 +220,7 @@ class MockAIAdapter:
         magnitude = sum(v**2 for v in base) ** 0.5 or 1.0
         return [v / magnitude for v in base]
 
-    async def chat_completion(self, system: str, user: str) -> str:
+    async def chat_completion(self, system: str, user: str, temperature: float | None = None) -> str:
         # If the request is for assessment evaluation
         if "personality_type" in system or "evaluate" in system.lower():
             return json.dumps({
@@ -233,7 +235,6 @@ class MockAIAdapter:
             })
 
         # Try to extract domain interest from system or user prompt
-        import re
         domain = ""
         match = re.search(r"interested in the '([^']+)' domain", system)
         if match:
@@ -241,8 +242,10 @@ class MockAIAdapter:
 
         return json.dumps(get_default_questions(domain))
 
-    async def chat_completion_with_usage(self, system: str, user: str) -> tuple[str, int]:
-        text = await self.chat_completion(system, user)
+    async def chat_completion_with_usage(
+        self, system: str, user: str, temperature: float | None = None
+    ) -> tuple[str, int]:
+        text = await self.chat_completion(system, user, temperature)
         return text, 100
 
 
@@ -435,118 +438,331 @@ def _question_items(data) -> list:
     return data if isinstance(data, list) else []
 
 
-async def generate_career_question_set(experience_level: str, domain_interest: str) -> tuple[list[dict], int]:
-    """One model call for the whole test: mixed career questions, not one call per answer."""
+# ---------- Difficulty control ----------
+DIFFICULTY_RULES = {
+    "fresher": (
+        "VERY EASY. Written for a fresh graduate with zero work experience. "
+        "Use everyday college/home/team situations. IQ & Logic and Aptitude must be "
+        "simple (basic number series, simple percentage, odd-one-out, easy pattern or "
+        "common-sense reasoning) solvable in under 20 seconds. No jargon."
+    ),
+    "junior": (
+        "EASY. For someone with 1-3 years of experience. Simple workplace situations. "
+        "Logic/aptitude should be basic and solvable in under 30 seconds."
+    ),
+    "mid": (
+        "EASY TO MEDIUM. For someone with 3-7 years of experience. Realistic but "
+        "short workplace situations. Logic/aptitude solvable in under 40 seconds."
+    ),
+    "senior": (
+        "MEDIUM. For someone with 7+ years of experience. Realistic workplace "
+        "situations, but still short and clear. Never puzzle-style or tricky."
+    ),
+}
+
+
+def _difficulty_key(level: str) -> str:
+    l = (level or "").lower()
+    if any(k in l for k in ("student", "fresher", "entry", "no experience", "intern")):
+        return "fresher"
+    if any(k in l for k in ("senior", "lead", "manager", "head")):
+        return "senior"
+    nums = [int(n) for n in re.findall(r"\d+", l)]
+    if nums:
+        lo = min(nums)
+        if lo == 0:
+            return "fresher"
+        if lo <= 2:
+            return "junior"
+        if lo <= 6:
+            return "mid"
+        return "senior"
+    if "mid" in l:
+        return "mid"
+    if "junior" in l:
+        return "junior"
+    return "fresher"  # safe default = easiest
+
+
+# ---------- Variety control ----------
+CATEGORY_FOCUS_POOL = {
+    "IQ & Logic": [
+        "number series", "odd one out", "simple percentage or ratio", "letter/word pattern",
+        "simple direction or ranking puzzle", "basic cause-and-effect reasoning",
+        "simple calendar/time calculation", "common-sense deduction",
+    ],
+    "Aptitude": [
+        "basic arithmetic in a work context", "reading a tiny table or schedule",
+        "prioritising 3 small tasks", "estimating time or quantity",
+        "spotting a simple mistake in a short statement", "basic verbal reasoning",
+    ],
+    "Psychological": [
+        "handling stress or pressure", "reaction to criticism", "working alone vs in a team",
+        "dealing with a boring or repetitive task", "handling a change of plan",
+        "staying motivated after a failure", "meeting new people",
+    ],
+    "Leadership": [
+        "a teammate not doing their work", "taking initiative without being asked",
+        "helping a new joiner", "a conflict between two colleagues",
+        "owning a mistake", "motivating a tired team", "sharing credit",
+    ],
+    "Decision Making": [
+        "two tasks due at the same time", "a small ethical choice at work",
+        "limited information, quick decision needed", "choosing between speed and quality",
+        "asking for help vs figuring it out", "a customer or manager asking for something unrealistic",
+    ],
+}
+
+CATEGORY_ORDER = [
+    "IQ & Logic", "Aptitude", "Psychological", "Leadership", "Decision Making",
+    "IQ & Logic", "Aptitude", "Psychological", "Leadership", "Decision Making",
+]
+OBJECTIVE_CATEGORIES = ("IQ & Logic", "Aptitude")
+
+
+def _build_focus_plan() -> str:
+    """Pick a different sub-topic per slot so each test differs, with no repeats inside one test."""
+    used: dict[str, set] = {}
+    lines = []
+    for i, cat in enumerate(CATEGORY_ORDER, start=1):
+        pool = [f for f in CATEGORY_FOCUS_POOL[cat] if f not in used.get(cat, set())]
+        focus = random.choice(pool)
+        used.setdefault(cat, set()).add(focus)
+        lines.append(f"Q{i} - {cat}: focus on '{focus}'")
+    return "\n".join(lines)
+
+
+def public_questions(questions: list[dict]) -> list[dict]:
+    """Frontend ko bhejne se pehle call karo: correct_answer hata deta hai."""
+    return [{k: v for k, v in q.items() if k != "correct_answer"} for q in questions]
+
+
+async def generate_career_question_set(
+    experience_level: str,
+    domain_interest: str,
+    avoid_questions: list[str] | None = None,
+) -> tuple[list[dict], int]:
+    """One model call for the whole test: easy, short, different every attempt.
+
+    IQ & Logic / Aptitude items carry a server-side 'correct_answer'.
+    Use public_questions() before sending to the frontend.
+    """
     from app.modules.jobs_portal.services.assessment_questions import fallback_question_plan
 
     ai = get_ai()
-    domain = domain_interest or "a career of their choice"
+    domain = (
+        "a career of their choice"
+        if (domain_interest or "") in ("", "Career Discovery")
+        else domain_interest
+    )
     level = experience_level or "Fresher / No Experience"
+    difficulty = DIFFICULTY_RULES[_difficulty_key(level)]
+    focus_plan = _build_focus_plan()
+    seed = uuid.uuid4().hex[:8]
+
+    avoid_block = ""
+    if avoid_questions:
+        recent = "\n".join(f"- {q[:120]}" for q in avoid_questions[:20])
+        avoid_block = (
+            "\nThe person has already seen these questions. Do NOT repeat them or "
+            f"write close variations:\n{recent}\n"
+        )
+
     system_prompt = f"""
-    You are a career psychologist writing a short multiple-choice assessment.
+    You are a friendly career counsellor writing a SHORT, EASY multiple-choice assessment.
     The person is '{level}' and wants to work in '{domain}'.
-    Write exactly 10 questions. Use each of these categories twice, in this order:
-    IQ & Logic, Aptitude, Psychological, Leadership, Decision Making,
-    IQ & Logic, Aptitude, Psychological, Leadership, Decision Making.
-    Rules:
-    - Every question has exactly 4 options.
-    - IQ & Logic and Aptitude questions have one clearly best answer.
-    - Psychological, Leadership, and Decision Making questions reveal work style. Do not make every option obviously wrong.
-    - Keep each question to one or two sentences. No technical interview trivia.
-    - Make the situations relevant to '{domain}'.
-    Return ONLY a JSON array. Each item has "category", "question", and "options".
+
+    DIFFICULTY: {difficulty}
+    This is NOT an interview or an IQ exam. Nobody should feel stuck. If in doubt, make it easier.
+
+    Write exactly 10 questions in this exact order, using these focus areas:
+    {focus_plan}
+
+    Hard rules:
+    - Each question: ONE short, punchy sentence, maximum 12-14 words. Fast to read in 8 seconds.
+    - Each option: maximum 4-6 words. Exactly 4 options per question. Concise and clear.
+    - IQ & Logic and Aptitude: exactly one clearly correct answer, no trick options.
+      For these two categories also include "correct_index" (0-3): the position of the correct option.
+      Double-check the answer is truly correct. Do not include "correct_index" for other categories.
+    - Psychological, Leadership, Decision Making: all 4 options should be reasonable
+      work styles (no obviously wrong answer), so they reveal personality.
+    - Situations should feel relevant to '{domain}' but need NO technical or
+      domain knowledge. Logic and aptitude questions may be general.
+    - No long stories, no multi-step calculations, no jargon, no interview trivia.
+    - Be creative and unusual: use different names, settings and numbers than the
+      most obvious examples. Variation seed: {seed}
+    {avoid_block}
+    Return ONLY a JSON object: {{"questions": [ ... ]}}.
+    Each item has "category", "question", "options" (and "correct_index" where required).
     """
-    user_prompt = "Write the 10 questions now."
+    user_prompt = f"Write the 10 questions now. Keep them short and easy. (seed {seed})"
+
     try:
         response, tokens = await asyncio.wait_for(
-            ai.chat_completion_with_usage(system_prompt, user_prompt),
-            timeout=22,
+            ai.chat_completion_with_usage(system_prompt, user_prompt, temperature=0.9),
+            timeout=35,
         )
         data = json.loads(_strip_json_fence(response))
-        cleaned = []
+        cleaned: list[dict] = []
         for item in _question_items(data):
+            if len(cleaned) >= 10:
+                break
             if not isinstance(item, dict):
                 continue
             question = str(item.get("question") or "").strip()
-            options = [str(opt).strip() for opt in (item.get("options") or []) if str(opt).strip()]
+            raw_opts = item.get("options") or []
+            options = [str(o).strip() for o in raw_opts if str(o).strip()]
             if not question or len(options) < 4:
                 continue
-            cleaned.append({
-                "category": str(item.get("category") or "Career").strip() or "Career",
-                "question": question,
-                "options": options[:4],
-            })
+            options = options[:4]
+
+            # Category: model ki value valid ho to wahi, warna position se
+            category = str(item.get("category") or "").strip()
+            if category not in CATEGORY_FOCUS_POOL:
+                category = CATEGORY_ORDER[len(cleaned)]
+
+            entry = {"category": category, "question": question, "options": options}
+
+            if category in OBJECTIVE_CATEGORIES:
+                ci = item.get("correct_index")
+                if isinstance(ci, int) and not isinstance(ci, bool) and 0 <= ci < 4:
+                    correct_text = options[ci]
+                    shuffled = options[:]
+                    random.shuffle(shuffled)  # LLM aksar sahi answer pehle/doosre option mein rakhta hai
+                    entry["options"] = shuffled
+                    entry["correct_answer"] = correct_text
+            cleaned.append(entry)
+
         if len(cleaned) < 8:
+            logger.warning("Assessment generation returned only %d valid questions; using fallback", len(cleaned))
             return fallback_question_plan(domain_interest, experience_level), 0
         return cleaned[:10], tokens
     except Exception as e:
-        print(f"Error generating assessment questions: {e}")
+        logger.warning("Error generating assessment questions: %s", e)
         return fallback_question_plan(domain_interest, experience_level), 0
 
 
+# ---------- Evaluation ----------
+def _norm(text) -> str:
+    return " ".join(str(text or "").strip().lower().split())
+
+
+def _objective_scores(history: list) -> dict:
+    def tally(cat: str) -> tuple[int, int]:
+        items = [h for h in history if h.get("category") == cat and h.get("correct_answer")]
+        right = sum(1 for h in items if _norm(h.get("answer")) == _norm(h["correct_answer"]))
+        return right, len(items)
+
+    return {"logic": tally("IQ & Logic"), "aptitude": tally("Aptitude")}
+
+
+def _ratio_to_score(right: int, total: int, default: int = 60) -> int:
+    if total == 0:
+        return default
+    return round(35 + 65 * right / total)  # 0% -> 35, 100% -> 100
+
+
+def _iq_from_ratio(right: int, total: int) -> int:
+    if total == 0:
+        return 100
+    return round(88 + 32 * right / total)  # 88 to 120
+
+
 async def generate_career_evaluation(history: list, experience_level: str, domain_interest: str) -> dict:
-    """Score the finished answers. Raises on failure so the caller can use a local fallback."""
+    """Objective scores computed in code; the model writes personality, roles and advice.
+
+    history items need: category, question, options, answer, correct_answer (for IQ/Aptitude).
+    Raises on failure so the caller can use a local fallback.
+    """
     ai = get_ai()
     domain = domain_interest or "their chosen field"
     level = experience_level or "their experience"
+
+    obj = _objective_scores(history or [])
+    logic_r, logic_t = obj["logic"]
+    apt_r, apt_t = obj["aptitude"]
+    reasoning_score = _ratio_to_score(logic_r, logic_t)
+    aptitude_score = _ratio_to_score(apt_r, apt_t)
+    iq_estimate = _iq_from_ratio(logic_r + apt_r, logic_t + apt_t)
+
     system_prompt = f"""
-    You are a career counselor. Read this person's answers. They are '{level}' and chose '{domain}'.
-    Judge only what the answers show. Do not give everyone the same score.
-    IQ & Logic and Aptitude answers should move the IQ and aptitude scores. Wrong or careless choices score lower.
-    Psychological, Leadership, and Decision Making answers should shape personality and role fit.
-    Return ONLY JSON with this shape:
+    You are a supportive career counselor. The person is '{level}' and chose '{domain}'.
+    Read their answers to the work-style questions (Psychological, Leadership, Decision Making).
+    Objective result already computed: logic {logic_r}/{logic_t} correct, aptitude {apt_r}/{apt_t} correct.
+    Do NOT recompute these. Mention them only when talking about strengths or areas to improve.
+
+    Scoring rules:
+    - emotional_intelligence_score (1-100): from how they handle people, stress and feedback
+      in the Psychological and Leadership answers. Typical range 45-90. Use the full range, avoid 70 by default.
+    - personality_score (1-100): how well their work style matches the day-to-day of '{domain}'.
+      Typical range 45-90.
+    - Scores must reflect the actual choices. Two people with different answers must get different scores.
+
+    Other rules:
+    - personality_type: a short, positive label (2-3 words) based on their dominant style.
+    - recommended_domains: 3 specific job roles in or close to '{domain}', suitable for a '{level}' person.
+      Entry-level roles for freshers, never senior titles.
+    - career_roadmap: 4 concrete, practical steps (skills, courses, projects) for '{level}' in '{domain}'.
+    - detailed_evaluation: 3 short paragraphs in simple English: their work style, why they fit the first role,
+      what to improve. Encouraging but honest. Never claim a medical or psychological diagnosis.
+
+    Return ONLY JSON:
     {{
-      "personality_type": "short label",
-      "iq_estimate": 100,
-      "aptitude_score": 70,
-      "reasoning_score": 70,
-      "emotional_intelligence_score": 70,
-      "personality_score": 70,
-      "recommended_domains": ["specific role", "specific role", "specific role"],
-      "career_roadmap": ["step one", "step two", "step three", "step four"],
-      "detailed_evaluation": "3 short paragraphs: personality, why they fit the first role, and what to improve."
+      "personality_type": "string",
+      "emotional_intelligence_score": 0,
+      "personality_score": 0,
+      "recommended_domains": ["role", "role", "role"],
+      "career_roadmap": ["step", "step", "step", "step"],
+      "detailed_evaluation": "string"
     }}
-    iq_estimate is an integer from 85 to 140. Other scores are integers from 1 to 100.
-    recommended_domains must be job roles, not generic words.
     """
+
     history_text = "\n".join(
-        f"[{item.get('category', 'Question')}] Q: {item.get('question', '')}\nA: {item.get('answer', '')}"
-        for item in (history or [])
+        f"[{h.get('category', 'Question')}] Q: {h.get('question', '')}\n"
+        f"Options: {' | '.join(str(o) for o in (h.get('options') or []))}\n"
+        f"Chosen: {h.get('answer', '')}"
+        for h in (history or [])
+        if h.get("category") not in OBJECTIVE_CATEGORIES
     )
+
     response, tokens = await asyncio.wait_for(
-        ai.chat_completion_with_usage(system_prompt, f"Answers:\n{history_text}\n\nScore this person."),
-        timeout=22,
+        ai.chat_completion_with_usage(
+            system_prompt, f"Answers:\n{history_text}\n\nEvaluate.", temperature=0.4
+        ),
+        timeout=35,
     )
     data = json.loads(_strip_json_fence(response))
     if not isinstance(data, dict):
         raise ValueError("Evaluation was not an object")
+
     roadmap = data.get("career_roadmap") or []
     if isinstance(roadmap, str):
         roadmap = [roadmap]
-    roadmap = [str(step).strip() for step in roadmap if str(step).strip()]
+    roadmap = [str(s).strip() for s in roadmap if str(s).strip()]
     evaluation = str(data.get("detailed_evaluation") or "").strip()
     if roadmap:
-        steps = "\n".join(f"{index}. {step}" for index, step in enumerate(roadmap, start=1))
+        steps = "\n".join(f"{i}. {s}" for i, s in enumerate(roadmap, start=1))
         evaluation = f"{evaluation}\n\nCareer roadmap:\n{steps}".strip()
+
     roles = data.get("recommended_domains") or [domain]
     if isinstance(roles, str):
         roles = [roles]
-    roles = [str(role).strip() for role in roles if str(role).strip()] or [domain]
+    roles = [str(r).strip() for r in roles if str(r).strip()] or [domain]
 
     def score(key: str, default: int) -> int:
         try:
-            return int(data.get(key, default))
+            return max(1, min(100, int(data.get(key, default))))
         except (TypeError, ValueError):
             return default
 
     return {
         "personality_type": str(data.get("personality_type") or "Balanced").strip() or "Balanced",
         "tokens_utilized": tokens,
-        "iq_estimate": max(85, min(140, score("iq_estimate", 100))),
-        "aptitude_score": max(1, min(100, score("aptitude_score", 70))),
-        "reasoning_score": max(1, min(100, score("reasoning_score", 70))),
-        "emotional_intelligence_score": max(1, min(100, score("emotional_intelligence_score", 70))),
-        "personality_score": max(1, min(100, score("personality_score", 70))),
+        "iq_estimate": iq_estimate,
+        "aptitude_score": aptitude_score,
+        "reasoning_score": reasoning_score,
+        "emotional_intelligence_score": score("emotional_intelligence_score", 65),
+        "personality_score": score("personality_score", 65),
         "recommended_domains": roles[:3],
         "detailed_evaluation": evaluation or "Your answers show how you approach work, people, and decisions.",
     }

@@ -685,7 +685,7 @@ async def list_free_courses(
             videos_subq.asc() if is_asc else videos_subq.desc(),
             func.lower(TrainingPortalFreeCourse.title).asc(),
         )
-    elif sort_by == "created_at":
+    elif sort_by in ("created_at", "createdAt", "date", "created"):
         query = query.order_by(TrainingPortalFreeCourse.created_at.asc() if is_asc else TrainingPortalFreeCourse.created_at.desc())
     else:
         query = query.order_by(TrainingPortalFreeCourse.created_at.desc())

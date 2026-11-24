@@ -59,14 +59,25 @@ def _question_payload(plan: list, index: int) -> dict:
 
 
 async def _score_session(session) -> dict:
+    plan = session.question_plan or []
+    history = list(session.qa_history or [])
+    for idx, h in enumerate(history):
+        if idx < len(plan):
+            q_item = plan[idx] or {}
+            if not h.get("category"):
+                h["category"] = q_item.get("category") or ""
+            if not h.get("options"):
+                h["options"] = q_item.get("options") or []
+            if "correct_answer" in q_item and "correct_answer" not in h:
+                h["correct_answer"] = q_item["correct_answer"]
     try:
         return await generate_career_evaluation(
-            session.qa_history, session.experience_level, session.domain_interest
+            history, session.experience_level, session.domain_interest
         )
     except Exception as exc:
         print(f"Career evaluation fallback: {exc}")
         return build_assessment_evaluation(
-            session.qa_history, session.experience_level, session.domain_interest
+            history, session.experience_level, session.domain_interest
         )
 
 
@@ -101,11 +112,16 @@ async def submit_answer(session_id: str, body: AssessmentAnswer, db: AsyncSessio
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     new_history = list(session.qa_history) if session.qa_history else []
-    new_history.append({"question": body.question, "answer": body.answer})
     plan = await _ensure_question_plan(session)
-    answered_index = len(new_history) - 1
+    answered_index = len(new_history)
+    entry = {"question": body.question, "answer": body.answer}
     if 0 <= answered_index < len(plan):
-        new_history[-1]["category"] = (plan[answered_index] or {}).get("category") or ""
+        q_item = plan[answered_index] or {}
+        entry["category"] = q_item.get("category") or ""
+        entry["options"] = q_item.get("options") or []
+        if "correct_answer" in q_item:
+            entry["correct_answer"] = q_item["correct_answer"]
+    new_history.append(entry)
     session.qa_history = new_history
     if len(new_history) >= len(plan):
         session.status = "completed"
