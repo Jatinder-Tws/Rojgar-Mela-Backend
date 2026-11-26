@@ -283,13 +283,13 @@ async def auto_end_live_session(
     if (session.live_status or "").strip().lower() != "live":
         return
 
-    now = now_ist()
+    utc_now = datetime.utcnow()
     session.live_status = "completed"
-    session.ended_at = now
+    session.ended_at = utc_now
     session.attendance_marked = True
     if not (session.session_report or "").strip():
         session.session_report = "Class ended automatically after scheduled duration."
-    session.updated_at = datetime.utcnow()
+    session.updated_at = utc_now
 
     from app.modules.training_portal.services.occurrence_reports import upsert_occurrence_fields
 
@@ -303,6 +303,8 @@ async def auto_end_live_session(
         attachment_filename=session.attachment_filename,
         late_start_reason=session.late_start_reason,
         early_end_reason=session.early_end_reason,
+        started_at=session.started_at.isoformat() if session.started_at else None,
+        ended_at=session.ended_at.isoformat() if session.ended_at else None,
     )
 
     if batch:
@@ -389,11 +391,11 @@ async def process_live_session_end_lifecycle(
     occurrence_date = _occurrence_date_for_live_session(session)
     end_dt = session_end_datetime(session, occurrence_date)
     if not end_dt:
-        # Fallback: if end time cannot be parsed, use 2h after started_at for reminder only.
+        # Fallback: if end time cannot be parsed, use 2h after started_at (UTC -> IST) for reminder only.
         started = getattr(session, "started_at", None)
         if not started:
             return
-        end_dt = started + timedelta(hours=2)
+        end_dt = started + timedelta(hours=5, minutes=30) + timedelta(hours=2)
 
     minutes_remaining = (end_dt - now).total_seconds() / 60.0
     batch = await _load_batch(db, session.batch_id)

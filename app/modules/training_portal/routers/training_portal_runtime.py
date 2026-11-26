@@ -3135,11 +3135,20 @@ async def start_class_session(
         session.attendance_marked = False
         session.end_reminder_sent = False
 
+    utc_now = datetime.utcnow()
     session.live_status = "live"
     session.live_occurrence_date = today.isoformat()
-    session.started_at = now
+    session.started_at = utc_now
     session.ended_at = None
-    session.updated_at = now
+    session.updated_at = utc_now
+    from app.modules.training_portal.services.occurrence_reports import upsert_occurrence_fields
+    upsert_occurrence_fields(
+        session,
+        today.isoformat(),
+        late_start_reason=session.late_start_reason,
+        started_at=utc_now.isoformat(),
+        ended_at=None,
+    )
     await log_audit_event(
         db,
         current_user,
@@ -3292,10 +3301,11 @@ async def complete_class_session(
         is_on_leave = email_clean in approved_leave_emails
         status_to_mark = "on_leave" if is_on_leave else entry.status
 
+        utc_now = datetime.utcnow()
         record = existing_records_map.get(entry.enrollment_id)
         if record:
             record.status = status_to_mark
-            record.marked_at = now
+            record.marked_at = utc_now
             record.marked_by_id = current_user.id
         else:
             db.add(
@@ -3309,7 +3319,7 @@ async def complete_class_session(
                     candidate_name=enrollment.candidate_name,
                     status=status_to_mark,
                     marked_by_id=current_user.id,
-                    marked_at=now,
+                    marked_at=utc_now,
                 )
             )
 
@@ -3330,9 +3340,10 @@ async def complete_class_session(
 
     from app.modules.training_portal.services.occurrence_reports import upsert_occurrence_fields
 
+    utc_now = datetime.utcnow()
     session.live_status = "completed"
     session.live_occurrence_date = occurrence_date
-    session.ended_at = now
+    session.ended_at = utc_now
     session.attendance_marked = True
     report_text = (body.session_report or "").strip() or None
     selected_topics = (
@@ -3343,7 +3354,7 @@ async def complete_class_session(
     session.session_report = report_text
     if body.covered_topic_ids is not None:
         session.covered_topic_ids = selected_topics
-    session.updated_at = now
+    session.updated_at = utc_now
     upsert_occurrence_fields(
         session,
         occurrence_date,
@@ -3353,6 +3364,8 @@ async def complete_class_session(
         attachment_filename=session.attachment_filename,
         late_start_reason=session.late_start_reason,
         early_end_reason=session.early_end_reason,
+        started_at=session.started_at.isoformat() if session.started_at else None,
+        ended_at=session.ended_at.isoformat() if session.ended_at else None,
     )
 
     if batch and body.covered_topic_ids is not None:
@@ -3548,6 +3561,11 @@ async def list_attendance_records(
 
         occ = (record.occurrence_date or None) or None
         occ_fields = get_occurrence_fields(session, occ)
+        live_occ = (getattr(session, "live_occurrence_date", None) or "").strip()
+        is_recurring = getattr(session, "schedule_type", None) == "recurring"
+        same_live_occ = (not occ) or (occ == live_occ) or (not is_recurring and not live_occ)
+        occ_started_at = occ_fields.get("started_at") or (session.started_at if same_live_occ else None)
+        occ_ended_at = occ_fields.get("ended_at") or (session.ended_at if same_live_occ else None)
         out_rows.append(
             PortalAttendanceRecordOut(
                 id=record.id,
@@ -3558,18 +3576,18 @@ async def list_attendance_records(
                 candidate_name=record.candidate_name,
                 status=record.status,
                 marked_at=record.marked_at,
-                session_started_at=session.started_at,
-                session_ended_at=session.ended_at,
+                session_started_at=occ_started_at,
+                session_ended_at=occ_ended_at,
                 session_title=session.title,
                 session_date=occ or session.date,
                 session_start_time=session.start_time,
                 session_end_time=session.end_time,
-                session_report=occ_fields.get("session_report") or getattr(session, "session_report", None),
-                covered_topic_ids=list(occ_fields.get("covered_topic_ids") or getattr(session, "covered_topic_ids", None) or []),
-                attachment_url=occ_fields.get("attachment_url") or getattr(session, "attachment_url", None),
-                attachment_filename=occ_fields.get("attachment_filename") or getattr(session, "attachment_filename", None),
-                late_start_reason=occ_fields.get("late_start_reason") or getattr(session, "late_start_reason", None),
-                early_end_reason=occ_fields.get("early_end_reason") or getattr(session, "early_end_reason", None),
+                session_report=occ_fields.get("session_report"),
+                covered_topic_ids=list(occ_fields.get("covered_topic_ids") or []),
+                attachment_url=occ_fields.get("attachment_url"),
+                attachment_filename=occ_fields.get("attachment_filename"),
+                late_start_reason=occ_fields.get("late_start_reason"),
+                early_end_reason=occ_fields.get("early_end_reason"),
                 instructor_name=session.instructor_name,
                 occurrence_date=occ,
             )

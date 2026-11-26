@@ -17,6 +17,15 @@ def _reports_map(session) -> dict[str, Any]:
     return dict(raw)
 
 
+def _iso_or_none(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    text = str(value).strip()
+    return text or None
+
+
 def snapshot_session_fields(session) -> dict[str, Any]:
     return {
         "session_report": getattr(session, "session_report", None),
@@ -25,6 +34,8 @@ def snapshot_session_fields(session) -> dict[str, Any]:
         "attachment_filename": getattr(session, "attachment_filename", None),
         "late_start_reason": getattr(session, "late_start_reason", None),
         "early_end_reason": getattr(session, "early_end_reason", None),
+        "started_at": _iso_or_none(getattr(session, "started_at", None)),
+        "ended_at": _iso_or_none(getattr(session, "ended_at", None)),
     }
 
 
@@ -81,18 +92,28 @@ def get_occurrence_fields(session, occurrence_date: Optional[str]) -> dict[str, 
             elif key not in entry:
                 entry[key] = value
 
-    # Fallback to session live fields if not specifically populated for occurrence
-    if not entry.get("session_report") and getattr(session, "session_report", None):
-        entry["session_report"] = session.session_report
-    if not entry.get("covered_topic_ids") and getattr(session, "covered_topic_ids", None):
-        entry["covered_topic_ids"] = list(session.covered_topic_ids or [])
-    if not entry.get("attachment_url") and getattr(session, "attachment_url", None):
-        entry["attachment_url"] = session.attachment_url
-        entry["attachment_filename"] = getattr(session, "attachment_filename", None)
-    if not entry.get("late_start_reason") and getattr(session, "late_start_reason", None):
-        entry["late_start_reason"] = session.late_start_reason
-    if not entry.get("early_end_reason") and getattr(session, "early_end_reason", None):
-        entry["early_end_reason"] = session.early_end_reason
+    # Fallback to session live fields only when no specific date was requested
+    # or when the requested date matches the session's active/non-recurring date.
+    # Otherwise a recurring session's previous occurrence notes/late_start_reason
+    # would leak onto a new unstarted day and falsely mark it completed.
+    is_recurring = getattr(session, "schedule_type", None) == "recurring"
+    allow_live_fallback = (not date_key) or (date_key == live) or (not is_recurring and not live)
+    if allow_live_fallback:
+        if not entry.get("session_report") and getattr(session, "session_report", None):
+            entry["session_report"] = session.session_report
+        if not entry.get("covered_topic_ids") and getattr(session, "covered_topic_ids", None):
+            entry["covered_topic_ids"] = list(session.covered_topic_ids or [])
+        if not entry.get("attachment_url") and getattr(session, "attachment_url", None):
+            entry["attachment_url"] = session.attachment_url
+            entry["attachment_filename"] = getattr(session, "attachment_filename", None)
+        if not entry.get("late_start_reason") and getattr(session, "late_start_reason", None):
+            entry["late_start_reason"] = session.late_start_reason
+        if not entry.get("early_end_reason") and getattr(session, "early_end_reason", None):
+            entry["early_end_reason"] = session.early_end_reason
+        if not entry.get("started_at") and getattr(session, "started_at", None):
+            entry["started_at"] = _iso_or_none(session.started_at)
+        if not entry.get("ended_at") and getattr(session, "ended_at", None):
+            entry["ended_at"] = _iso_or_none(session.ended_at)
 
     return entry
 
