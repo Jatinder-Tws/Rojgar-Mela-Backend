@@ -12,6 +12,7 @@ from app.modules.jobs_portal.schemas.jobs import (
     EnhanceJobSectionResponse,
     JobCreate, JobDescriptionOnlyResponse, JobDescriptionRequest,
     JobOut, JobSkillsResponse, JobTitleRequest, JobUpdate,
+    PublicHiringShortlistPreviewOut,
     VoiceJobParseRequest, VoiceJobParseResponse,
     JobListResponse,
 )
@@ -32,6 +33,7 @@ from app.modules.jobs_portal.controllers.jobs_controller import (
     enhance_section as ctrl_enhance_section,
     parse_voice_job as ctrl_parse_voice_job,
     get_distinct_industries as ctrl_get_distinct_industries,
+    get_public_hiring_shortlist_preview as ctrl_get_public_hiring_shortlist_preview,
     search_external_jobs as ctrl_search_external_jobs,
     clear_external_jobs_cache as ctrl_clear_external_jobs_cache,
 )
@@ -56,6 +58,7 @@ async def list_jobs(
     sort_by: Optional[str] = Query(None),
     sort_order: Optional[str] = Query(None),
     matched_only: bool = Query(False, description="Seekers only: return AI-matched jobs (score >= 40)"),
+    saved_only: bool = Query(False, description="Seekers only: return saved/bookmarked jobs"),
     user: User = Depends(require_verified),
     db: AsyncSession = Depends(get_db)
 ):
@@ -71,6 +74,7 @@ async def list_jobs(
         sort_by,
         sort_order,
         matched_only,
+        saved_only,
     )
 
 
@@ -125,6 +129,12 @@ async def trigger_govt_job_sync():
     from app.modules.jobs_portal.services.govt_job_sync_service import GovtJobSyncService
     return await GovtJobSyncService.scrape_and_sync()
 
+
+
+@router.get("/public/hiring-shortlist-preview", response_model=PublicHiringShortlistPreviewOut)
+async def get_public_hiring_shortlist_preview(db: AsyncSession = Depends(get_db)):
+    """Public non-PII preview of top 4 matched candidates for the home page hiring section."""
+    return await ctrl_get_public_hiring_shortlist_preview(db)
 
 
 @router.get("/{job_id}", response_model=JobOut)

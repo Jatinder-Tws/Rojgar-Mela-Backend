@@ -255,10 +255,12 @@ async def list_jobs(
     sort_by: Optional[str] = None,
     sort_order: Optional[str] = None,
     matched_only: bool = False,
+    saved_only: bool = False,
 ):
     from app.shared.models.user import UserRole
     from app.modules.jobs_portal.models.job import JobType as ModelJobType
     from app.modules.jobs_portal.models.match import Match
+    from app.modules.jobs_portal.models.saved_job import SavedJob
     from sqlalchemy import func, and_
 
     sort_key = sort_by or "created_at"
@@ -269,6 +271,12 @@ async def list_jobs(
         base_query = select(JobPosting).where(JobPosting.provider_id == user.id)
     else:
         base_query = select(JobPosting).where(JobPosting.is_active == True)  # noqa
+
+    if saved_only and user.role == UserRole.seeker:
+        base_query = base_query.join(
+            SavedJob,
+            and_(SavedJob.job_id == JobPosting.id, SavedJob.seeker_id == user.id),
+        )
 
     if use_match_join:
         join_on = and_(Match.job_id == JobPosting.id, Match.seeker_id == user.id)
@@ -633,5 +641,196 @@ async def clear_external_jobs_cache():
     from app.modules.jobs_portal.services.job_scrappers import clear_job_search_cache
     count = await clear_job_search_cache()
     return {"message": f"Successfully cleared {count} cached search entries from Redis.", "cleared_count": count}
+
+
+def _extract_skill_names(raw_skills) -> list[str]:
+    if not isinstance(raw_skills, list):
+        return []
+    names: list[str] = []
+    for item in raw_skills:
+        if isinstance(item, dict):
+            name = str(item.get("name") or "").strip()
+        else:
+            name = str(item or "").strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def _format_candidate_experience(user_experience: Optional[str], total_experience_years) -> str:
+    if total_experience_years is not None:
+        try:
+            yrs_num = float(total_experience_years)
+            if yrs_num.is_integer():
+                return f"{int(yrs_num)} yrs exp"
+            return f"{yrs_num:g} yrs exp"
+        except (TypeError, ValueError):
+            pass
+    raw_exp = (user_experience or "").strip()
+    if not raw_exp:
+        return ""
+    return raw_exp if "exp" in raw_exp.lower() else f"{raw_exp} exp"
+
+
+def _format_candidate_address(
+    user_address: Optional[str],
+    city: Optional[str],
+    state: Optional[str],
+    fallback_location: Optional[str],
+) -> str:
+    parts = [p.strip() for p in (city, state) if p and p.strip()]
+    if parts:
+        return ", ".join(parts)
+    if user_address and user_address.strip():
+        return user_address.strip()
+    return (fallback_location or "").strip()
+
+
+def _candidate_initials(first_name: Optional[str], last_name: Optional[str]) -> str:
+    f = (first_name or "").strip()
+    l = (last_name or "").strip()
+    if f and l:
+        return f"{f[0]}{l[0]}".upper()
+    if f:
+        return f[:2].upper()
+    return "RM"
+
+
+async def get_public_hiring_shortlist_preview(db: AsyncSession):
+    """Return real featured job, applicant count, top %, and top 4 matched candidates (non-PII fields only)."""
+    from sqlalchemy import desc, func
+    from app.modules.jobs_portal.models.application import Application
+    from app.modules.jobs_portal.models.match import Match
+    from app.modules.jobs_portal.models.portfolio import Portfolio
+    from app.modules.jobs_portal.schemas.jobs import (
+        PublicHiringShortlistPreviewOut,
+        PublicShortlistCandidateOut,
+    )
+
+    app_count_sq = (
+        select(Application.job_id, func.count(Application.id).label("app_count"))
+        .group_by(Application.job_id)
+        .subquery()
+    )
+    match_count_sq = (
+        select(Match.job_id, func.count(Match.id).label("match_count"))
+        .group_by(Match.job_id)
+        .subquery()
+    )
+
+    job_row = (
+        await db.execute(
+            select(
+                JobPosting.id,
+                JobPosting.title,
+                JobPosting.location,
+                func.coalesce(app_count_sq.c.app_count, 0).label("app_count"),
+            )
+            .outerjoin(app_count_sq, app_count_sq.c.job_id == JobPosting.id)
+            .outerjoin(match_count_sq, match_count_sq.c.job_id == JobPosting.id)
+            .where(JobPosting.is_active.is_(True))
+            .order_by(
+                desc(func.coalesce(app_count_sq.c.app_count, 0)),
+                desc(func.coalesce(match_count_sq.c.match_count, 0)),
+                desc(JobPosting.created_at),
+            )
+            .limit(1)
+        )
+    ).first()
+
+    if not job_row:
+        return PublicHiringShortlistPreviewOut(
+            job_title="Active Openings",
+            applicants_count=0,
+            top_percent=10,
+            candidates=[],
+        )
+
+    job_id, job_title, job_location, raw_app_count = job_row
+    applicants_count = int(raw_app_count or 0)
+
+    candidate_cols = (
+        User.id,
+        User.first_name,
+        User.last_name,
+        User.address,
+        User.experience,
+        Portfolio.city,
+        Portfolio.state,
+        Portfolio.total_experience_years,
+        Portfolio.skills,
+        Match.score,
+    )
+
+    # Top 4 applicants for this job, ordered by AI match score (then latest applied)
+    rows = (
+        await db.execute(
+            select(*candidate_cols)
+            .join(Application, Application.seeker_id == User.id)
+            .outerjoin(Portfolio, Portfolio.user_id == User.id)
+            .outerjoin(
+                Match,
+                (Match.job_id == job_id) & (Match.seeker_id == User.id),
+            )
+            .where(Application.job_id == job_id)
+            .order_by(desc(Match.score).nulls_last(), desc(Application.applied_at))
+            .limit(4)
+        )
+    ).all()
+
+    seen_ids = {r[0] for r in rows}
+    if len(rows) < 4:
+        extra_q = (
+            select(*candidate_cols)
+            .join(Match, Match.seeker_id == User.id)
+            .outerjoin(Portfolio, Portfolio.user_id == User.id)
+            .where(Match.job_id == job_id)
+        )
+        if seen_ids:
+            extra_q = extra_q.where(User.id.notin_(seen_ids))
+        extra_rows = (
+            await db.execute(
+                extra_q.order_by(desc(Match.score)).limit(4 - len(rows))
+            )
+        ).all()
+        rows = list(rows) + list(extra_rows)
+
+    candidates: list[PublicShortlistCandidateOut] = []
+    for (
+        _uid,
+        first_name,
+        last_name,
+        user_address,
+        user_experience,
+        city,
+        state,
+        total_experience_years,
+        raw_skills,
+        score,
+    ) in rows:
+        name = " ".join(p for p in (first_name, last_name) if p and p.strip()).strip() or "Candidate"
+        skills = _extract_skill_names(raw_skills)[:4]
+        candidates.append(
+            PublicShortlistCandidateOut(
+                initials=_candidate_initials(first_name, last_name),
+                name=name,
+                address=_format_candidate_address(user_address, city, state, job_location),
+                experience=_format_candidate_experience(user_experience, total_experience_years),
+                skills=skills,
+                match_score=max(0, min(100, int(round(score)))) if score is not None else 0,
+            )
+        )
+
+    if applicants_count > 0 and candidates:
+        top_percent = max(1, min(100, round((len(candidates) / applicants_count) * 100)))
+    else:
+        top_percent = 10
+
+    return PublicHiringShortlistPreviewOut(
+        job_title=job_title,
+        applicants_count=applicants_count,
+        top_percent=top_percent,
+        candidates=candidates,
+    )
 
 

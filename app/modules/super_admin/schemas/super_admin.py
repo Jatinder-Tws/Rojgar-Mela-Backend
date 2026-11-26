@@ -217,6 +217,10 @@ class AdminSetPasswordRequest(BaseModel):
     password: str = Field(..., min_length=8)
 
 
+class AdminPhoneVerificationRequest(BaseModel):
+    is_phone_verified: bool = True
+
+
 class AdminUserOut(BaseModel):
     id: str
     first_name: Optional[str] = None
@@ -227,6 +231,7 @@ class AdminUserOut(BaseModel):
     role: str
     has_password: bool = False
     is_verified: bool
+    is_phone_verified: bool = False
     onboarding_complete: bool
     industry: Optional[str] = None
     industries: List[str] = Field(default_factory=list)

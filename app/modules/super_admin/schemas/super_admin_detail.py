@@ -121,6 +121,7 @@ class AdminProviderDetailResponse(BaseModel):
     # Account state
     has_password: bool = False
     is_verified: bool
+    is_phone_verified: bool = False
     onboarding_complete: bool
     is_first_login: Optional[bool] = None
     welcome_email_status: Optional[str] = None
@@ -244,6 +245,7 @@ class AdminSeekerDetailResponse(BaseModel):
     # Account state
     has_password: bool = False
     is_verified: bool
+    is_phone_verified: bool = False
     onboarding_complete: bool
     is_assessment_done: bool = False
     is_first_login: Optional[bool] = None

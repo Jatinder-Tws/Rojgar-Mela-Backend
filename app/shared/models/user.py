@@ -52,6 +52,7 @@ class User(Base):
     # Auth state
     is_super_admin = Column(Boolean, default=False, nullable=False, index=True)
     is_verified = Column(Boolean, default=False, nullable=False)
+    is_phone_verified = Column(Boolean, default=False, nullable=False, server_default="false")
     onboarding_complete = Column(Boolean, default=False, nullable=False)
     is_assessment_done = Column(Boolean, default=False, nullable=False)
     totp_secret = Column(String(32), nullable=True)

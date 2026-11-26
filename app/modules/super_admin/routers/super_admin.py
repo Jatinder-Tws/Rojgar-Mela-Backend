@@ -13,7 +13,8 @@ from app.modules.super_admin.schemas.super_admin import (
     AdminApplicationListItem, AdminApplicationListResponse, AdminAssessmentListResponse, AdminInterviewListResponse,
     AdminJobCreate, AdminJobUpdate, AdminJobDetailResponse, AdminJobListResponse, AdminJobProviderOptionsResponse,
     AdminMatchListResponse, AdminProviderCreate, AdminProviderUpdate, AdminShortlistRequest,
-    AdminSeekerCreate, AdminSeekerUpdate, AdminSetPasswordRequest, AdminUserExportRequest, AdminUserListResponse,
+    AdminSeekerCreate, AdminSeekerUpdate, AdminSetPasswordRequest, AdminPhoneVerificationRequest,
+    AdminUserExportRequest, AdminUserListResponse,
     AdminUserOut, BulkImportJobStarted, DashboardAnalyticsResponse, DetailedPlatformAnalytics,
     ImportJobStatus, PlatformStatsResponse, SuperAdminChangePasswordRequest, SuperAdminLoginRequest,
     SuperAdminLoginResponse, SuperAdminProfileOut, SuperAdminProfileUpdate,
@@ -63,6 +64,7 @@ from app.modules.super_admin.controllers.super_admin_controller import (
     update_provider as ctrl_update_provider,
     delete_provider as ctrl_delete_provider,
     set_provider_password as ctrl_set_provider_password,
+    set_user_phone_verified as ctrl_set_user_phone_verified,
     upload_provider_profile_pic as ctrl_upload_provider_profile_pic,
     get_provider_company_profile as ctrl_get_provider_company,
     admin_lookup_company as ctrl_admin_lookup_company,
@@ -410,6 +412,17 @@ async def set_seeker_password(user_id: str, body: AdminSetPasswordRequest, admin
     return await ctrl_set_seeker_password(user_id, body, db, actor=admin)
 
 
+@router.patch("/seekers/{user_id}/phone-verification", response_model=AdminUserOut)
+async def set_seeker_phone_verification(
+    user_id: str,
+    body: AdminPhoneVerificationRequest,
+    admin: User = Depends(require_super_admin_or_permission("job_seekers")),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.shared.models.user import UserRole
+    return await ctrl_set_user_phone_verified(user_id, UserRole.seeker, body.is_phone_verified, db, actor=admin)
+
+
 # ── Job Providers ────────────────────────────────────────────────────────────
 
 @router.get("/providers", response_model=AdminUserListResponse)
@@ -495,6 +508,17 @@ async def delete_provider(user_id: str, admin: User = Depends(require_super_admi
 @router.patch("/providers/{user_id}/password", response_model=AdminUserOut)
 async def set_provider_password(user_id: str, body: AdminSetPasswordRequest, admin: User = Depends(require_super_admin_or_permission("job_providers")), db: AsyncSession = Depends(get_db)):
     return await ctrl_set_provider_password(user_id, body, db, actor=admin)
+
+
+@router.patch("/providers/{user_id}/phone-verification", response_model=AdminUserOut)
+async def set_provider_phone_verification(
+    user_id: str,
+    body: AdminPhoneVerificationRequest,
+    admin: User = Depends(require_super_admin_or_permission("job_providers")),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.shared.models.user import UserRole
+    return await ctrl_set_user_phone_verified(user_id, UserRole.provider, body.is_phone_verified, db, actor=admin)
 
 
 @router.post("/providers/{user_id}/profile-pic", response_model=AdminUserOut)

@@ -303,6 +303,7 @@ def _user_to_admin_out(
         id=user.id, first_name=user.first_name, last_name=user.last_name, email=user.email,
         profile_pic_url=user.profile_pic_url, phone=user.phone, role=role_label,
         has_password=bool(user.hashed_password), is_verified=user.is_verified,
+        is_phone_verified=bool(getattr(user, "is_phone_verified", False)),
         onboarding_complete=user.onboarding_complete,
         industry=user.industry or (industries[0] if industries else None),
         industries=industries,
@@ -439,6 +440,8 @@ async def _apply_user_update(db: AsyncSession, user: User, body):
             raise HTTPException(status_code=400, detail="Phone must be 10 digits")
         await _check_duplicate(db, email, phone, exclude_id=user.id)
         user.email = email
+        if phone != (user.phone or ""):
+            user.is_phone_verified = False
         user.phone = phone
     if "first_name" in data:
         user.first_name = data["first_name"].strip()
@@ -2009,6 +2012,7 @@ async def get_seeker_detail(user_id: str, db: AsyncSession) -> AdminSeekerDetail
         profile_pic_url=user.profile_pic_url,
         has_password=bool(user.hashed_password),
         is_verified=user.is_verified,
+        is_phone_verified=bool(getattr(user, "is_phone_verified", False)),
         onboarding_complete=user.onboarding_complete,
         is_assessment_done=user.is_assessment_done or False,
         is_first_login=user.is_first_login,
@@ -2464,6 +2468,7 @@ async def get_provider_detail(user_id: str, db: AsyncSession) -> AdminProviderDe
         profile_pic_url=user.profile_pic_url,
         has_password=bool(user.hashed_password),
         is_verified=user.is_verified,
+        is_phone_verified=bool(getattr(user, "is_phone_verified", False)),
         onboarding_complete=user.onboarding_complete,
         is_first_login=user.is_first_login,
         welcome_email_status=user.welcome_email_status,
@@ -2598,6 +2603,45 @@ async def delete_provider(
         source_portal="job_portal",
     )
     await _hard_delete_user(db, user)
+
+
+async def set_user_phone_verified(
+    user_id: str,
+    role: UserRole,
+    is_phone_verified: bool,
+    db: AsyncSession,
+    actor: Optional[User] = None,
+) -> AdminUserOut:
+    """Manually mark or unmark a seeker/provider phone number as verified."""
+    user = await _get_role_user(db, user_id, role)
+    if is_phone_verified and not (user.phone or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot verify phone: user does not have a phone number",
+        )
+    user.is_phone_verified = is_phone_verified
+    entity_type = role.value
+    entity_name = (
+        user.company_name or _user_display_name(user)
+        if role == UserRole.provider
+        else _user_display_name(user)
+    )
+    status_label = "verified" if is_phone_verified else "unverified"
+    from app.shared.services.audit_service import log_audit_event
+    await log_audit_event(
+        db,
+        actor,
+        action="UPDATE",
+        entity_type=entity_type,
+        entity_id=str(user.id),
+        entity_name=entity_name,
+        description=f"Marked phone {status_label} for {entity_type} '{entity_name}' ({user.phone or user.email})",
+        changes={"is_phone_verified": is_phone_verified},
+        source_portal="job_portal",
+    )
+    await db.commit()
+    await db.refresh(user)
+    return _user_to_admin_out(user, entity_type)
 
 
 async def set_provider_password(

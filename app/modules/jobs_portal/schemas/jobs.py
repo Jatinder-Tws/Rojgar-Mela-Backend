@@ -550,3 +550,19 @@ class ApplyInsightWarningOut(BaseModel):
 class ApplyInsightsResponse(BaseModel):
     warnings: List[ApplyInsightWarningOut]
     source: str = "heuristic"
+
+
+class PublicShortlistCandidateOut(BaseModel):
+    initials: str
+    name: str
+    address: str = ""
+    experience: str = ""
+    skills: List[str] = []
+    match_score: int = 0
+
+
+class PublicHiringShortlistPreviewOut(BaseModel):
+    job_title: str
+    applicants_count: int
+    top_percent: int
+    candidates: List[PublicShortlistCandidateOut] = []
