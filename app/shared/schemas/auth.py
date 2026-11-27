@@ -61,6 +61,9 @@ class RegisterRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_role_fields(self) -> "RegisterRequest":
+        if not self.phone:
+            raise ValueError("Phone number is required")
+
         if self.role == "provider":
             if not self.company_name:
                 raise ValueError("Company name is required")
@@ -69,8 +72,6 @@ class RegisterRequest(BaseModel):
         name = (self.full_name or f"{self.first_name or ''} {self.last_name or ''}").strip()
         if not name:
             raise ValueError("Full name is required")
-        if not self.phone:
-            raise ValueError("Phone number is required")
         if not self.work_status:
             raise ValueError("Work status is required")
         if self.work_status == "fresher" and not self.current_city:

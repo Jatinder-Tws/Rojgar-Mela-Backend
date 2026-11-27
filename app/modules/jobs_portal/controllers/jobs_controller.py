@@ -714,6 +714,7 @@ async def get_public_hiring_shortlist_preview(db: AsyncSession):
     )
     match_count_sq = (
         select(Match.job_id, func.count(Match.id).label("match_count"))
+        .where(Match.score > 0)
         .group_by(Match.job_id)
         .subquery()
     )
@@ -762,18 +763,18 @@ async def get_public_hiring_shortlist_preview(db: AsyncSession):
         Match.score,
     )
 
-    # Top 4 applicants for this job, ordered by AI match score (then latest applied)
+    # Top 4 applicants for this job with a positive AI match score, ordered highest % first
     rows = (
         await db.execute(
             select(*candidate_cols)
             .join(Application, Application.seeker_id == User.id)
             .outerjoin(Portfolio, Portfolio.user_id == User.id)
-            .outerjoin(
+            .join(
                 Match,
                 (Match.job_id == job_id) & (Match.seeker_id == User.id),
             )
-            .where(Application.job_id == job_id)
-            .order_by(desc(Match.score).nulls_last(), desc(Application.applied_at))
+            .where(Application.job_id == job_id, Match.score > 0)
+            .order_by(desc(Match.score), desc(Application.applied_at))
             .limit(4)
         )
     ).all()
@@ -784,7 +785,7 @@ async def get_public_hiring_shortlist_preview(db: AsyncSession):
             select(*candidate_cols)
             .join(Match, Match.seeker_id == User.id)
             .outerjoin(Portfolio, Portfolio.user_id == User.id)
-            .where(Match.job_id == job_id)
+            .where(Match.job_id == job_id, Match.score > 0)
         )
         if seen_ids:
             extra_q = extra_q.where(User.id.notin_(seen_ids))
@@ -820,6 +821,12 @@ async def get_public_hiring_shortlist_preview(db: AsyncSession):
                 match_score=max(0, min(100, int(round(score)))) if score is not None else 0,
             )
         )
+
+    candidates = sorted(
+        [c for c in candidates if c.match_score > 0],
+        key=lambda c: c.match_score,
+        reverse=True,
+    )[:4]
 
     if applicants_count > 0 and candidates:
         top_percent = max(1, min(100, round((len(candidates) / applicants_count) * 100)))

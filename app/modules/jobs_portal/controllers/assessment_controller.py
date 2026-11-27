@@ -231,8 +231,19 @@ async def get_result(session_id: str, db: AsyncSession) -> AssessmentResult:
 async def check_phone(phone: str, db: AsyncSession) -> dict:
     user = await _user_by_phone(phone, db)
     if user:
-        return {"exists": True, "first_name": user.first_name, "last_name": user.last_name, "email": user.email}
-    return {"exists": False}
+        can_reclaim = (
+            not bool(user.is_verified)
+            and getattr(user, "account_origin", None) == "self"
+        )
+        return {
+            "exists": True,
+            "is_verified": bool(user.is_verified),
+            "can_reclaim": can_reclaim,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "email": user.email,
+        }
+    return {"exists": False, "is_verified": False, "can_reclaim": False}
 
 
 async def get_by_user(user_id: str, db: AsyncSession):

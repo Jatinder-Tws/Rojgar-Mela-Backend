@@ -436,6 +436,7 @@ async def _record_transaction(
     transaction_reference: Optional[str] = None,
     bank_name: Optional[str] = None,
     notes: Optional[str] = None,
+    collected_date: Optional[str] = None,
     created_by_id: Optional[str] = None,
 ) -> TrainingPortalTransaction:
     row = TrainingPortalTransaction(
@@ -457,6 +458,7 @@ async def _record_transaction(
         batch_id=enrollment.batch_id,
         batch_name=enrollment.batch_name,
         notes=notes,
+        collected_date=collected_date,
         created_by_id=created_by_id,
     )
     db.add(row)
@@ -2003,6 +2005,7 @@ async def record_offline_payment(
             transaction_reference=body.transaction_reference,
             bank_name=body.bank_name,
             notes=body.notes or default_notes,
+            collected_date=body.date or None,
             created_by_id=current_user.id,
         )
     await log_audit_event(
@@ -2155,6 +2158,7 @@ async def record_refund(
         status="completed",
         provider="razorpay" if body.refund_mode == "gateway" else "offline",
         notes=refund_note,
+        collected_date=refund_date,
         created_by_id=current_user.id,
     )
     await log_audit_event(

@@ -526,6 +526,7 @@ class PortalTransactionOut(BaseModel):
     batch_id: Optional[str] = None
     batch_name: Optional[str] = None
     notes: Optional[str] = None
+    collected_date: Optional[str] = None
     created_by_id: Optional[str] = None
     recorded_by: Optional[str] = None
     created_at: datetime

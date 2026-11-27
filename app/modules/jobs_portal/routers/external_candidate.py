@@ -284,6 +284,7 @@ async def public_job_filter_facets(
     salary_max: int = Query(50, ge=0),
     work_mode: str | None = Query(None),
     work_type: str | None = Query(None),
+    engagement: str | None = Query(None),
     work_shift: str | None = Query(None),
     education: str | None = Query(None),
     english: str | None = Query(None),
@@ -295,6 +296,7 @@ async def public_job_filter_facets(
     """Filter option counts for public job search sidebar."""
     modes = [m.strip() for m in work_mode.split(",") if m.strip()] if work_mode else []
     types = [t.strip() for t in work_type.split(",") if t.strip()] if work_type else []
+    eng_types = [e.strip() for e in engagement.split(",") if e.strip()] if engagement else []
     shifts = [s.strip() for s in work_shift.split(",") if s.strip()] if work_shift else []
     edu = [e.strip() for e in education.split(",") if e.strip()] if education else []
     eng = [e.strip() for e in english.split(",") if e.strip()] if english else []
@@ -309,6 +311,7 @@ async def public_job_filter_facets(
         salary_max=salary_max,
         work_modes=modes,
         work_types=types,
+        engagement=eng_types,
         work_shifts=shifts,
         education=edu,
         english=eng,
@@ -330,6 +333,7 @@ async def get_public_jobs(
     salary_max: int = Query(50, ge=0),
     work_mode: str | None = Query(None),
     work_type: str | None = Query(None),
+    engagement: str | None = Query(None),
     work_shift: str | None = Query(None),
     department: str | None = Query(None),
     education: str | None = Query(None),
@@ -344,6 +348,7 @@ async def get_public_jobs(
     """Paginated public job search with filters."""
     modes = [m.strip() for m in work_mode.split(",") if m.strip()] if work_mode else []
     types = [t.strip() for t in work_type.split(",") if t.strip()] if work_type else []
+    eng_types = [e.strip() for e in engagement.split(",") if e.strip()] if engagement else []
     shifts = [s.strip() for s in work_shift.split(",") if s.strip()] if work_shift else []
     edu = [e.strip() for e in education.split(",") if e.strip()] if education else []
     eng = [e.strip() for e in english.split(",") if e.strip()] if english else []
@@ -361,6 +366,7 @@ async def get_public_jobs(
         salary_max=salary_max,
         work_modes=modes,
         work_types=types,
+        engagement=eng_types,
         work_shifts=shifts,
         department=department,
         education=edu,

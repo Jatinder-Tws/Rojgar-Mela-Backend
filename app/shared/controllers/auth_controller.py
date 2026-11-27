@@ -97,14 +97,16 @@ async def register(
     resume_file=None,
     registration_ip: str | None = None,
 ) -> RegisterResponse:
-    # OR(email, phone) can match different rows — use limit(1), never scalar_one*.
     duplicate_filters = [func.lower(User.email) == str(body.email).strip().lower()]
     if body.phone:
         duplicate_filters.append(User.phone == body.phone)
-    existing_id = await db.scalar(
-        select(User.id).where(or_(*duplicate_filters)).limit(1)
+    matched_users = list(
+        (await db.execute(select(User).where(or_(*duplicate_filters)))).scalars().all()
     )
-    if existing_id:
+    if any(
+        u.is_verified or getattr(u, "account_origin", None) != "self"
+        for u in matched_users
+    ):
         raise HTTPException(
             status_code=409, detail="An account with this email or phone already exists"
         )
@@ -113,7 +115,7 @@ async def register(
         first_name = body.company_name or ""
         last_name = ""
         company_name = body.company_name
-        phone = None
+        phone = body.phone
         experience = None
         preferred_locations = None
     else:
@@ -124,24 +126,49 @@ async def register(
         experience = body.work_status
         preferred_locations = [body.current_city.strip()] if body.current_city and body.current_city.strip() else None
 
-    user = User(
-        first_name=first_name,
-        last_name=last_name,
-        email=body.email,
-        phone=phone,
-        role=body.role,
-        company_name=company_name,
-        experience=experience,
-        preferred_locations=preferred_locations,
-        registration_ip=registration_ip,
-        is_verified=False,
-        onboarding_complete=False,
-        is_assessment_done=(body.role == "seeker"),
-        hashed_password=await async_hash_password(body.password),
-        account_origin="self",
-    )
+    hashed_pw = await async_hash_password(body.password)
 
-    db.add(user)
+    if matched_users:
+        # Re-claim abandoned unverified self-signup (e.g. email typo or dropped OTP flow).
+        user = matched_users[0]
+        for extra_user in matched_users[1:]:
+            await db.delete(extra_user)
+        if len(matched_users) > 1:
+            await db.flush()
+
+        user.first_name = first_name
+        user.last_name = last_name
+        user.email = body.email
+        user.phone = phone
+        user.role = body.role
+        user.company_name = company_name
+        user.experience = experience
+        user.preferred_locations = preferred_locations
+        user.registration_ip = registration_ip
+        user.is_verified = False
+        user.onboarding_complete = False
+        user.is_assessment_done = body.role == "seeker"
+        user.hashed_password = hashed_pw
+        user.account_origin = "self"
+    else:
+        user = User(
+            first_name=first_name,
+            last_name=last_name,
+            email=body.email,
+            phone=phone,
+            role=body.role,
+            company_name=company_name,
+            experience=experience,
+            preferred_locations=preferred_locations,
+            registration_ip=registration_ip,
+            is_verified=False,
+            onboarding_complete=False,
+            is_assessment_done=(body.role == "seeker"),
+            hashed_password=hashed_pw,
+            account_origin="self",
+        )
+        db.add(user)
+
     await db.flush()
 
     if body.role == "seeker":
@@ -152,7 +179,14 @@ async def register(
                 parts = [p.strip() for p in body.current_city.split(",") if p.strip()]
                 c_name = parts[0] if len(parts) >= 1 else None
                 s_name = parts[1] if len(parts) >= 2 else None
-            db.add(Portfolio(user_id=user.id, city=c_name, state=s_name))
+            existing_portfolio = await db.scalar(
+                select(Portfolio).where(Portfolio.user_id == user.id)
+            )
+            if existing_portfolio:
+                existing_portfolio.city = c_name
+                existing_portfolio.state = s_name
+            else:
+                db.add(Portfolio(user_id=user.id, city=c_name, state=s_name))
         except Exception as e:
             print(f"[REGISTER] Initial portfolio seeding skipped: {e}")
 

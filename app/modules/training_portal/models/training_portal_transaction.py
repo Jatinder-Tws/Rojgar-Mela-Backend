@@ -38,5 +38,6 @@ class TrainingPortalTransaction(Base):
     batch_id = Column(String(50), nullable=True)
     batch_name = Column(String(200), nullable=True)
     notes = Column(Text, nullable=True)
+    collected_date = Column(String(20), nullable=True)
     created_by_id = Column(UUID(as_uuid=False), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)

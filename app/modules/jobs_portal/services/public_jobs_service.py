@@ -5,7 +5,7 @@ import re
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
-from sqlalchemy import Select, desc, func, or_, select
+from sqlalchemy import Select, and_, desc, func, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -239,13 +239,10 @@ def _apply_work_modes(query: Select, modes: list[str]) -> Select:
         m = mode.lower()
         if "home" in m or m == "wfh":
             conditions.append(JobPosting.job_type == JobType.wfh)
+        elif "hybrid" in m:
+            conditions.append(JobPosting.job_type == JobType.hybrid)
         elif "office" in m:
-            conditions.append(
-                or_(
-                    JobPosting.job_type == JobType.in_office,
-                    JobPosting.job_type == JobType.hybrid,
-                )
-            )
+            conditions.append(JobPosting.job_type == JobType.in_office)
         elif "field" in m:
             conditions.append(func.lower(JobPosting.title).like("%field%"))
     if conditions:
@@ -258,15 +255,24 @@ def _apply_work_types(query: Select, types: list[str]) -> Select:
         return query
     conditions = []
     for t in types:
-        if "part" in t.lower():
-            conditions.append(JobPosting.employment_type == "part_time")
-        elif "full" in t.lower():
+        val = (t or "").strip().lower()
+        if "part" in val:
+            conditions.append(
+                or_(
+                    JobPosting.employment_type == "part_time",
+                    JobPosting.employment_type == "both",
+                )
+            )
+        elif "full" in val:
             conditions.append(
                 or_(
                     JobPosting.employment_type == "full_time",
+                    JobPosting.employment_type == "both",
                     JobPosting.employment_type.is_(None),
                 )
             )
+        elif val in ("contract", "internship", "freelance"):
+            conditions.append(JobPosting.employment_type == val)
     if conditions:
         return query.filter(or_(*conditions))
     return query
@@ -358,6 +364,14 @@ _EDUCATION_KEYWORDS = {
     "post_graduate": ["post graduate", "postgraduate", "master", "m.a", "m.com", "mba", "m.tech"],
     "phd": ["phd", "doctorate"],
     "iti": ["iti"],
+    "any": ["education: any", "any qualification", "any graduate"],
+}
+
+_ENGAGEMENT_KEYWORDS = {
+    "permanent": ["permanent"],
+    "temporary": ["temporary"],
+    "contractual": ["contractual", "contract"],
+    "consultant": ["consultant"],
 }
 
 _ENGLISH_KEYWORDS = {
@@ -393,6 +407,24 @@ _INDUSTRY_KEYWORDS = {
 }
 
 
+def _text_matches_keywords(keywords: list[str]):
+    desc_lower = func.lower(func.coalesce(JobPosting.description, ""))
+    title_lower = func.lower(func.coalesce(JobPosting.title, ""))
+    conds = []
+    for kw in keywords:
+        conds.append(desc_lower.like(f"%{kw}%"))
+        conds.append(title_lower.like(f"%{kw}%"))
+    return or_(*conds)
+
+
+def _job_gender_flags(job: JobPosting) -> tuple[bool, bool]:
+    text = f"{job.title or ''} {job.description or ''}".lower()
+    open_both = any(kw in text for kw in _GENDER_KEYWORDS["any"])
+    male_only = not open_both and any(kw in text for kw in _GENDER_KEYWORDS["male"])
+    female_only = not open_both and any(kw in text for kw in _GENDER_KEYWORDS["female"])
+    return male_only, female_only
+
+
 def _apply_keyword_filters(
     query: Select,
     *,
@@ -400,6 +432,7 @@ def _apply_keyword_filters(
     english: Optional[list[str]] = None,
     gender: Optional[list[str]] = None,
     industries: Optional[list[str]] = None,
+    engagement: Optional[list[str]] = None,
 ) -> Select:
     def _match_keywords(keyword_map: dict[str, list[str]], values: list[str]) -> list:
         conds = []
@@ -418,9 +451,20 @@ def _apply_keyword_filters(
         if conds:
             query = query.filter(or_(*conds))
     if gender:
-        conds = _match_keywords(_GENDER_KEYWORDS, gender)
-        if conds:
-            query = query.filter(or_(*conds))
+        open_both_sql = _text_matches_keywords(_GENDER_KEYWORDS["any"])
+        male_only_sql = and_(_text_matches_keywords(_GENDER_KEYWORDS["male"]), not_(open_both_sql))
+        female_only_sql = and_(_text_matches_keywords(_GENDER_KEYWORDS["female"]), not_(open_both_sql))
+        gender_conds = []
+        for g in gender:
+            key = (g or "").strip().lower()
+            if key == "any":
+                gender_conds.append(and_(not_(male_only_sql), not_(female_only_sql)))
+            elif key == "male":
+                gender_conds.append(not_(female_only_sql))
+            elif key == "female":
+                gender_conds.append(not_(male_only_sql))
+        if gender_conds:
+            query = query.filter(or_(*gender_conds))
     if industries:
         conds = []
         for val in industries:
@@ -428,6 +472,10 @@ def _apply_keyword_filters(
                 conds.append(func.lower(JobPosting.industry).like(f"%{kw}%"))
                 conds.append(func.lower(JobPosting.title).like(f"%{kw}%"))
                 conds.append(func.lower(JobPosting.description).like(f"%{kw}%"))
+        if conds:
+            query = query.filter(or_(*conds))
+    if engagement:
+        conds = _match_keywords(_ENGAGEMENT_KEYWORDS, engagement)
         if conds:
             query = query.filter(or_(*conds))
     return query
@@ -451,6 +499,7 @@ async def get_job_filter_facets(
     salary_max: int = 50,
     work_modes: Optional[list[str]] = None,
     work_types: Optional[list[str]] = None,
+    engagement: Optional[list[str]] = None,
     work_shifts: Optional[list[str]] = None,
     education: Optional[list[str]] = None,
     english: Optional[list[str]] = None,
@@ -466,6 +515,7 @@ async def get_job_filter_facets(
         salary_max=salary_max,
         work_modes=work_modes,
         work_types=work_types,
+        engagement=engagement,
         work_shifts=work_shifts,
         education=education,
         english=english,
@@ -479,6 +529,7 @@ async def get_job_filter_facets(
     facets: dict[str, dict[str, int]] = {
         "work_mode": {},
         "work_type": {},
+        "engagement": {},
         "work_shift": {},
         "education": {},
         "english": {},
@@ -488,15 +539,21 @@ async def get_job_filter_facets(
 
     for job in jobs:
         jt = job.job_type.value if job.job_type else ""
-        if jt in ("wfh",):
+        if jt == "wfh":
             facets["work_mode"]["wfh"] = facets["work_mode"].get("wfh", 0) + 1
-        elif jt in ("in_office", "hybrid"):
+        elif jt == "hybrid":
+            facets["work_mode"]["hybrid"] = facets["work_mode"].get("hybrid", 0) + 1
+        elif jt == "in_office":
             facets["work_mode"]["office"] = facets["work_mode"].get("office", 0) + 1
         if "field" in (job.title or "").lower():
             facets["work_mode"]["field"] = facets["work_mode"].get("field", 0) + 1
 
-        et = job.employment_type or "full_time"
-        facets["work_type"][et] = facets["work_type"].get(et, 0) + 1
+        et = (job.employment_type or "full_time").strip().lower()
+        if et == "both":
+            facets["work_type"]["full_time"] = facets["work_type"].get("full_time", 0) + 1
+            facets["work_type"]["part_time"] = facets["work_type"].get("part_time", 0) + 1
+        else:
+            facets["work_type"][et] = facets["work_type"].get(et, 0) + 1
 
         sh = job.shift or "day"
         facets["work_shift"][sh] = facets["work_shift"].get(sh, 0) + 1
@@ -507,12 +564,23 @@ async def get_job_filter_facets(
         for key in _ENGLISH_KEYWORDS:
             if _job_matches_keywords(job, _ENGLISH_KEYWORDS, key):
                 facets["english"][key] = facets["english"].get(key, 0) + 1
-        for key in _GENDER_KEYWORDS:
-            if _job_matches_keywords(job, _GENDER_KEYWORDS, key):
-                facets["gender"][key] = facets["gender"].get(key, 0) + 1
+
+        male_only, female_only = _job_gender_flags(job)
+        if not male_only and not female_only:
+            facets["gender"]["any"] = facets["gender"].get("any", 0) + 1
+        if not female_only:
+            facets["gender"]["male"] = facets["gender"].get("male", 0) + 1
+        if not male_only:
+            facets["gender"]["female"] = facets["gender"].get("female", 0) + 1
+
         for key in _INDUSTRY_KEYWORDS:
             if _job_matches_keywords(job, _INDUSTRY_KEYWORDS, key):
                 facets["industry"][key] = facets["industry"].get(key, 0) + 1
+        details = job.posting_details if isinstance(job.posting_details, dict) else {}
+        eng_val = (details.get("engagement") or "").strip().lower()
+        for key in _ENGAGEMENT_KEYWORDS:
+            if eng_val == key or _job_matches_keywords(job, _ENGAGEMENT_KEYWORDS, key):
+                facets["engagement"][key] = facets["engagement"].get(key, 0) + 1
 
     return facets
 
@@ -543,6 +611,7 @@ def build_public_jobs_query(
     salary_max: int = 50,
     work_modes: Optional[list[str]] = None,
     work_types: Optional[list[str]] = None,
+    engagement: Optional[list[str]] = None,
     work_shifts: Optional[list[str]] = None,
     department: Optional[str] = None,
     education: Optional[list[str]] = None,
@@ -584,6 +653,7 @@ def build_public_jobs_query(
         english=english,
         gender=gender,
         industries=industries,
+        engagement=engagement,
     )
 
     if sort == "date":
@@ -606,6 +676,7 @@ async def search_public_jobs(
     salary_max: int = 50,
     work_modes: Optional[list[str]] = None,
     work_types: Optional[list[str]] = None,
+    engagement: Optional[list[str]] = None,
     work_shifts: Optional[list[str]] = None,
     department: Optional[str] = None,
     education: Optional[list[str]] = None,
@@ -629,6 +700,7 @@ async def search_public_jobs(
         salary_max=salary_max,
         work_modes=work_modes,
         work_types=work_types,
+        engagement=engagement,
         work_shifts=work_shifts,
         department=department,
         education=education,

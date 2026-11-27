@@ -279,6 +279,7 @@ def transaction_to_out(
         batch_id=row.batch_id,
         batch_name=row.batch_name,
         notes=row.notes,
+        collected_date=row.collected_date,
         created_by_id=created_by_id,
         recorded_by=recorded_by,
         created_at=row.created_at,
